@@ -1,0 +1,18 @@
+account_name,website,employees,industry,phone,annual_revenue,recordId,action
+,testaccount.com,,Healthcare,555-1234,,d5b29316-1b67-4ef2-872c-5f51ed082ac7,INSERTED
+test,http://example.com,,Finance,6280208034,,fecae4b1-6666-47fa-b5df-3613b48bcbb9,INSERTED
+,,,,,,b2fa5648-6c3b-4662-877c-9ef177a5286d,INSERTED
+Test Account for A2,,,Technology,,,431765c4-6692-4fd8-a2b4-1838d3b7912f,INSERTED
+Test Account for A2,,,Technology,,,96b1bcf6-916b-450e-840f-a277bef49caa,INSERTED
+Test Account for A2,,,Technology,,,194a6656-eddd-4950-a68a-9a9fe2383c2c,INSERTED
+Test Account for A2,,,Technology,,,a227ca6e-81ab-486e-bc44-18e8f72305fa,INSERTED
+,,,,,,8621294d-f5d1-46a4-82f5-66a60b4b196e,INSERTED
+,,,,,,bc5e8c96-e8f2-44ae-bfd7-2d971fec77fd,INSERTED
+,,,,,,dc29c9c4-29b0-4e16-ae12-a5e29dbef8c4,INSERTED
+,,,,,,7c8dd29c-724a-4db6-b598-61ecabe59bf0,INSERTED
+Test Account for A2,,,Technology,,,efcabea9-1913-4fbf-b1d9-fc7e03b11f5a,INSERTED
+Test Account for A2,,,Technology,,,cdd3f20a-2085-431f-bc8a-1c1f0c496915,INSERTED
+Test Account for A2,,,Technology,,,7843b5c0-14d1-4cee-9e88-3a5b454740ac,INSERTED
+,,,,,,490295a0-fe33-4237-a9b6-2979b89a23af,INSERTED
+Test Account for A2,,,Technology,,,77e975c5-9b60-41c5-a6ae-0fce1dd7424f,INSERTED
+Aniket Test,,,,,,39aa0ce9-c1d9-4a61-bf35-675def249536,INSERTED

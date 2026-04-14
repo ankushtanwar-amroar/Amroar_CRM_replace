@@ -1,0 +1,3 @@
+FirstName,LastName,Email,Company,Phone,Status,errorCode,errorMessage,errorField
+Alice,Brown,alice.brown@bigco.com,BigCo Updated,555-4001,Qualified,AMBIGUOUS_MATCH,Multiple records (2) matched upsert key,email
+Charlie,Wilson,charlie.w@newtech.com,NewTech Updated,555-4002,Qualified,AMBIGUOUS_MATCH,Multiple records (2) matched upsert key,email

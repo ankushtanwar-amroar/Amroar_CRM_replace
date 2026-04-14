@@ -1,0 +1,6 @@
+FirstName,LastName,Email,Company,Phone,Status,recordId,action
+John,Doe,john.doe@example.com,Acme Corp,555-1001,New,f7a14521-0b30-41fe-a7b6-a3852bb4e668,INSERTED
+Jane,Smith,jane.smith@techcorp.com,TechCorp,555-1002,New,8e42e115-b0e8-42b7-915a-16d785e7df27,INSERTED
+Bob,Johnson,bob.j@startup.io,Startup Inc,555-1003,New,82cb5b63-197d-499b-b3fc-28ff3536c3ec,INSERTED
+Alice,Brown,alice.brown@bigco.com,BigCo,555-1004,New,463d5251-2d0f-4600-85b4-764d6b31f489,INSERTED
+Charlie,Wilson,charlie.w@newtech.com,NewTech,555-1005,New,f2b5cfb5-eecc-4c41-9c6c-d4f4329b389f,INSERTED

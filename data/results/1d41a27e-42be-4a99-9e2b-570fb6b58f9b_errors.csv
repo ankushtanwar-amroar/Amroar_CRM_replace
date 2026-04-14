@@ -1,0 +1,3 @@
+FirstName,LastName,Email,Company,Status,errorCode,errorMessage,errorField
+John,Doe,john.doe@example.com,Acme Corp,Converted,AMBIGUOUS_MATCH,Multiple records (2) matched upsert key,"email, company"
+Jane,Smith,jane.smith@techcorp.com,TechCorp,Converted,AMBIGUOUS_MATCH,Multiple records (2) matched upsert key,"email, company"

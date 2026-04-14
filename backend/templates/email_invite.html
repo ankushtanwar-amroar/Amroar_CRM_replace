@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>You've been invited</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 30px; text-align: center; border-radius: 10px 10px 0 0;">
+        <h1 style="color: white; margin: 0;">You're Invited!</h1>
+    </div>
+    
+    <div style="background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px;">
+        <p style="font-size: 16px;">Hi <strong>{{first_name}}</strong>,</p>
+        
+        <p style="font-size: 16px;">
+            <strong>{{inviter_name}}</strong> has invited you to join <strong>{{company_name}}</strong>'s CRM workspace.
+        </p>
+        
+        <p style="font-size: 16px;">
+            Click the button below to set your password and get started:
+        </p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <a href="{{accept_url}}" 
+               style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                      color: white; 
+                      padding: 15px 40px; 
+                      text-decoration: none; 
+                      border-radius: 5px; 
+                      font-weight: bold; 
+                      display: inline-block;">
+                Accept Invitation
+            </a>
+        </div>
+        
+        <p style="font-size: 14px; color: #666;">
+            Or copy and paste this link into your browser:<br>
+            <a href="{{accept_url}}" style="color: #667eea; word-break: break-all;">{{accept_url}}</a>
+        </p>
+        
+        <p style="font-size: 14px; color: #999; margin-top: 30px;">
+            This invitation expires in 7 days.
+        </p>
+        
+        <p style="font-size: 14px; color: #999;">
+            If you didn't expect this invitation, you can safely ignore this email.
+        </p>
+    </div>
+    
+    <div style="text-align: center; margin-top: 20px; color: #999; font-size: 12px;">
+        <p>{{company_name}} CRM Team</p>
+    </div>
+</body>
+</html>

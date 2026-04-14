@@ -1,0 +1,3 @@
+Email,Status,Phone,errorCode,errorMessage,errorField
+duplicate@example.com,Updated,555-9990,AMBIGUOUS_MATCH,Multiple records (2) matched update key,email
+duplicate@example.com,Updated,555-9991,AMBIGUOUS_MATCH,Multiple records (2) matched update key,email

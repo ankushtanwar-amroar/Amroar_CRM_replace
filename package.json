@@ -1,0 +1,11 @@
+{
+  "name": "lead-processing-simulation",
+  "version": "1.0.0",
+  "description": "Simulation of bulk lead processing flow",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "",
+  "license": "ISC"
+}

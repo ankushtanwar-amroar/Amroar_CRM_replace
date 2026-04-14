@@ -1,0 +1,2 @@
+FirstName,LastName,Email,Company,Status,recordId,action,matchedBy
+Jane,Smith,jane.smith@techcorp.com,TechCorp,Converted,4cb901d4-b753-4992-b843-c956030f9096,UPDATED,email+company

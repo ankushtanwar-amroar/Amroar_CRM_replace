@@ -1,0 +1,6 @@
+first_name,last_name,email,phone,company,status,recordId,action
+John,Smith,john.smith@example.com,555-0101,Acme Inc,New,faca7e87-703e-4f25-a54d-1138cb99aad6,INSERTED
+Jane,Doe,jane.doe@example.com,555-0102,TechCorp,Working,cd91f96d-3548-4291-a68a-b164bd3225aa,INSERTED
+Bob,Johnson,bob.johnson@example.com,555-0103,DataFlow,Qualified,384ad72a-9e28-497c-8067-7be313537ef7,INSERTED
+Alice,Williams,alice.williams@example.com,555-0104,CloudBase,Contacted,b0662154-121f-40c7-ab80-d9469ac2b17f,INSERTED
+Mike,Brown,,555-0105,WebStart,New,ca29465d-0709-4238-bc93-04e57a0b144c,INSERTED

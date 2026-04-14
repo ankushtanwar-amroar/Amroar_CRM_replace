@@ -1,0 +1,6 @@
+FirstName,LastName,Email,Company,recordId,action
+John,Doe,john.doe@example.com,Acme Corp,0e4b4595-6df2-4d21-8011-3c1589012e5b,inserted
+Jane,Smith,jane.smith@techcorp.com,TechCorp Inc,161dbcf5-df31-480f-8d11-5c422611d7d4,inserted
+Michael,Johnson,michael.johnson@startup.io,StartupIO,b0ed3bb0-02a5-4a56-97f1-063c08acc3ef,inserted
+Sarah,Williams,sarah.williams@enterprise.com,Enterprise Solutions,1e71e95f-6b0d-4ad4-991a-c6ba67202ea5,inserted
+David,Brown,david.brown@consulting.biz,Brown Consulting,cb3ff4c1-f871-430c-ae05-aa7311cd5ecf,inserted

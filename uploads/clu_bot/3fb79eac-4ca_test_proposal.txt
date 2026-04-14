@@ -1,0 +1,1 @@
+This is a test pricing proposal for Acme Corp. Product A costs 500 per unit. Product B costs 1200 per unit. Volume discount: 15% for orders over 100 units.

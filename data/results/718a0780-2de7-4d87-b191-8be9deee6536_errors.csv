@@ -1,0 +1,2 @@
+Email,Status,Phone,errorCode,errorMessage,errorField
+john.doe@example.com,Contacted,555-2001,AMBIGUOUS_MATCH,Multiple records (2) matched update key,email

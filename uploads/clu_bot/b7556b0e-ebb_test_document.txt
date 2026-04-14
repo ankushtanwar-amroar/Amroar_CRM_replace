@@ -1,0 +1,13 @@
+
+    Test Document for CLU-BOT Phase 4
+    
+    This is a sample document containing information about:
+    - Product pricing: $100 per unit
+    - Discount rates: 10% for bulk orders
+    - Contact: sales@example.com
+    
+    Key metrics:
+    - Q1 Revenue: $50,000
+    - Q2 Revenue: $75,000
+    - Total customers: 150
+    

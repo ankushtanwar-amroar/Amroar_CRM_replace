@@ -1,0 +1,3 @@
+FirstName,LastName,Email,Company,Phone,Status,recordId,action,matchedBy
+Jane,Smith Updated,jane.smith@techcorp.com,TechCorp,555-4002,Qualified,4cb901d4-b753-4992-b843-c956030f9096,UPDATED,email
+New,Lead,new.lead@newcompany.com,New Company,555-4003,New,9aae3e86-5bf9-4bff-93aa-5b8fbf8556d3,INSERTED,

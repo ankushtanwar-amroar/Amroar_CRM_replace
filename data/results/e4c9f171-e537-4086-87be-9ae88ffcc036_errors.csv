@@ -1,0 +1,4 @@
+Email,Status,Phone,errorCode,errorMessage,errorField
+john.doe@example.com,Contacted,555-2001,AMBIGUOUS_MATCH,Multiple records (3) matched update key,email
+jane.smith@techcorp.com,Qualified,555-2002,AMBIGUOUS_MATCH,Multiple records (2) matched update key,email
+bob.j@startup.io,Contacted,555-2003,AMBIGUOUS_MATCH,Multiple records (2) matched update key,email

@@ -1,0 +1,8 @@
+first_name,last_name,email,phone,company,status,errorRow,errorField,errorCode,errorMessage,errorValue
+John,Smith,john.smith@example.com,555-0101,Acme Inc,New,2,phone,INVALID_PHONE,Invalid phone format: 555-0101,555-0101
+,Doe,jane.doe@example.com,555-0102,TechCorp,Working,3,first_name,REQUIRED_FIELD_MISSING,Required field first_name is missing,nan
+,Doe,jane.doe@example.com,555-0102,TechCorp,Working,3,phone,INVALID_PHONE,Invalid phone format: 555-0102,555-0102
+Bob,Johnson,invalid-email,555-0103,DataFlow,Qualified,4,email,INVALID_EMAIL,Invalid email format: invalid-email,invalid-email
+Bob,Johnson,invalid-email,555-0103,DataFlow,Qualified,4,phone,INVALID_PHONE,Invalid phone format: 555-0103,555-0103
+Alice,,alice@test.com,555-0104,CloudBase,Contacted,5,last_name,REQUIRED_FIELD_MISSING,Required field last_name is missing,nan
+Alice,,alice@test.com,555-0104,CloudBase,Contacted,5,phone,INVALID_PHONE,Invalid phone format: 555-0104,555-0104

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Booking Widget Example</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+      background: #f5f5f5;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    h1 {
+      color: #333;
+      margin-bottom: 20px;
+    }
+    #booking-widget {
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Booking System Widget Demo</h1>
+    <div id="booking-widget"></div>
+  </div>
+
+  <!-- Widget Integration Script -->
+  <script>
+    // This is how clients would embed the booking widget
+    (function() {
+      // Replace with your tenant ID
+      const TENANT_ID = 'your-tenant-id';
+      
+      // Load widget script
+      const script = document.createElement('script');
+      script.src = '/booking-widget.js'; // Path to built widget bundle
+      script.onload = function() {
+        if (window.BookingWidget) {
+          const widget = new window.BookingWidget({
+            tenantId: TENANT_ID,
+            containerId: 'booking-widget',
+            theme: 'light'
+          });
+          widget.mount();
+        }
+      };
+      document.head.appendChild(script);
+    })();
+  </script>
+</body>
+</html>

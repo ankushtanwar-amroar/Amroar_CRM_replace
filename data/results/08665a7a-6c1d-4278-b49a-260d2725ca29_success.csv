@@ -1,0 +1,3 @@
+Email,Status,Phone,recordId,action,matchedBy
+jane.smith@techcorp.com,Qualified,555-2002,8e42e115-b0e8-42b7-915a-16d785e7df27,UPDATED,email
+bob.j@startup.io,Contacted,555-2003,82cb5b63-197d-499b-b3fc-28ff3536c3ec,UPDATED,email

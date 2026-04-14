@@ -1,0 +1,4 @@
+Email,Status,Phone,recordId,action,matchedBy
+bob.j@startup.io,Updated 1,555-7770,257d5115-a495-499e-95ad-0618255052a5,UPDATED,email
+alice.brown@bigco.com,Updated 2,555-7771,6fbbcbc0-1a0c-4688-bfd8-45e26755d932,UPDATED,email
+charlie.w@newtech.com,Updated 3,555-7772,595652a7-726f-4c26-b90e-d9a404912e68,UPDATED,email

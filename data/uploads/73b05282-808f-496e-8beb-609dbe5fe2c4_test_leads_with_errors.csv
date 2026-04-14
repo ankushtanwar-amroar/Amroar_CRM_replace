@@ -1,0 +1,5 @@
+first_name,last_name,email,phone,company,status
+John,Smith,john.smith@example.com,555-0101,Acme Inc,New
+,Doe,jane.doe@example.com,555-0102,TechCorp,Working
+Bob,Johnson,invalid-email,555-0103,DataFlow,Qualified
+Alice,,alice@test.com,555-0104,CloudBase,Contacted
