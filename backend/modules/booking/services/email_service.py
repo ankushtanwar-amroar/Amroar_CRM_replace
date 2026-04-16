@@ -54,7 +54,7 @@ END:VCALENDAR"""
         
         return ics_content
 
-    def get_confirmation_template(self, booking: Dict[str, Any], service: Dict[str, Any], staff: Dict[str, Any], base_url: str = "https://sign-flow-fix-1.preview.emergentagent.com") -> str:
+    def get_confirmation_template(self, booking: Dict[str, Any], service: Dict[str, Any], staff: Dict[str, Any], base_url: str = "https://docflow-crm-fix.preview.emergentagent.com") -> str:
         start = datetime.fromisoformat(str(booking["start_time"])) if isinstance(booking["start_time"], str) else booking["start_time"]
         
         template = f"""

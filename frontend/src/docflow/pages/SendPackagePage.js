@@ -9,6 +9,8 @@ import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import { Badge } from '../../components/ui/badge';
 
+const API_URL = process.env.REACT_APP_BACKEND_URL;
+
 const STEPS = [
   { id: 'delivery', label: 'Delivery Mode', icon: Send },
   { id: 'recipients', label: 'Configure Recipients', icon: Users },
@@ -16,9 +18,9 @@ const STEPS = [
 ];
 
 const ROLE_OPTIONS = [
-  { value: 'SIGN', label: 'Signer', desc: 'Must sign assigned fields' },
-  { value: 'VIEW_ONLY', label: 'Reviewer', desc: 'Review documents and mark as reviewed' },
-  { value: 'APPROVE_REJECT', label: 'Approver', desc: 'Approve or reject the package' },
+  { value: 'SIGN', label: 'Signer', desc: 'Can fill fields and sign document' },
+  { value: 'APPROVE_REJECT', label: 'Approver', desc: 'Can approve or reject (no field editing)' },
+  { value: 'REVIEWER', label: 'Reviewer', desc: 'Can only view and confirm review' },
   { value: 'RECEIVE_COPY', label: 'Receive Copy', desc: 'Gets final output after completion' },
 ];
 
@@ -67,15 +69,19 @@ const SendPackagePage = () => {
   const [loading, setLoading] = useState(true);
 
   const [recipients, setRecipients] = useState([
-    { id: '1', name: '', email: '', role_type: 'SIGN', routing_order: 1 },
+    { id: '1', name: '', email: '', role_type: 'SIGN', routing_order: 1, email_template_id: '' },
   ]);
   const [deliveryMode, setDeliveryMode] = useState('email');
-  const [otpEnabled, setOtpEnabled] = useState(true);
+  const [otpEnabled, setOtpEnabled] = useState(false);
 
   // Field assignment
   const [templateFields, setTemplateFields] = useState({});
   const [fieldAssignments, setFieldAssignments] = useState({});
   const [loadingFields, setLoadingFields] = useState(false);
+
+  // Email templates
+  const [emailTemplates, setEmailTemplates] = useState([]);
+  const [emailTemplatesLoaded, setEmailTemplatesLoaded] = useState(false);
 
   // Public link popup
   const [showPublicLinkDialog, setShowPublicLinkDialog] = useState(false);
@@ -87,6 +93,7 @@ const SendPackagePage = () => {
 
   useEffect(() => {
     loadPackage();
+    loadEmailTemplates();
   }, [packageId]);
 
   const loadPackage = async () => {
@@ -100,6 +107,20 @@ const SendPackagePage = () => {
       navigate('/setup/docflow?tab=packages');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadEmailTemplates = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const resp = await fetch(`${API_URL}/api/docflow/email-templates`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await resp.json();
+      setEmailTemplates(data.templates || []);
+      setEmailTemplatesLoaded(true);
+    } catch {
+      setEmailTemplatesLoaded(true);
     }
   };
 
@@ -130,13 +151,13 @@ const SendPackagePage = () => {
   const addRecipient = () => {
     const maxOrder = recipients.length > 0 ? Math.max(...recipients.map(r => r.routing_order)) : 0;
     setRecipients([...recipients, {
-      id: String(Date.now()), name: '', email: '', role_type: 'SIGN', routing_order: maxOrder + 1,
+      id: String(Date.now()), name: '', email: '', role_type: 'SIGN', routing_order: maxOrder + 1, email_template_id: '',
     }]);
   };
 
   const addParallelRecipient = (order) => {
     setRecipients([...recipients, {
-      id: String(Date.now()), name: '', email: '', role_type: 'SIGN', routing_order: order,
+      id: String(Date.now()), name: '', email: '', role_type: 'SIGN', routing_order: order, email_template_id: '',
     }]);
   };
 
@@ -168,11 +189,13 @@ const SendPackagePage = () => {
     return RECIPIENT_COLORS[idx % RECIPIENT_COLORS.length] || RECIPIENT_COLORS[0];
   };
 
+  const ASSIGNABLE_FIELD_TYPES = ['signature', 'initials', 'text', 'date'];
   const assignmentStats = useMemo(() => {
     let totalFields = 0, assignedFields = 0;
     Object.values(templateFields).forEach(fields => {
-      totalFields += fields.length;
-      fields.forEach(f => { if (fieldAssignments[f.id]) assignedFields++; });
+      const assignable = fields.filter(f => ASSIGNABLE_FIELD_TYPES.includes(f.type));
+      totalFields += assignable.length;
+      assignable.forEach(f => { if (fieldAssignments[f.id]) assignedFields++; });
     });
     return { totalFields, assignedFields, unassigned: totalFields - assignedFields };
   }, [templateFields, fieldAssignments]);
@@ -224,6 +247,7 @@ const SendPackagePage = () => {
           role_type: r.role_type,
           routing_order: r.routing_order,
           assigned_components_map: Object.keys(compMap).length > 0 ? compMap : undefined,
+          email_template_id: r.email_template_id || undefined,
         };
       });
 
@@ -397,6 +421,18 @@ const SendPackagePage = () => {
                               <input type="number" min={1} value={r.routing_order} onChange={(e) => updateRecipient(idx, 'routing_order', parseInt(e.target.value) || 1)}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" data-testid={`recipient-order-${idx}`} />
                             </div>
+                            {emailTemplatesLoaded && emailTemplates.length > 0 && (
+                              <div className="sm:col-span-2">
+                                <label className="block text-xs text-gray-500 mb-1">Email Template <span className="text-gray-400">(optional)</span></label>
+                                <select value={r.email_template_id || ''} onChange={(e) => updateRecipient(idx, 'email_template_id', e.target.value)}
+                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white" data-testid={`recipient-email-template-${idx}`}>
+                                  <option value="">Default (based on role)</option>
+                                  {emailTemplates.map(et => (
+                                    <option key={et.id} value={et.id}>{et.name} — {et.template_type.replace(/_/g, ' ')}</option>
+                                  ))}
+                                </select>
+                              </div>
+                            )}
                           </div>
                         </div>
                       );
@@ -435,7 +471,10 @@ const SendPackagePage = () => {
                 ) : (
                   <div className="space-y-5">
                     {documents.map((doc) => {
-                      const fields = templateFields[doc.template_id] || [];
+                      const allFields = templateFields[doc.template_id] || [];
+                      // Only show signer-dependent fields for assignment (not merge, checkbox, radio)
+                      const ASSIGNABLE_TYPES = ['signature', 'initials', 'text', 'date'];
+                      const fields = allFields.filter(f => ASSIGNABLE_TYPES.includes(f.type));
                       if (fields.length === 0) return (
                         <div key={doc.template_id} className="border border-dashed border-gray-200 rounded-lg p-4">
                           <p className="text-xs text-gray-400 flex items-center gap-2">
@@ -581,7 +620,14 @@ const SendPackagePage = () => {
                               <span className="text-sm text-gray-800">{r.name}</span>
                               {r.email && <span className="text-xs text-gray-400">({r.email})</span>}
                             </div>
-                            <Badge className="bg-indigo-50 text-indigo-700 text-xs">{r.role_type}</Badge>
+                            <div className="flex items-center gap-2">
+                              <Badge className="bg-indigo-50 text-indigo-700 text-xs">{r.role_type}</Badge>
+                              {r.email_template_id && (
+                                <Badge className="bg-purple-50 text-purple-700 text-[10px]">
+                                  {emailTemplates.find(et => et.id === r.email_template_id)?.name || 'Custom Template'}
+                                </Badge>
+                              )}
+                            </div>
                           </div>
                         );
                       })}

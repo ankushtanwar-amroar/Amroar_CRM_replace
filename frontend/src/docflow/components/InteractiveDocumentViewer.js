@@ -103,6 +103,15 @@ const InteractiveDocumentViewer = ({
     
     switch (field.type || field.field_type) {
       case 'text':
+        const textStyle = {
+          fontFamily: field.style?.fontFamily || undefined,
+          fontSize: field.style?.fontSize ? `${field.style.fontSize}px` : undefined,
+          fontWeight: field.style?.fontWeight || undefined,
+          fontStyle: field.style?.fontStyle || undefined,
+          textDecoration: field.style?.textDecoration || undefined,
+          textAlign: field.style?.textAlign || undefined,
+          color: field.style?.color || undefined,
+        };
         return (
           <input
             type="text"
@@ -111,6 +120,7 @@ const InteractiveDocumentViewer = ({
             placeholder={field.defaultValue || field.label || 'Enter text...'}
             disabled={isDisabled}
             className={`w-full h-full px-2 py-1 text-sm border-2 border-blue-400 bg-blue-50 rounded focus:ring-2 focus:ring-blue-400 focus:border-transparent ${disabledStyle}`}
+            style={textStyle}
             title={field.field_disabled ? (field.field_hint || 'Assigned to another recipient') : ''}
             data-testid={`field-${field.id}`}
           />
@@ -183,7 +193,8 @@ const InteractiveDocumentViewer = ({
         const mergeObj = field.merge_object || field.mergeObject || '';
         const mergeField = field.merge_field || field.mergeField || '';
         const fullKey = `${mergeObj}.${mergeField}`;
-        const crmValue = fieldValues[fullKey] || fieldValues[mergeField] || '';
+        const crmValue = fieldValues[fullKey] || fieldValues[mergeField]
+          || externalFieldValues[field.id] || externalFieldValues[fullKey] || externalFieldValues[mergeField] || '';
         const userEnteredValue = fieldValue || fieldValues[`${field.id}_fallback`] || '';
         
         if (!crmValue && field.fallbackToInput) {
@@ -216,8 +227,18 @@ const InteractiveDocumentViewer = ({
         }
 
         const displayValue = crmValue || userEnteredValue;
+        const mergeStyle = {
+          fontFamily: field.style?.fontFamily || undefined,
+          fontSize: field.style?.fontSize ? `${field.style.fontSize}px` : undefined,
+          fontWeight: field.style?.fontWeight || undefined,
+          fontStyle: field.style?.fontStyle || undefined,
+          textDecoration: field.style?.textDecoration || undefined,
+          textAlign: field.style?.textAlign || undefined,
+          color: field.style?.color || undefined,
+          justifyContent: field.style?.textAlign === 'center' ? 'center' : field.style?.textAlign === 'right' ? 'flex-end' : 'flex-start',
+        };
         return (
-          <div className="w-full h-full px-2 py-1 border-2 border-orange-300 bg-orange-50 rounded flex items-center text-sm text-gray-700" data-testid={`field-${field.id}`}>
+          <div className="w-full h-full px-2 py-1 border-2 border-orange-300 bg-orange-50 rounded flex items-center text-sm text-gray-700" style={mergeStyle} data-testid={`field-${field.id}`}>
             {displayValue || field.mergePattern}
           </div>
         );
@@ -230,6 +251,8 @@ const InteractiveDocumentViewer = ({
               fontFamily: field.style?.fontFamily || undefined,
               fontSize: field.style?.fontSize ? `${field.style.fontSize}px` : '12px',
               fontWeight: field.style?.fontWeight || 'normal',
+              fontStyle: field.style?.fontStyle || undefined,
+              textDecoration: field.style?.textDecoration || undefined,
               textAlign: field.style?.textAlign || 'left',
               color: field.style?.color || '#000000',
               justifyContent: field.style?.textAlign === 'center' ? 'center' : field.style?.textAlign === 'right' ? 'flex-end' : 'flex-start',

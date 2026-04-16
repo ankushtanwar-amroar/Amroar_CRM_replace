@@ -210,7 +210,7 @@ async def get_template_field_placements(
     template_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    """Get field placements for template"""
+    """Get field placements for template. Falls back to latest version with fields if current has none."""
     template = await db.docflow_templates.find_one({
         "id": template_id,
         "tenant_id": current_user.tenant_id
@@ -219,8 +219,14 @@ async def get_template_field_placements(
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     
+    placements = template.get("field_placements", [])
+
+    # If no fields on this version, try finding latest version in same group or same name
+    if not placements:
+        placements = await _resolve_latest_field_placements(template, current_user.tenant_id)
+
     return {
-        "field_placements": template.get("field_placements", []),
+        "field_placements": placements,
         "fields": template.get("fields", [])
     }
 
@@ -228,16 +234,52 @@ async def get_template_field_placements(
 
 @router.get("/templates/{template_id}/field-placements-public")
 async def get_template_field_placements_public(template_id: str):
-    """Get field placements for template (public - no auth required for signing)"""
+    """Get field placements for template (public - no auth required for signing). Falls back to latest version with fields."""
     template = await db.docflow_templates.find_one({"id": template_id})
     
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
     
+    placements = template.get("field_placements", [])
+
+    # If no fields on this version, try finding latest version in same group or same name
+    if not placements:
+        placements = await _resolve_latest_field_placements(template)
+
     return {
-        "field_placements": template.get("field_placements", []),
+        "field_placements": placements,
         "fields": template.get("fields", [])
     }
+
+
+async def _resolve_latest_field_placements(template: dict, tenant_id: str = None) -> list:
+    """Find field_placements from the latest template version that has fields."""
+    # Strategy 1: Same template_group_id, latest version
+    group_id = template.get("template_group_id")
+    tid = template.get("tenant_id") or tenant_id
+    if group_id:
+        query = {"template_group_id": group_id, "field_placements.0": {"$exists": True}}
+        if tid:
+            query["tenant_id"] = tid
+        latest = await db.docflow_templates.find_one(
+            query, {"_id": 0, "field_placements": 1},
+            sort=[("version", -1), ("created_at", -1)]
+        )
+        if latest and latest.get("field_placements"):
+            return latest["field_placements"]
+
+    # Strategy 2: Same name + tenant, latest with fields
+    name = template.get("name")
+    if name and tid:
+        latest = await db.docflow_templates.find_one(
+            {"name": name, "tenant_id": tid, "field_placements.0": {"$exists": True}},
+            {"_id": 0, "field_placements": 1},
+            sort=[("created_at", -1)]
+        )
+        if latest and latest.get("field_placements"):
+            return latest["field_placements"]
+
+    return []
 
 
 

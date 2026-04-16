@@ -33,6 +33,11 @@
 - Plan: Enterprise
 - Landing Page: /crm-platform
 
+## CRM Tenant (Shivam - Full Access)
+- Email: keppouttitteya-1869@yopmail.com
+- Password: test123
+- Landing Page: /crm-platform
+
 ## Third-Party Integrations
 - OpenAI: Uses Emergent LLM Key
 - Stripe: Requires User API Key

@@ -115,8 +115,8 @@ class PackageOutputService:
         if not doc:
             return None
 
-        # Try fetching from S3 URL
-        for url_key in ("unsigned_file_url", "signed_file_url"):
+        # Try fetching from S3 URL — prefer signed version over unsigned
+        for url_key in ("signed_file_url", "unsigned_file_url"):
             url = doc.get(url_key)
             if url:
                 try:

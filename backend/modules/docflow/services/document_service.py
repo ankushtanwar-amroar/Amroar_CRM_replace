@@ -236,7 +236,11 @@ class DocumentService:
             "viewed_at": 1,
             "signed_at": 1,
             "expires_at": 1,
-            "document_url": 1
+            "document_url": 1,
+            # Rejection fields for comment icon display
+            "reject_reason": 1,
+            "rejected_by": 1,
+            "rejected_at": 1
             # Exclude: audit_trail, signatures, field_data (large fields)
         }
         

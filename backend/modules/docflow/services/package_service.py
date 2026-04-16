@@ -12,6 +12,7 @@ from uuid import uuid4
 from .routing_engine import RoutingEngine
 from .docflow_audit_service import DocFlowAuditService
 from .document_service_enhanced import EnhancedDocumentService
+from .webhook_service import WebhookService
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,8 @@ class PackageService:
     def __init__(self, db):
         self.db = db
         self.audit_service = DocFlowAuditService(db)
-        self.routing_engine = RoutingEngine(db, audit_service=self.audit_service)
+        self.webhook_service = WebhookService(db)
+        self.routing_engine = RoutingEngine(db, audit_service=self.audit_service, webhook_service=self.webhook_service)
         self.document_service = EnhancedDocumentService(db)
 
     # ── Package Creation & Sending ──
@@ -227,22 +229,47 @@ class PackageService:
         skip: int = 0,
         limit: int = 50,
     ) -> dict:
-        """List blueprint packages for a tenant (exclude runs)."""
+        """List blueprint packages for a tenant (exclude runs). Optimized with batch run counts."""
         query = {"tenant_id": tenant_id, "_type": {"$ne": "run"}}
         if status:
             query["status"] = status
 
         total = await self.db.docflow_packages.count_documents(query)
         cursor = self.db.docflow_packages.find(
-            query, {"_id": 0}
+            query, {
+                "_id": 0, "id": 1, "tenant_id": 1, "name": 1, "status": 1,
+                "documents": 1, "webhook_config": 1, "created_by": 1,
+                "created_at": 1, "updated_at": 1,
+            }
         ).sort("created_at", -1).skip(skip).limit(limit)
         packages = await cursor.to_list(length=limit)
 
-        # Enrich with runs_count for each package
+        if not packages:
+            return {"packages": packages, "total": total, "skip": skip, "limit": limit}
+
+        # Batch: get run counts for all packages in one aggregation query
+        pkg_ids = [pkg.get("id") for pkg in packages if pkg.get("id")]
+        run_stats = {}
+        if pkg_ids:
+            pipeline = [
+                {"$match": {"package_id": {"$in": pkg_ids}}},
+                {"$group": {
+                    "_id": "$package_id",
+                    "runs_count": {"$sum": 1},
+                    "completed_runs": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}}
+                }}
+            ]
+            async for doc in self.db.docflow_package_runs.aggregate(pipeline):
+                run_stats[doc["_id"]] = {
+                    "runs_count": doc["runs_count"],
+                    "completed_runs": doc["completed_runs"]
+                }
+
         for pkg in packages:
             pid = pkg.get("id")
-            pkg["runs_count"] = await self.db.docflow_package_runs.count_documents({"package_id": pid})
-            pkg["completed_runs"] = await self.db.docflow_package_runs.count_documents({"package_id": pid, "status": "completed"})
+            stats = run_stats.get(pid, {})
+            pkg["runs_count"] = stats.get("runs_count", 0)
+            pkg["completed_runs"] = stats.get("completed_runs", 0)
 
         return {"packages": packages, "total": total, "skip": skip, "limit": limit}
 
@@ -302,6 +329,7 @@ class PackageService:
         send_email: bool,
         user_id: str,
         tenant_id: str,
+        template_merge_fields: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> dict:
         """Create a new run/execution for a reusable package blueprint."""
         now = datetime.now(timezone.utc)
@@ -323,18 +351,24 @@ class PackageService:
                 "assigned_components": r.get("assigned_components", {}),
                 "public_token": str(uuid4()),
                 "notified_at": None,
+                "email_template_id": r.get("email_template_id"),
             })
 
         # Build documents from the blueprint
         blueprint_docs = package.get("documents", [])
         run_documents = []
         for doc in blueprint_docs:
+            tid = doc.get("template_id")
+            # Merge fields: API-provided overrides > blueprint defaults
+            doc_merge_fields = doc.get("merge_fields", {})
+            if template_merge_fields and tid in template_merge_fields:
+                doc_merge_fields = {**doc_merge_fields, **template_merge_fields[tid]}
             run_documents.append({
-                "template_id": doc.get("template_id"),
+                "template_id": tid,
                 "document_id": None,
                 "document_name": doc.get("document_name", ""),
                 "order": doc.get("order", 1),
-                "merge_fields": doc.get("merge_fields", {}),
+                "merge_fields": doc_merge_fields,
             })
         run_documents.sort(key=lambda d: d.get("order", 1))
 
@@ -404,6 +438,12 @@ class PackageService:
                         "assigned_field_ids": doc_field_ids,
                     })
 
+                # Build merge field context for document generation
+                doc_sf_context = None
+                doc_merge = pkg_doc.get("merge_fields", {})
+                if doc_merge:
+                    doc_sf_context = {"fields": doc_merge}
+
                 document = await self.document_service.generate_document(
                     template_id=pkg_doc["template_id"],
                     crm_object_id="package-gen",
@@ -414,7 +454,7 @@ class PackageService:
                     recipients=doc_recipients,
                     routing_mode="sequential",
                     send_email=False,
-                    salesforce_context=None,
+                    salesforce_context=doc_sf_context,
                     expires_at=None,
                     require_auth=security.get("require_auth", True),
                     delivery_mode=delivery_mode,

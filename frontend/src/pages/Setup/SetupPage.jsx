@@ -1213,9 +1213,13 @@ const SetupPage = () => {
                 </Button>
               )}
               {!isDocFlowOnly && <Separator orientation="vertical" className="h-6" />}
-              <div className="flex items-center space-x-3">
+              <button
+                onClick={() => navigate('/setup')}
+                className="flex items-center space-x-3 hover:opacity-80 transition-opacity cursor-pointer"
+                data-testid="header-logo-home"
+              >
                 <Wrench className="h-5 w-5 text-indigo-600" />
-                <div>
+                <div className="text-left">
                   <h1 className="text-xl font-bold text-slate-800">
                     {isDocFlowOnly ? 'Cluvik DocFlow' : 'Setup'}
                   </h1>
@@ -1223,7 +1227,7 @@ const SetupPage = () => {
                     {isDocFlowOnly ? 'Document workflow & signing platform' : 'Configure your CRM'}
                   </p>
                 </div>
-              </div>
+              </button>
             </div>
 
             <div className="flex items-center space-x-4">

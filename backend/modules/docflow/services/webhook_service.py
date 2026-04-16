@@ -68,6 +68,10 @@ class WebhookService:
             "data": payload
         }
         
+        # Add metadata if present
+        if isinstance(payload, dict) and "metadata" in payload:
+            webhook_payload["metadata"] = payload["metadata"]
+        
         # Add salesforce_context if present in payload (document)
         if isinstance(payload, dict) and "salesforce_context" in payload:
             webhook_payload["salesforce_context"] = payload["salesforce_context"]
@@ -194,6 +198,7 @@ class WebhookService:
     ):
         """
         Fire webhook for a document event. Looks up the template from the document.
+        Enriches signed events with signed_documents details.
         """
         try:
             document = await self.db.docflow_documents.find_one({
@@ -211,12 +216,24 @@ class WebhookService:
             payload = {
                 "document_id": document_id,
                 "document_status": document.get("status"),
+                "template_name": document.get("template_name"),
                 "recipient_email": document.get("recipient_email"),
                 "recipient_name": document.get("recipient_name"),
                 "crm_object_type": document.get("crm_object_type"),
                 "crm_object_id": document.get("crm_object_id"),
                 **(extra_data or {})
             }
+
+            # Enrich signed/completed events with signed document details
+            if event_type in ("signed", "completed", "signed_copy"):
+                signed_url = document.get("signed_file_url")
+                if signed_url:
+                    payload["signed_documents"] = [{
+                        "document_id": document_id,
+                        "template_name": document.get("template_name"),
+                        "signed_document_url": signed_url,
+                        "signed_at": document.get("signed_at"),
+                    }]
 
             # Also log the event itself
             await self.db.docflow_activity_logs.insert_one({
@@ -243,11 +260,7 @@ class WebhookService:
     ):
         """
         Fire webhook for a package-level event.
-        Looks up the package's webhook config from the package itself.
-
-        event_types: package_created, package_sent, recipient_notified,
-                     document_generated, wave_started, document_signed,
-                     package_completed
+        Produces a flat payload matching the downloadable sample format.
         """
         try:
             package = await self.db.docflow_packages.find_one(
@@ -255,54 +268,153 @@ class WebhookService:
                 {"_id": 0}
             )
             if not package:
+                # Try package_runs collection
+                package = await self.db.docflow_package_runs.find_one(
+                    {"id": package_id, "tenant_id": tenant_id},
+                    {"_id": 0}
+                )
+            if not package:
                 return
 
             webhook_config = package.get("webhook_config", {})
             webhook_url = webhook_config.get("url")
+            now_iso = datetime.now(timezone.utc).isoformat()
 
+            # ── Map internal event to UI event ──
+            _EVENT_MAP = {
+                "document_signed": "signed",
+                "signed": "signed",
+                "package_completed": "signed_copy",
+                "completed": "signed_copy",
+                "document_opened": "opened",
+                "opened": "opened",
+                "recipient_notified": "sent",
+                "package_sent": "sent",
+                "sent": "sent",
+                "wave_started": "sent",
+                "package_created": "sent",
+                "document_generated": "sent",
+                "approved": "approve_reject",
+                "rejected": "approve_reject",
+                "recipient_approved": "approve_reject",
+                "recipient_rejected": "approve_reject",
+                "signed_copy": "signed_copy",
+            }
+            mapped_event = _EVENT_MAP.get(event_type, event_type)
+            extra = extra_data or {}
+
+            pkg_name = package.get("package_name") or package.get("name") or ""
+
+            # ── Build flat payload matching the download sample ──
             payload = {
+                "event": mapped_event,
+                "timestamp": now_iso,
                 "package_id": package_id,
-                "package_name": package.get("package_name"),
-                "package_status": package.get("status"),
-                "event": event_type,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                **(extra_data or {})
+                "package_name": pkg_name,
+                "tenant_id": tenant_id,
             }
 
-            # Log the event to audit/activity
+            # Add metadata if present in extra_data
+            if extra.get("metadata"):
+                payload["metadata"] = extra["metadata"]
+
+            # Get the first document for context (many events are doc-level)
+            first_doc_entry = (package.get("documents") or [{}])[0] if package.get("documents") else {}
+            first_doc_id = first_doc_entry.get("document_id", "")
+            first_doc_name = first_doc_entry.get("document_name", pkg_name)
+
+            # Resolve the triggering recipient from extra_data
+            recipient_name = extra.get("signer_name") or extra.get("recipient_name", "")
+            recipient_email = extra.get("signer_email") or extra.get("recipient_email", "")
+
+            # If no recipient in extra_data, try to find from the package's active recipients
+            if not recipient_email:
+                for r in package.get("recipients", []):
+                    if r.get("status") in ("sent", "signed", "approved", "reviewed", "viewed", "completed"):
+                        recipient_name = recipient_name or r.get("name", "")
+                        recipient_email = recipient_email or r.get("email", "")
+                        break
+
+            if mapped_event == "signed":
+                # ── Signed event ──
+                doc_id = extra.get("document_id", first_doc_id)
+                template_name = extra.get("template_name", first_doc_name)
+
+                payload["document_id"] = doc_id
+                payload["document_status"] = "signed"
+                payload["template_name"] = template_name
+                payload["recipient_email"] = recipient_email
+                payload["recipient_name"] = recipient_name
+                payload["signed_at"] = extra.get("signed_at", now_iso)
+                payload["status"] = extra.get("status", "completed")
+
+                # Build signed_documents from extra or from DB
+                signed_docs = extra.get("signed_documents")
+                if not signed_docs:
+                    signed_docs = await self._get_signed_documents(package)
+                payload["signed_documents"] = signed_docs or []
+                payload["recipient_details"] = {"name": recipient_name, "email": recipient_email}
+
+            elif mapped_event == "opened":
+                payload["document_id"] = extra.get("document_id", first_doc_id)
+                payload["recipient_email"] = recipient_email
+                payload["recipient_name"] = recipient_name
+                payload["opened_at"] = extra.get("opened_at", now_iso)
+
+            elif mapped_event == "sent":
+                payload["document_id"] = extra.get("document_id", first_doc_id)
+                payload["recipient_email"] = recipient_email
+                payload["recipient_name"] = recipient_name
+                payload["sent_at"] = now_iso
+                payload["delivery_method"] = extra.get("delivery_method", "email")
+                payload["recipient_count"] = extra.get("recipient_count", len(package.get("recipients", [])))
+
+            elif mapped_event == "approve_reject":
+                action = extra.get("action", "approved")
+                payload["action"] = action
+                payload["recipient_email"] = recipient_email
+                payload["recipient_name"] = recipient_name
+                if action == "rejected":
+                    payload["reason"] = extra.get("reason") or extra.get("reject_reason", "")
+                    payload["rejected_at"] = extra.get("rejected_at", now_iso)
+                else:
+                    payload["approved_at"] = extra.get("approved_at", now_iso)
+
+            elif mapped_event == "signed_copy":
+                payload["document_id"] = extra.get("document_id", first_doc_id)
+                payload["template_name"] = extra.get("template_name", first_doc_name)
+                signed_docs = extra.get("signed_documents")
+                if not signed_docs:
+                    signed_docs = await self._get_signed_documents(package)
+                payload["signed_documents"] = signed_docs or []
+                payload["generated_at"] = now_iso
+
+            # ── Log to activity ──
             await self.db.docflow_activity_logs.insert_one({
                 "package_id": package_id,
                 "tenant_id": tenant_id,
-                "event_type": f"package_{event_type}",
-                "message": f"Package {event_type}: {package.get('package_name', package_id)}",
+                "event_type": f"package_{mapped_event}",
+                "message": f"Package {mapped_event}: {pkg_name or package_id}",
                 "details": payload,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": now_iso
             })
 
             if not webhook_url:
-                return  # No webhook configured — just log
-
-            # Check if event is enabled
-            enabled_events = webhook_config.get("events", [])
-            if enabled_events and event_type not in enabled_events:
                 return
 
-            webhook_payload = {
-                "event": event_type,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "package_id": package_id,
-                "package_name": package.get("package_name"),
-                "tenant_id": tenant_id,
-                "data": payload
-            }
+            # ── Check if event is enabled ──
+            enabled_events = webhook_config.get("events", [])
+            if enabled_events and mapped_event not in enabled_events:
+                return
 
+            # ── Dispatch webhook ──
             headers = {"Content-Type": "application/json"}
             custom_headers = webhook_config.get("headers", {})
             headers.update(custom_headers)
 
             secret = webhook_config.get("secret")
             if secret:
-                payload_str = json.dumps(webhook_payload, sort_keys=True)
+                payload_str = json.dumps(payload, sort_keys=True)
                 signature = hmac.new(
                     secret.encode(), payload_str.encode(), hashlib.sha256
                 ).hexdigest()
@@ -313,23 +425,41 @@ class WebhookService:
 
             result = await self._send_webhook(
                 url=webhook_url,
-                payload=webhook_payload,
+                payload=payload,
                 headers=headers,
                 max_retries=max_retries if retry_enabled else 1
             )
 
-            # Log webhook delivery
             await self._log_webhook_package(
                 package_id=package_id,
-                event_type=event_type,
+                event_type=mapped_event,
                 webhook_url=webhook_url,
-                payload=webhook_payload,
+                payload=payload,
                 result=result,
                 tenant_id=tenant_id
             )
 
         except Exception as e:
             logger.error(f"Error firing package event: {e}")
+
+    async def _get_signed_documents(self, package: dict) -> list:
+        """Fetch signed document details for a package."""
+        signed_docs = []
+        for doc_entry in package.get("documents", []):
+            doc_id = doc_entry.get("document_id")
+            if doc_id:
+                doc = await self.db.docflow_documents.find_one(
+                    {"id": doc_id},
+                    {"_id": 0, "signed_file_url": 1, "template_name": 1, "signed_at": 1, "status": 1}
+                )
+                if doc and doc.get("signed_file_url"):
+                    signed_docs.append({
+                        "document_id": doc_id,
+                        "template_name": doc.get("template_name", doc_entry.get("document_name", "")),
+                        "signed_document_url": doc["signed_file_url"],
+                        "signed_at": doc.get("signed_at"),
+                    })
+        return signed_docs
 
     async def _log_webhook_package(
         self,

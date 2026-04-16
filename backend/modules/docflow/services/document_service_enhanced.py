@@ -35,6 +35,21 @@ class EnhancedDocumentService:
         self.s3_service = S3Service()
         self.merge_field_service = MergeFieldService(db)
         self.webhook_service = WebhookService(db)
+
+    @staticmethod
+    def _normalize_role_type(role: str) -> str:
+        """Normalize role string to standard role_type constant."""
+        role_lower = (role or "signer").lower().strip()
+        if role_lower in ("signer", "sign"):
+            return "SIGN"
+        elif role_lower in ("approver", "approve_reject"):
+            return "APPROVE_REJECT"
+        elif role_lower in ("reviewer", "view_only"):
+            return "VIEW_ONLY"
+        elif role_lower in ("receive_copy",):
+            return "RECEIVE_COPY"
+        return "SIGN"
+
     
     async def generate_document(self, template_id: str, crm_object_id: str, 
                                crm_object_type: str, user_id: str, tenant_id: str,
@@ -181,7 +196,10 @@ class EnhancedDocumentService:
                 "viewed_at": None,
                 "signed_at": None,
                 "declined_at": None,
-                "decline_reason": None
+                "decline_reason": None,
+                "email_template_id": inp.get("email_template_id"),
+                "role": inp.get("role", "signer"),
+                "role_type": self._normalize_role_type(inp.get("role", "signer")),
             })
 
         # Prevent overlapping field assignments
@@ -259,6 +277,13 @@ class EnhancedDocumentService:
         s3_key = template.get("s3_key")
         template_pdf_path = template.get("pdf_file_path")  # Legacy local path
         field_placements = template.get("field_placements", [])
+
+        # If no field placements on this template version, resolve from latest version
+        if not field_placements:
+            resolved_fps = await self._resolve_latest_field_placements(template)
+            if resolved_fps:
+                field_placements = resolved_fps
+                logger.info(f"Resolved {len(field_placements)} field placements from latest template version")
         
         # Replace merge fields in field placements (like default values)
         # Also build merge_field_values dict for storing in document
@@ -301,24 +326,14 @@ class EnhancedDocumentService:
                     merge_field_values[key] = str(value) if value is not None else ""
         
         if s3_key:
-            # Check if user has explicitly edited content blocks
-            content_blocks_modified = template.get("content_blocks_modified", False)
-            content_blocks = template.get("content_blocks", [])
-
-            if content_blocks_modified and content_blocks:
-                # User edited the content blocks → render from blocks
-                logger.info("Template has user-edited content blocks — rendering edited version")
-                from modules.docflow.services.content_blocks_renderer import render_content_blocks_to_pdf
-                unsigned_pdf_bytes = render_content_blocks_to_pdf(content_blocks)
-                logger.info(f"Rendered content blocks to PDF: {len(unsigned_pdf_bytes)} bytes")
-            else:
-                # No user edits → use original uploaded PDF for pixel-perfect fidelity
-                logger.info(f"Downloading original template from S3: {s3_key}")
-                template_bytes = self.s3_service.download_file(s3_key)
-                if not template_bytes:
-                    raise ValueError("Failed to download template from S3")
-                unsigned_pdf_bytes = template_bytes
-                logger.info(f"Using original S3 template as base PDF: {len(unsigned_pdf_bytes)} bytes")
+            # ALWAYS use the original uploaded PDF for pixel-perfect fidelity
+            # content_blocks rendering is only a fallback when no S3 key exists
+            logger.info(f"Downloading original template from S3: {s3_key}")
+            template_bytes = self.s3_service.download_file(s3_key)
+            if not template_bytes:
+                raise ValueError("Failed to download template from S3")
+            unsigned_pdf_bytes = template_bytes
+            logger.info(f"Using original S3 template as base PDF: {len(unsigned_pdf_bytes)} bytes")
                     
         elif template_pdf_path and os.path.exists(template_pdf_path):
             # Legacy: Use local template PDF
@@ -407,11 +422,41 @@ class EnhancedDocumentService:
                 if r.get("status") != "sent":
                     continue
                 if not r.get("email"):
-                    # In public_link-only mode we allow empty emails; for email delivery this should be prevented earlier.
                     continue
 
                 recipient_url = f"{frontend_url}/docflow/view/{r.get('public_token')}"
                 logger.info(f"Sending document email to {r.get('email')} (recipient token={r.get('public_token')})")
+
+                # Resolve custom email template
+                custom_subject = None
+                custom_html = None
+                try:
+                    from .email_template_service import EmailTemplateService
+                    ets = EmailTemplateService(self.db)
+                    role_type = r.get("role_type") or r.get("role", "SIGN")
+                    if role_type in ("signer", "sign"):
+                        role_type = "SIGN"
+                    elif role_type in ("approver", "approve_reject"):
+                        role_type = "APPROVE_REJECT"
+                    elif role_type in ("reviewer", "view_only"):
+                        role_type = "REVIEWER"
+                    resolved = await ets.resolve_for_sending(tenant_id, role_type, r.get("email_template_id"))
+                    if resolved:
+                        variables = {
+                            "recipient_name": r.get("name", ""),
+                            "recipient_email": r.get("email", ""),
+                            "document_name": template["name"],
+                            "package_name": template["name"],
+                            "signing_link": recipient_url,
+                            "sender_name": "DocFlow CRM",
+                            "company_name": "Cluvik",
+                            "status": "Pending",
+                        }
+                        custom_subject = ets.render_template(resolved["subject"], variables)
+                        custom_html = ets.render_template(resolved["body_html"], variables)
+                except Exception as tmpl_err:
+                    logger.warning(f"Custom email template lookup failed: {tmpl_err}")
+
                 email_result = await self.email_service.send_document_email(
                     recipient_email=r.get("email"),
                     recipient_name=r.get("name"),
@@ -420,6 +465,8 @@ class EnhancedDocumentService:
                     pdf_content=None,
                     sender_name="DocFlow CRM",
                     expires_in_days=expires_in_days,
+                    subject_template=custom_subject,
+                    html_body_template=custom_html,
                 )
 
                 if email_result.get("success"):
@@ -662,6 +709,11 @@ class EnhancedDocumentService:
             template = await self.db.docflow_templates.find_one({"id": document.get("template_id"), "tenant_id": tenant_id})
             field_placements = (template or {}).get("field_placements", []) if template else []
 
+            # If no field placements on this template version, resolve from latest
+            if not field_placements and template:
+                field_placements = await self._resolve_latest_field_placements(template)
+                logger.info(f"Signing validation: resolved {len(field_placements)} field placements from latest version")
+
             signing_field_types = ["signature", "initials", "date"]
             signing_fields_for_recipient = [
                 f for f in field_placements
@@ -697,7 +749,62 @@ class EnhancedDocumentService:
 
             now = datetime.now(timezone.utc)
 
-            # Upload signed PDF to S3 (frontend sends a cumulative PDF)
+            # Render field data onto the unsigned PDF to create the true signed PDF
+            # instead of using the frontend-uploaded PDF (which is just the raw unsigned PDF)
+            try:
+                unsigned_pdf_bytes = signed_pdf  # fallback: use what frontend sent
+
+                # Download the original unsigned PDF from S3
+                unsigned_s3_key = document.get("unsigned_s3_key")
+                if unsigned_s3_key:
+                    s3_bytes = self.s3_service.download_file(unsigned_s3_key)
+                    if s3_bytes:
+                        unsigned_pdf_bytes = s3_bytes
+                        logger.info(f"Downloaded unsigned PDF: {len(unsigned_pdf_bytes)} bytes")
+
+                # Resolve field placements (may need to look up latest version)
+                overlay_field_placements = field_placements
+                if not overlay_field_placements:
+                    overlay_field_placements = await self._resolve_latest_field_placements(template or {})
+                    logger.info(f"Resolved {len(overlay_field_placements)} field placements from latest version")
+
+                logger.info(f"Overlay check: {len(overlay_field_placements)} placements, {len(merged_field_data)} field values")
+
+                if overlay_field_placements and merged_field_data:
+                    # Build signatures list for overlay
+                    existing_sigs = document.get("signatures", []) or []
+                    all_sigs = list(existing_sigs)
+                    # Add current signer's signatures from field_data
+                    for fp in overlay_field_placements:
+                        if fp.get("type") in ("signature", "initials"):
+                            fid = fp.get("id")
+                            sig_val = merged_field_data.get(fid)
+                            if sig_val:
+                                all_sigs.append({
+                                    "field_id": fid,
+                                    "image_data": sig_val,
+                                    "signer_name": signature_data.get("signer_name", ""),
+                                })
+
+                    logger.info(f"Calling overlay with {len(all_sigs)} signatures")
+
+                    rendered_pdf = self.pdf_overlay_service.overlay_fields_on_pdf(
+                        unsigned_pdf_bytes,
+                        overlay_field_placements,
+                        field_values=merged_field_data,
+                        signatures=all_sigs,
+                    )
+                    if rendered_pdf and len(rendered_pdf) > 0:
+                        signed_pdf = rendered_pdf
+                        logger.info(f"Rendered field data onto signed PDF: {len(signed_pdf)} bytes")
+                    else:
+                        logger.warning("PDF overlay returned empty, using raw upload")
+                else:
+                    logger.warning(f"Skipping overlay: placements={len(overlay_field_placements)}, data_keys={len(merged_field_data)}")
+            except Exception as overlay_err:
+                logger.error(f"Failed to overlay fields onto PDF: {overlay_err}", exc_info=True)
+
+            # Upload signed PDF to S3
             signed_filename = "signed.pdf"
             signed_s3_key = self.s3_service.upload_document(
                 file_bytes=signed_pdf,
@@ -767,7 +874,7 @@ class EnhancedDocumentService:
                 key=lambda r: int(r.get("routing_order", 1) or 1)
             )
             all_required_done = all(
-                r.get("status") in ["signed", "completed"] for r in required_latest
+                r.get("status") in ["signed", "completed", "approved", "reviewed"] for r in required_latest
             )
 
             # Check if this document belongs to a public_recipients package
@@ -831,7 +938,16 @@ class EnhancedDocumentService:
                 document_id,
                 "signed",
                 tenant_id,
-                extra_data={"recipient_email": signer_email, "recipient_name": signer_name}
+                extra_data={
+                    "recipient_email": signer_email,
+                    "recipient_name": signer_name,
+                    "metadata": {
+                        "ip_address": signature_data.get("ip_address"),
+                        "user_agent": signature_data.get("user_agent"),
+                        "performed_by": signer_name,
+                        "performed_by_email": signer_email,
+                    },
+                }
             )
             
             # Update email history status
@@ -849,7 +965,16 @@ class EnhancedDocumentService:
                     document_id,
                     "completed",
                     tenant_id,
-                    extra_data={"recipient_email": signer_email, "recipient_name": signer_name}
+                    extra_data={
+                        "recipient_email": signer_email,
+                        "recipient_name": signer_name,
+                        "metadata": {
+                            "ip_address": signature_data.get("ip_address"),
+                            "user_agent": signature_data.get("user_agent"),
+                            "performed_by": signer_name,
+                            "performed_by_email": signer_email,
+                        },
+                    }
                 )
 
             # For public_recipients mode, sync the signing status back to the
@@ -875,7 +1000,7 @@ class EnhancedDocumentService:
                 next_recipient = None
                 if active_index is not None:
                     for r in required_after_sorted[active_index + 1:]:
-                        if r.get("status") not in ["signed", "completed", "declined"]:
+                        if r.get("status") not in ["signed", "completed", "approved", "reviewed", "declined"]:
                             next_recipient = r
                             break
                 if next_recipient:
@@ -896,6 +1021,33 @@ class EnhancedDocumentService:
                     # Send email for next recipient if requested
                     if "email" in (document.get("delivery_channels") or []) and next_recipient.get("email"):
                         recipient_url = f"{os.environ.get('FRONTEND_URL', '')}/docflow/view/{next_recipient.get('public_token')}"
+
+                        # Resolve custom email template for next recipient
+                        next_custom_subject = None
+                        next_custom_html = None
+                        try:
+                            from .email_template_service import EmailTemplateService
+                            ets = EmailTemplateService(self.db)
+                            nr_role = next_recipient.get("role_type") or next_recipient.get("role", "SIGN")
+                            if nr_role in ("signer", "sign"):
+                                nr_role = "SIGN"
+                            resolved = await ets.resolve_for_sending(tenant_id, nr_role, next_recipient.get("email_template_id"))
+                            if resolved:
+                                variables = {
+                                    "recipient_name": next_recipient.get("name", ""),
+                                    "recipient_email": next_recipient.get("email", ""),
+                                    "document_name": document.get("template_name", ""),
+                                    "package_name": document.get("template_name", ""),
+                                    "signing_link": recipient_url,
+                                    "sender_name": "DocFlow CRM",
+                                    "company_name": "Cluvik",
+                                    "status": "Pending",
+                                }
+                                next_custom_subject = ets.render_template(resolved["subject"], variables)
+                                next_custom_html = ets.render_template(resolved["body_html"], variables)
+                        except Exception as tmpl_err:
+                            logger.warning(f"Custom email template lookup failed for next recipient: {tmpl_err}")
+
                         email_result = await self.email_service.send_document_email(
                             recipient_email=next_recipient.get("email"),
                             recipient_name=next_recipient.get("name"),
@@ -903,6 +1055,8 @@ class EnhancedDocumentService:
                             document_url=recipient_url,
                             pdf_content=None,
                             sender_name="DocFlow CRM",
+                            subject_template=next_custom_subject,
+                            html_body_template=next_custom_html,
                         )
                         if email_result.get("success"):
                             await self.email_history_service.log_email(
@@ -923,6 +1077,34 @@ class EnhancedDocumentService:
         except Exception as e:
             logger.error(f"Error in add_signature_with_pdf: {e}", exc_info=True)
             return False
+
+
+    async def _resolve_latest_field_placements(self, template: dict) -> list:
+        """Find field_placements from the latest template version that has fields."""
+        tid = template.get("tenant_id")
+        # Strategy 1: Same template_group_id
+        group_id = template.get("template_group_id")
+        if group_id:
+            query = {"template_group_id": group_id, "field_placements.0": {"$exists": True}}
+            if tid:
+                query["tenant_id"] = tid
+            latest = await self.db.docflow_templates.find_one(
+                query, {"_id": 0, "field_placements": 1},
+                sort=[("version", -1), ("created_at", -1)]
+            )
+            if latest and latest.get("field_placements"):
+                return latest["field_placements"]
+        # Strategy 2: Same name + tenant
+        name = template.get("name")
+        if name and tid:
+            latest = await self.db.docflow_templates.find_one(
+                {"name": name, "tenant_id": tid, "field_placements.0": {"$exists": True}},
+                {"_id": 0, "field_placements": 1},
+                sort=[("created_at", -1)]
+            )
+            if latest and latest.get("field_placements"):
+                return latest["field_placements"]
+        return []
 
 
     async def _sync_public_recipients_signing(

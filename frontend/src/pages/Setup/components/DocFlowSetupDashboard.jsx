@@ -1,8 +1,11 @@
 /**
  * DocFlowSetupDashboard - DocFlow-Only Tenant Dashboard
  * 
- * Replaces the CRM Control Center when tenant has CRM disabled.
- * Shows DocFlow-centric quick actions, recent templates/documents, and status.
+ * Layout:
+ * - Quick Actions pill buttons + 3 gradient hero cards
+ * - MODULES 2x2 grid with count badges (Connections shows real data)
+ * - ORGANIZATION section (Company Info + Access & Security)
+ * - Right sidebar: Recent Templates + Overview stats
  */
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -13,19 +16,26 @@ import {
   Plus,
   ArrowRight,
   Clock,
-  CheckCircle2,
-  Activity,
-  BarChart3,
-  Layers,
-  Settings2,
   CircleDot,
-  FolderOpen,
   Send,
-  Eye,
   FilePlus2,
   FileCheck,
   PenTool,
   Key,
+  Users,
+  Building2,
+  Bot,
+  Shield,
+  Package,
+  Link2,
+  UserPlus,
+  Layers,
+  Settings,
+  BarChart3,
+  CheckCircle2,
+  Cloud,
+  Plug,
+  AlertCircle,
 } from 'lucide-react';
 import { Badge } from '../../../components/ui/badge';
 import { useModuleEntitlementsContext, MODULE_STATES } from '../../../context/ModuleContext';
@@ -33,14 +43,26 @@ import { useModuleEntitlementsContext, MODULE_STATES } from '../../../context/Mo
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
 
-const QuickActionCard = ({ icon: Icon, title, description, stat, statLabel, onClick, gradient }) => (
+/* ─── Quick Action Pill ─── */
+const QuickActionPill = ({ icon: Icon, label, onClick, testId }) => (
   <button
     onClick={onClick}
-    data-testid={`docflow-quick-action-${title.toLowerCase().replace(/\s+/g, '-')}`}
+    data-testid={testId}
+    className="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition-all hover:border-slate-300 hover:bg-slate-50 hover:shadow-sm"
+  >
+    <Icon className="h-3.5 w-3.5 text-slate-500" />
+    {label}
+  </button>
+);
+
+/* ─── Hero Gradient Card ─── */
+const HeroCard = ({ icon: Icon, title, description, stat, statLabel, onClick, gradient, testId }) => (
+  <button
+    onClick={onClick}
+    data-testid={testId}
     className={`group relative overflow-hidden rounded-2xl p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl ${gradient}`}
   >
     <div className="absolute -right-4 -top-4 h-24 w-24 rounded-full bg-white/10 blur-xl transition-transform group-hover:scale-150" />
-    <div className="absolute -bottom-4 -left-4 h-20 w-20 rounded-full bg-white/5 blur-lg" />
     <div className="relative">
       <div className="mb-4 inline-flex rounded-xl bg-white/20 p-3 backdrop-blur-sm">
         <Icon className="h-6 w-6 text-white" />
@@ -60,54 +82,78 @@ const QuickActionCard = ({ icon: Icon, title, description, stat, statLabel, onCl
   </button>
 );
 
-const CategoryCard = ({ icon: Icon, title, description, onClick, badge, testId }) => (
+/* ─── Module Card ─── */
+const ModuleCard = ({ icon: Icon, iconBg, title, description, badges, onClick, testId, children }) => (
   <button
     onClick={onClick}
     data-testid={testId}
-    className="group flex items-center gap-4 rounded-xl border border-slate-200 bg-white p-4 text-left transition-all duration-200 hover:border-slate-300 hover:bg-slate-50 hover:shadow-md"
+    className="group flex flex-col rounded-xl border border-slate-200 bg-white p-5 text-left transition-all duration-200 hover:border-slate-300 hover:shadow-md"
   >
-    <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-slate-50 to-slate-100 transition-colors group-hover:from-indigo-50 group-hover:to-indigo-100">
-      <Icon className="h-5 w-5 text-slate-600 transition-colors group-hover:text-indigo-600" />
-    </div>
-    <div className="min-w-0 flex-1">
-      <div className="flex items-center gap-2">
-        <h4 className="font-medium text-slate-800">{title}</h4>
-        {badge && (
-          <Badge variant="secondary" className="bg-indigo-50 text-indigo-600 text-[10px]">
-            {badge}
-          </Badge>
-        )}
+    <div className="flex items-start justify-between mb-3">
+      <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${iconBg}`}>
+        <Icon className="h-5 w-5 text-white" />
       </div>
-      <p className="mt-0.5 text-sm text-slate-500 line-clamp-1">{description}</p>
+      <ArrowRight className="h-4 w-4 text-slate-300 transition-transform group-hover:translate-x-1 group-hover:text-slate-500" />
     </div>
-    <ArrowRight className="h-4 w-4 shrink-0 text-slate-400 transition-transform group-hover:translate-x-1 group-hover:text-indigo-500" />
+    <h4 className="font-semibold text-slate-800 mb-1">{title}</h4>
+    <p className="text-sm text-slate-500 mb-3 line-clamp-2">{description}</p>
+    {children}
+    {!children && badges && badges.length > 0 && (
+      <div className="mt-auto flex flex-wrap gap-1.5">
+        {badges.map((b, i) => (
+          <span key={i} className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ${b.color}`}>
+            {b.label}
+          </span>
+        ))}
+      </div>
+    )}
   </button>
 );
 
-const StatBadge = ({ icon: Icon, label, value, color = 'slate' }) => {
-  const colors = {
-    slate: 'bg-slate-100 text-slate-700',
-    indigo: 'bg-indigo-100 text-indigo-700',
-    emerald: 'bg-emerald-100 text-emerald-700',
-    amber: 'bg-amber-100 text-amber-700',
-    sky: 'bg-sky-100 text-sky-700',
-  };
-  return (
-    <div className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 ${colors[color]}`}>
-      <Icon className="h-3.5 w-3.5" />
-      <span className="text-xs font-medium">{value}</span>
-      <span className="text-xs opacity-70">{label}</span>
+/* ─── Organization Card ─── */
+const OrgCard = ({ icon: Icon, iconBg, title, description, links, onClick, testId }) => (
+  <button
+    onClick={onClick}
+    data-testid={testId}
+    className="group flex flex-col rounded-xl border border-slate-200 bg-white p-5 text-left transition-all duration-200 hover:border-slate-300 hover:shadow-md"
+  >
+    <div className="flex items-start justify-between mb-3">
+      <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${iconBg}`}>
+        <Icon className="h-5 w-5 text-white" />
+      </div>
+      <ArrowRight className="h-4 w-4 text-slate-300 transition-transform group-hover:translate-x-1 group-hover:text-slate-500" />
     </div>
-  );
-};
+    <h4 className="font-semibold text-slate-800 mb-1">{title}</h4>
+    <p className="text-sm text-slate-500 mb-3">{description}</p>
+    {links && links.length > 0 && (
+      <div className="mt-auto flex flex-wrap gap-2">
+        {links.map((l, i) => (
+          <span key={i} className="text-xs text-indigo-600 font-medium">{l}</span>
+        ))}
+      </div>
+    )}
+  </button>
+);
 
-const RecentItem = ({ icon: Icon, title, subtitle, status, time, color = 'slate' }) => {
-  const iconColors = {
-    slate: 'bg-slate-100 text-slate-600',
-    indigo: 'bg-indigo-100 text-indigo-600',
-    emerald: 'bg-emerald-100 text-emerald-600',
-    amber: 'bg-amber-100 text-amber-600',
-  };
+/* ─── Stat Pill (header) ─── */
+const StatPill = ({ icon: Icon, label, value, color }) => (
+  <div className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 ${color}`}>
+    <Icon className="h-3.5 w-3.5" />
+    <span className="text-xs font-semibold">{value}</span>
+    <span className="text-xs opacity-75">{label}</span>
+  </div>
+);
+
+/* ─── Section Heading ─── */
+const SectionHeading = ({ icon: Icon, title }) => (
+  <h2 className="mb-4 flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-slate-400">
+    <Icon className="h-3.5 w-3.5" />
+    {title}
+  </h2>
+);
+
+/* ─── Recent Template Item ─── */
+const RecentItem = ({ title, subtitle, status, time, color }) => {
   const statusColors = {
     Active: 'bg-emerald-100 text-emerald-700',
     Draft: 'bg-amber-100 text-amber-700',
@@ -115,45 +161,81 @@ const RecentItem = ({ icon: Icon, title, subtitle, status, time, color = 'slate'
     Sent: 'bg-sky-100 text-sky-700',
     Generated: 'bg-slate-100 text-slate-700',
   };
+  const dotColors = { emerald: 'bg-emerald-500', amber: 'bg-amber-500', indigo: 'bg-indigo-500', slate: 'bg-slate-400' };
   return (
-    <div className="flex items-start gap-3 py-3">
-      <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${iconColors[color]}`}>
-        <Icon className="h-4 w-4" />
-      </div>
+    <div className="flex items-center gap-3 py-2.5">
+      <div className={`h-2 w-2 rounded-full shrink-0 ${dotColors[color] || 'bg-slate-400'}`} />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium text-slate-800 truncate">{title}</p>
-        <p className="text-xs text-slate-500">{subtitle}</p>
+        <p className="text-sm font-medium text-slate-700 truncate">{title}</p>
+        <p className="text-xs text-slate-400">{subtitle}</p>
       </div>
-      <div className="flex flex-col items-end gap-1 shrink-0">
+      <div className="flex flex-col items-end gap-0.5 shrink-0">
         {status && (
-          <Badge className={`text-[10px] ${statusColors[status] || 'bg-slate-100 text-slate-600'}`}>
+          <Badge className={`text-[10px] font-medium ${statusColors[status] || 'bg-slate-100 text-slate-600'}`}>
             {status}
           </Badge>
         )}
-        <span className="text-xs text-slate-400">{time}</span>
+        {time && <span className="text-[10px] text-slate-400">{time}</span>}
       </div>
     </div>
   );
 };
 
+/* ─── Overview Stat Card ─── */
+const OverviewStat = ({ icon: Icon, label, value, iconColor }) => (
+  <div className="flex items-center gap-3 rounded-lg bg-white border border-slate-100 p-3 shadow-sm" data-testid={`overview-stat-${label.toLowerCase().replace(/\s+/g, '-')}`}>
+    <div className={`flex h-9 w-9 items-center justify-center rounded-lg ${iconColor}`}>
+      <Icon className="h-4 w-4 text-white" />
+    </div>
+    <div className="min-w-0 flex-1">
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className="text-lg font-bold text-slate-800">{value}</p>
+    </div>
+  </div>
+);
+
+/* ─── Connection Status Row ─── */
+const ConnectionRow = ({ name, provider, status, lastTested }) => {
+  const isConnected = status === 'active' || status === 'connected';
+  return (
+    <div className="flex items-center gap-2.5 py-2">
+      <Cloud className="h-4 w-4 text-slate-400 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-slate-700 truncate">{name}</p>
+        <p className="text-xs text-slate-400">{provider}</p>
+      </div>
+      <div className="flex items-center gap-1 shrink-0">
+        {isConnected ? (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 rounded-full px-2 py-0.5">
+            <CheckCircle2 className="h-3 w-3" />
+            Connected
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-slate-500 bg-slate-100 rounded-full px-2 py-0.5">
+            <AlertCircle className="h-3 w-3" />
+            Not Connected
+          </span>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/* ═══════════════════════════════════════════════
+   Main Dashboard
+   ═══════════════════════════════════════════════ */
 const DocFlowSetupDashboard = ({ user }) => {
   const navigate = useNavigate();
   const [stats, setStats] = useState({
-    totalTemplates: 0,
-    activeTemplates: 0,
-    totalDocuments: 0,
-    pendingSignatures: 0,
+    totalTemplates: 0, activeTemplates: 0, draftTemplates: 0,
+    totalDocuments: 0, completedDocuments: 0,
+    totalPackages: 0, activePackages: 0, pendingPackages: 0,
+    pendingSignatures: 0, totalUsers: 0,
+    totalConnections: 0, connectedCount: 0,
   });
   const [recentTemplates, setRecentTemplates] = useState([]);
-  const [recentDocuments, setRecentDocuments] = useState([]);
+  const [connectionsList, setConnectionsList] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  // Check module states for conditional rendering
-  const { getModuleState } = useModuleEntitlementsContext();
-  const fileManagerState = getModuleState('file_manager');
-  const appManagerState = getModuleState('app_manager');
-  const isFileManagerActive = fileManagerState?.state === MODULE_STATES.ACTIVE;
-  const isAppManagerActive = appManagerState?.state === MODULE_STATES.ACTIVE;
 
   useEffect(() => {
     const fetchData = async () => {
@@ -162,9 +244,12 @@ const DocFlowSetupDashboard = ({ user }) => {
         const token = localStorage.getItem('token');
         const headers = token ? { Authorization: `Bearer ${token}` } : {};
 
-        const [templatesRes, documentsRes] = await Promise.allSettled([
+        const [templatesRes, documentsRes, usersRes, packagesRes, connectionsRes] = await Promise.allSettled([
           axios.get(`${API}/docflow/templates`, { headers }),
           axios.get(`${API}/docflow/documents`, { headers }),
+          axios.get(`${API}/users`, { headers }),
+          axios.get(`${API}/docflow/packages`, { headers }),
+          axios.get(`${API}/connections/`, { headers }),
         ]);
 
         let templates = [];
@@ -180,31 +265,48 @@ const DocFlowSetupDashboard = ({ user }) => {
             : documentsRes.value.data?.documents || [];
         }
 
+        let packages = [];
+        if (packagesRes.status === 'fulfilled') {
+          const pData = packagesRes.value.data;
+          packages = Array.isArray(pData) ? pData : (pData?.packages || []);
+        }
+
+        let connections = [];
+        if (connectionsRes.status === 'fulfilled') {
+          const cData = connectionsRes.value.data;
+          connections = Array.isArray(cData) ? cData : (cData?.connections || []);
+        }
+
+        const userCount = usersRes.status === 'fulfilled' ? (usersRes.value.data?.length || 0) : 0;
+
         setStats({
           totalTemplates: templates.length,
           activeTemplates: templates.filter(t => t.status === 'Active').length,
+          draftTemplates: templates.filter(t => t.status !== 'Active').length,
           totalDocuments: documents.length,
+          completedDocuments: documents.filter(d => d.status === 'signed' || d.status === 'completed').length,
+          totalPackages: packages.length,
+          activePackages: packages.filter(p => p.status === 'active' || p.status === 'sent').length,
+          pendingPackages: packages.filter(p => p.status === 'pending' || p.status === 'pending_signature').length,
           pendingSignatures: documents.filter(d => d.status === 'pending_signature' || d.status === 'sent').length,
+          totalUsers: userCount,
+          totalConnections: connections.length,
+          connectedCount: connections.filter(c => c.status === 'active' || c.is_active).length,
         });
 
-        // Recent templates (last 5)
-        const sortedTemplates = [...templates]
-          .sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0))
-          .slice(0, 5);
-        setRecentTemplates(sortedTemplates);
+        setConnectionsList(connections.slice(0, 4));
 
-        // Recent documents (last 5)
-        const sortedDocs = [...documents]
-          .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
-          .slice(0, 5);
-        setRecentDocuments(sortedDocs);
+        setRecentTemplates(
+          [...templates]
+            .sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0))
+            .slice(0, 5)
+        );
       } catch (error) {
         console.error('Error fetching DocFlow stats:', error);
       } finally {
         setLoading(false);
       }
     };
-
     fetchData();
   }, []);
 
@@ -227,16 +329,17 @@ const DocFlowSetupDashboard = ({ user }) => {
 
   return (
     <div className="min-h-full" data-testid="docflow-setup-dashboard">
-      {/* Header */}
-      <div className="mb-8">
-        <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+
+      {/* ── Header ────────────────────────────── */}
+      <div className="mb-6">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
           <div>
             <div className="flex items-center gap-3 mb-2">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-600 shadow-lg shadow-indigo-500/30">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-indigo-600 shadow-lg shadow-indigo-500/25">
                 <FileText className="h-5 w-5 text-white" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold text-slate-900" data-testid="docflow-dashboard-title">
+                <h1 className="text-2xl font-bold tracking-tight text-slate-900" data-testid="docflow-dashboard-title">
                   DocFlow Workspace
                 </h1>
                 <p className="text-sm text-slate-500">
@@ -244,7 +347,7 @@ const DocFlowSetupDashboard = ({ user }) => {
                 </p>
               </div>
             </div>
-            <div className="mt-4 flex items-center gap-2 text-sm">
+            <div className="mt-2 flex items-center gap-2 text-sm">
               <CircleDot className="h-3 w-3 text-emerald-500" />
               <span className="text-slate-600">Logged in as</span>
               <span className="font-medium text-slate-800">{userName}</span>
@@ -253,117 +356,129 @@ const DocFlowSetupDashboard = ({ user }) => {
               </Badge>
             </div>
           </div>
-
           <div className="flex flex-wrap gap-2">
-            <StatBadge icon={FileText} label="Templates" value={stats.totalTemplates} color="indigo" />
-            <StatBadge icon={FileCheck} label="Active" value={stats.activeTemplates} color="emerald" />
-            <StatBadge icon={Layers} label="Documents" value={stats.totalDocuments} color="sky" />
-            <StatBadge icon={PenTool} label="Pending" value={stats.pendingSignatures} color="amber" />
+            <StatPill icon={FileText} label="Templates" value={stats.totalTemplates} color="bg-indigo-50 text-indigo-700" />
+            <StatPill icon={Package} label="Packages" value={stats.totalPackages} color="bg-emerald-50 text-emerald-700" />
+            <StatPill icon={Layers} label="Documents" value={stats.totalDocuments} color="bg-sky-50 text-sky-700" />
+            <StatPill icon={PenTool} label="Pending" value={stats.pendingSignatures} color="bg-amber-50 text-amber-700" />
           </div>
         </div>
       </div>
 
-      {/* Quick Actions */}
-      <div className="mb-8">
-        <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-slate-500">
-          <Plus className="h-4 w-4" />
-          Quick Actions
-        </h2>
+      {/* ── Quick Actions ─────────────────────── */}
+      <section className="mb-6">
+        <SectionHeading icon={Plus} title="Quick Actions" />
+        <div className="flex flex-wrap gap-2 mb-5">
+          <QuickActionPill icon={FilePlus2} label="Create Template" onClick={() => navigate('/setup/docflow')} testId="qa-pill-create-template" />
+          <QuickActionPill icon={Upload} label="Upload Document" onClick={() => navigate('/setup/docflow')} testId="qa-pill-upload-document" />
+          <QuickActionPill icon={Send} label="Generate & Send" onClick={() => navigate('/setup/docflow')} testId="qa-pill-generate-send" />
+          <QuickActionPill icon={Package} label="Create Package" onClick={() => navigate('/setup/docflow')} testId="qa-pill-create-package" />
+          <QuickActionPill icon={Link2} label="Add Connection" onClick={() => navigate('/setup/connections')} testId="qa-pill-add-connection" />
+          <QuickActionPill icon={UserPlus} label="Invite User" onClick={() => navigate('/setup/users')} testId="qa-pill-invite-user" />
+        </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <QuickActionCard
-            icon={FilePlus2}
-            title="Create Template"
-            description="Start a new document template from scratch"
-            stat={stats.totalTemplates}
-            statLabel="Templates"
-            onClick={() => navigate('/setup/docflow')}
-            gradient="bg-gradient-to-br from-indigo-500 to-indigo-600"
-          />
-          <QuickActionCard
-            icon={Upload}
-            title="Upload Document"
-            description="Upload a DOCX or PDF to create a template"
-            stat={stats.activeTemplates}
-            statLabel="Active"
-            onClick={() => navigate('/setup/docflow')}
-            gradient="bg-gradient-to-br from-emerald-500 to-emerald-600"
-          />
-          <QuickActionCard
-            icon={Send}
-            title="Generate & Send"
-            description="Generate a document and send for signing"
-            stat={stats.totalDocuments}
-            statLabel="Generated"
-            onClick={() => navigate('/setup/docflow')}
-            gradient="bg-gradient-to-br from-amber-500 to-orange-500"
-          />
+          <HeroCard icon={FilePlus2} title="Create Template" description="Start a new document template" stat={stats.totalTemplates} statLabel="Templates" onClick={() => navigate('/setup/docflow')} gradient="bg-gradient-to-br from-indigo-500 to-indigo-600" testId="docflow-hero-create-template" />
+          <HeroCard icon={Upload} title="Upload Document" description="Upload a DOCX or PDF" stat={stats.activeTemplates} statLabel="Active" onClick={() => navigate('/setup/docflow')} gradient="bg-gradient-to-br from-emerald-500 to-teal-600" testId="docflow-hero-upload-document" />
+          <HeroCard icon={Send} title="Generate & Send" description="Generate and send for signing" stat={stats.totalDocuments} statLabel="Generated" onClick={() => navigate('/setup/docflow')} gradient="bg-gradient-to-br from-amber-500 to-orange-500" testId="docflow-hero-generate-send" />
         </div>
-      </div>
+      </section>
 
-      {/* Main Grid */}
-      <div className="grid gap-8 lg:grid-cols-3">
+      {/* ── Two-Column Layout ────────────────── */}
+      <div className="grid gap-6 lg:grid-cols-3">
+
         {/* Left Column */}
-        <div className="lg:col-span-2 space-y-8">
-          {/* DocFlow Modules */}
-          <div>
-            <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold uppercase tracking-wider text-slate-500">
-              <FileText className="h-4 w-4" />
-              DocFlow
-            </h2>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <CategoryCard
-                icon={FileText}
-                title="Templates"
-                description="Manage document templates and versions"
-                onClick={() => navigate('/setup/docflow')}
-                badge={stats.totalTemplates > 0 ? `${stats.totalTemplates} Total` : null}
-                testId="docflow-cat-templates"
+        <div className="lg:col-span-2 space-y-6">
+
+          {/* MODULES */}
+          <section>
+            <SectionHeading icon={Settings} title="Modules" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <ModuleCard
+                icon={FileText} iconBg="bg-indigo-500" title="Templates"
+                description="Manage document templates, versions, and field mappings"
+                badges={[
+                  { label: `${stats.totalTemplates} Total`, color: 'bg-indigo-50 text-indigo-700' },
+                  { label: `${stats.activeTemplates} Active`, color: 'bg-emerald-50 text-emerald-700' },
+                  { label: `${stats.draftTemplates} Draft`, color: 'bg-amber-50 text-amber-700' },
+                ]}
+                onClick={() => navigate('/setup/docflow')} testId="module-templates"
               />
-              {isFileManagerActive && (
-              <CategoryCard
-                icon={FolderOpen}
-                title="File Manager"
-                description="Browse and manage uploaded files"
-                onClick={() => navigate('/setup/file-manager')}
-                testId="docflow-cat-file-manager"
+              <ModuleCard
+                icon={Package} iconBg="bg-emerald-500" title="Packages"
+                description="Manage document packages and signing workflows"
+                badges={[
+                  { label: `${stats.totalPackages} Total`, color: 'bg-indigo-50 text-indigo-700' },
+                  { label: `${stats.activePackages} Active`, color: 'bg-emerald-50 text-emerald-700' },
+                  { label: `${stats.pendingPackages} Pending`, color: 'bg-amber-50 text-amber-700' },
+                ]}
+                onClick={() => navigate('/setup/docflow')} testId="module-packages"
               />
-              )}
-              <CategoryCard
-                icon={Key}
-                title="Connections"
-                description="Manage external service integrations"
-                onClick={() => navigate('/setup/connections')}
-                testId="docflow-cat-connections"
+
+              {/* Connections — show real connection data */}
+              <ModuleCard
+                icon={Link2} iconBg="bg-sky-500" title="Connections"
+                description="Configure Salesforce and external integrations"
+                onClick={() => navigate('/setup/connections')} testId="module-connections"
+              >
+                {connectionsList.length > 0 ? (
+                  <div className="mt-auto space-y-0 divide-y divide-slate-100">
+                    {connectionsList.map((conn) => (
+                      <ConnectionRow
+                        key={conn.id}
+                        name={conn.name}
+                        provider={conn.provider_name || conn.category_name || ''}
+                        status={conn.is_active ? 'active' : conn.status}
+                        lastTested={conn.last_tested_at}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-auto flex flex-wrap gap-1.5">
+                    <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium bg-indigo-50 text-indigo-700">
+                      {stats.totalConnections} Total
+                    </span>
+                    <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium bg-emerald-50 text-emerald-700">
+                      {stats.connectedCount} Connected
+                    </span>
+                  </div>
+                )}
+              </ModuleCard>
+
+              <ModuleCard
+                icon={Bot} iconBg="bg-amber-500" title="AI & Automation"
+                description="Configure CluBot assistant and automation rules"
+                badges={[]}
+                onClick={() => navigate('/setup/cluebot-configuration')} testId="module-ai-automation"
               />
-              {isAppManagerActive && (
-              <CategoryCard
-                icon={Layers}
-                title="App Manager"
-                description="Configure app settings and homepage"
-                onClick={() => navigate('/setup/app-manager')}
-                testId="docflow-cat-app-manager"
-              />
-              )}
             </div>
-          </div>
+          </section>
+
+          {/* ORGANIZATION */}
+          <section>
+            <SectionHeading icon={Building2} title="Organization" />
+            <div className="grid gap-4 sm:grid-cols-2">
+              <OrgCard icon={Building2} iconBg="bg-slate-700" title="Company Information" description="Organization details and plan info" links={['Profile', 'Plan', 'Billing']} onClick={() => navigate('/setup/company-information')} testId="org-company-info" />
+              <OrgCard icon={Shield} iconBg="bg-rose-500" title="Access & Security" description="Users, roles, and permissions" links={[`${stats.totalUsers} Users`, 'Roles', 'Permissions']} onClick={() => navigate('/setup/users')} testId="org-access-security" />
+            </div>
+          </section>
         </div>
 
         {/* Right Column */}
-        <div className="space-y-6">
+        <div className="space-y-5">
+
           {/* Recent Templates */}
-          <div className="rounded-2xl border border-slate-200 bg-white p-6">
-            <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-800">
+          <div className="rounded-2xl border border-slate-200 bg-white p-5">
+            <h3 className="mb-3 flex items-center gap-2 font-semibold text-slate-800 text-sm">
               <Clock className="h-4 w-4 text-indigo-500" />
               Recent Templates
             </h3>
             <div className="divide-y divide-slate-100">
               {loading ? (
-                <div className="py-8 text-center text-sm text-slate-500">Loading...</div>
+                <div className="py-6 text-center text-sm text-slate-400">Loading...</div>
               ) : recentTemplates.length > 0 ? (
                 recentTemplates.map((t, i) => (
                   <RecentItem
                     key={t.id || i}
-                    icon={FileText}
                     title={t.name || 'Untitled Template'}
                     subtitle={`v${t.version || 1} - ${t.output_format || 'PDF'}`}
                     status={t.status || 'Draft'}
@@ -372,79 +487,24 @@ const DocFlowSetupDashboard = ({ user }) => {
                   />
                 ))
               ) : (
-                <div className="py-8 text-center text-sm text-slate-500">
+                <div className="py-6 text-center text-sm text-slate-400">
                   No templates yet. Create your first template!
                 </div>
               )}
             </div>
           </div>
 
-          {/* Recent Documents */}
-          <div className="rounded-2xl border border-slate-200 bg-white p-6">
-            <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-800">
-              <Eye className="h-4 w-4 text-indigo-500" />
-              Recent Documents
-            </h3>
-            <div className="divide-y divide-slate-100">
-              {loading ? (
-                <div className="py-8 text-center text-sm text-slate-500">Loading...</div>
-              ) : recentDocuments.length > 0 ? (
-                recentDocuments.map((d, i) => (
-                  <RecentItem
-                    key={d.id || i}
-                    icon={FileCheck}
-                    title={d.document_name || d.template_name || 'Document'}
-                    subtitle={d.recipient_email || 'No recipient'}
-                    status={d.status === 'pending_signature' ? 'Sent' : d.status === 'signed' ? 'Signed' : 'Generated'}
-                    time={formatTime(d.created_at)}
-                    color={d.status === 'signed' ? 'emerald' : 'indigo'}
-                  />
-                ))
-              ) : (
-                <div className="py-8 text-center text-sm text-slate-500">
-                  No documents generated yet.
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* System Status */}
-          <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-indigo-50 to-white p-6">
-            <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-800">
+          {/* Overview */}
+          <div className="rounded-2xl border border-slate-200 bg-gradient-to-br from-slate-50 to-white p-5" data-testid="overview-section">
+            <h3 className="mb-4 flex items-center gap-2 font-semibold text-slate-800 text-sm">
               <BarChart3 className="h-4 w-4 text-indigo-500" />
               Overview
             </h3>
-            <div className="space-y-3">
-              <div className="flex items-center justify-between rounded-lg bg-white p-3 shadow-sm">
-                <div className="flex items-center gap-2">
-                  <FileText className="h-4 w-4 text-indigo-500" />
-                  <span className="text-sm text-slate-600">Total Templates</span>
-                </div>
-                <span className="font-semibold text-slate-800">{stats.totalTemplates}</span>
-              </div>
-              <div className="flex items-center justify-between rounded-lg bg-white p-3 shadow-sm">
-                <div className="flex items-center gap-2">
-                  <Layers className="h-4 w-4 text-sky-500" />
-                  <span className="text-sm text-slate-600">Documents Generated</span>
-                </div>
-                <span className="font-semibold text-slate-800">{stats.totalDocuments}</span>
-              </div>
-              <div className="flex items-center justify-between rounded-lg bg-white p-3 shadow-sm">
-                <div className="flex items-center gap-2">
-                  <PenTool className="h-4 w-4 text-amber-500" />
-                  <span className="text-sm text-slate-600">Pending Signatures</span>
-                </div>
-                <span className="font-semibold text-slate-800">{stats.pendingSignatures}</span>
-              </div>
-              <div className="flex items-center justify-between rounded-lg bg-white p-3 shadow-sm">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                  <span className="text-sm text-slate-600">System Status</span>
-                </div>
-                <Badge className="bg-emerald-100 text-emerald-700 text-[10px]">
-                  Operational
-                </Badge>
-              </div>
+            <div className="space-y-2.5">
+              <OverviewStat icon={FileText} label="Total Templates" value={stats.totalTemplates} iconColor="bg-indigo-500" />
+              <OverviewStat icon={Layers} label="Active Documents" value={stats.totalDocuments - stats.completedDocuments} iconColor="bg-sky-500" />
+              <OverviewStat icon={PenTool} label="Pending Signatures" value={stats.pendingSignatures} iconColor="bg-amber-500" />
+              <OverviewStat icon={CheckCircle2} label="Completed Documents" value={stats.completedDocuments} iconColor="bg-emerald-500" />
             </div>
           </div>
         </div>

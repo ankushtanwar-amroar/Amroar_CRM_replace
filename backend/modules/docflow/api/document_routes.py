@@ -419,3 +419,161 @@ async def get_analytics_summary(current_user: User = Depends(get_current_user)):
     except Exception as e:
         print(f"Error in analytics summary: {e}")
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+
+@router.post("/documents/{document_id}/role-action")
+async def document_role_action(document_id: str, request: Request):
+    """Handle Approver/Reviewer actions on a template-level document."""
+    from datetime import timezone
+    body = await request.json()
+    action = body.get("action")  # approve, reject, review
+    recipient_token = body.get("recipient_token")
+    rejection_reason = body.get("reason", "").strip() if action == "reject" else None
+
+    if action not in ("approve", "reject", "review"):
+        raise HTTPException(status_code=400, detail="Invalid action. Must be approve, reject, or review.")
+
+    if action == "reject" and not rejection_reason:
+        raise HTTPException(status_code=400, detail="Rejection reason is required.")
+
+    document = await db.docflow_documents.find_one({"id": document_id})
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Find the matching recipient by token
+    recipients = document.get("recipients", [])
+    matched = None
+    for r in recipients:
+        if r.get("public_token") == recipient_token:
+            matched = r
+            break
+    if not matched:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+
+    role = matched.get("role_type", matched.get("role", "SIGN")).upper()
+    if action in ("approve", "reject") and role != "APPROVE_REJECT":
+        raise HTTPException(status_code=400, detail=f"Recipient role is {role}, not APPROVE_REJECT")
+    if action == "review" and role not in ("VIEW_ONLY", "REVIEWER"):
+        raise HTTPException(status_code=400, detail=f"Recipient role is {role}, not REVIEWER")
+
+    # Extract metadata
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent", "")
+
+    now = datetime.now(timezone.utc).isoformat()
+    action_taken = action + "ed" if action == "reject" else (action + "d" if action != "review" else "reviewed")  # approved, rejected, reviewed
+
+    # Update recipient status with metadata
+    update_set = {
+        "recipients.$.status": action_taken,
+        "recipients.$.action_taken": action_taken,
+        "recipients.$.action_at": now,
+        "recipients.$.ip_address": ip_address,
+        "recipients.$.user_agent": user_agent,
+        "updated_at": now,
+    }
+    if rejection_reason:
+        update_set["recipients.$.reject_reason"] = rejection_reason
+
+    await db.docflow_documents.update_one(
+        {"id": document_id, "recipients.public_token": recipient_token},
+        {"$set": update_set}
+    )
+
+    # If rejected, mark document as declined with reason
+    if action == "reject":
+        await db.docflow_documents.update_one(
+            {"id": document_id},
+            {"$set": {
+                "status": "declined",
+                "reject_reason": rejection_reason,
+                "rejected_by": matched.get("name", ""),
+                "rejected_at": now,
+                "updated_at": now,
+            }}
+        )
+
+    # Check if all recipients are done
+    updated_doc = await db.docflow_documents.find_one({"id": document_id}, {"_id": 0, "recipients": 1, "status": 1, "tenant_id": 1, "delivery_channels": 1, "routing_mode": 1, "template_name": 1})
+    all_done = all(
+        r.get("status") in ("signed", "completed", "approved", "reviewed", "receive_copy")
+        for r in updated_doc.get("recipients", [])
+        if r.get("role_type", r.get("role", "SIGN")).upper() != "RECEIVE_COPY"
+    )
+    if all_done and updated_doc.get("status") != "declined":
+        await db.docflow_documents.update_one(
+            {"id": document_id},
+            {"$set": {"status": "completed", "completed_at": now, "updated_at": now}}
+        )
+
+    # Sequential routing: activate next recipient after approve/review
+    if action in ("approve", "review") and not all_done and updated_doc.get("status") != "declined":
+        recipients_latest = updated_doc.get("recipients", [])
+        required_sorted = sorted(
+            [r for r in recipients_latest if r.get("is_required", True)],
+            key=lambda r: int(r.get("routing_order", 1) or 1)
+        )
+        matched_index = next((i for i, r in enumerate(required_sorted) if r.get("public_token") == recipient_token), None)
+        if matched_index is not None:
+            next_recipient = None
+            for r in required_sorted[matched_index + 1:]:
+                if r.get("status") not in ("signed", "completed", "approved", "reviewed", "declined"):
+                    next_recipient = r
+                    break
+            if next_recipient:
+                next_id = next_recipient.get("id")
+                await db.docflow_documents.update_one(
+                    {"id": document_id, "recipients.id": next_id},
+                    {"$set": {"recipients.$.status": "sent", "recipients.$.sent_at": now}}
+                )
+                logger.info(f"Advanced workflow: activated next recipient {next_recipient.get('name')} ({next_recipient.get('email')})")
+
+                # Send email to next recipient
+                try:
+                    from ..services.document_service_enhanced import EnhancedDocumentService
+                    doc_svc = EnhancedDocumentService(db)
+                    frontend_url = os.environ.get("FRONTEND_URL", "")
+                    if not frontend_url:
+                        from services.email_service import FRONTEND_URL
+                        frontend_url = FRONTEND_URL or ""
+                    if "email" in (updated_doc.get("delivery_channels") or []) and next_recipient.get("email"):
+                        recipient_url = f"{frontend_url}/docflow/view/{next_recipient.get('public_token')}"
+                        await doc_svc.email_service.send_document_email(
+                            recipient_email=next_recipient.get("email"),
+                            recipient_name=next_recipient.get("name"),
+                            template_name=updated_doc.get("template_name", "Document"),
+                            document_url=recipient_url,
+                            pdf_content=None,
+                            sender_name="DocFlow CRM",
+                        )
+                        logger.info(f"Sent notification email to next recipient: {next_recipient.get('email')}")
+                except Exception as email_err:
+                    logger.warning(f"Failed to email next recipient: {email_err}")
+
+    # Fire template-level webhook for approve/reject/review
+    try:
+        from ..services.webhook_service import WebhookService
+        wh = WebhookService(db)
+        wh_event = action
+        await wh.fire_document_event(
+            document_id=document_id,
+            event_type=wh_event,
+            tenant_id=document.get("tenant_id", ""),
+            extra_data={
+                "action": action_taken,
+                "recipient_name": matched.get("name", ""),
+                "recipient_email": matched.get("email", ""),
+                "role_type": role,
+                "reason": rejection_reason if action == "reject" else None,
+                "metadata": {
+                    "ip_address": ip_address,
+                    "user_agent": user_agent,
+                    "performed_by": body.get("name") or matched.get("name", ""),
+                    "performed_by_email": body.get("email") or matched.get("email", ""),
+                },
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Webhook fire for role-action failed: {e}")
+
+    return {"success": True, "action": action_taken, "message": f"Document {action_taken} successfully"}

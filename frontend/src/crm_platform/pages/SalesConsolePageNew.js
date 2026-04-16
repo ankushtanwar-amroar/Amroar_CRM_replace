@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, memo, useMemo } from 'react';
 import { useNavigate, useLocation, useSearchParams, useParams } from 'react-router-dom';
 import { useSelector, useDispatch } from 'react-redux';
-import { Grid, ChevronDown, Home, Users, Building2, Briefcase, CheckSquare, Calendar as CalendarIcon, X, Search, Loader, RefreshCw, Settings2, GripVertical, Lock, Eye, EyeOff, RotateCcw, Activity, Layout, UserPlus } from 'lucide-react';
+import { Grid, ChevronDown, Home, Users, Building2, Briefcase, CheckSquare, Calendar as CalendarIcon, X, Search, Loader, RefreshCw, Settings2, GripVertical, Lock, Eye, EyeOff, RotateCcw, Activity, Layout, UserPlus, Database, FileText, ClipboardList, Zap, ListTodo, Upload, Download, MessageSquare, FolderOpen, Layers, Mail, CalendarRange, Bot } from 'lucide-react';
 import SalesConsoleHeader from '../components/SalesConsoleHeader';
 import DynamicRecordView from '../components/DynamicRecordView';
 import ObjectManagerListPage from './ObjectManagerListPage';
@@ -1235,12 +1235,20 @@ const SalesConsolePageNew = () => {
 
   // Available apps for the app launcher
   const availableApps = [
-    { 
-      id: 'sales-console', 
-      label: 'Sales Console', 
-      description: 'Manage leads, accounts, and opportunities',
-      icon: Grid
-    }
+    { id: 'sales-console', label: 'Sales Console', description: 'Manage leads, accounts, and opportunities', icon: Grid, route: null },
+    { id: 'schema-builder', label: 'Schema Builder', description: 'Define and manage data structure', icon: Database, route: '/setup/schema-builder/preview' },
+    { id: 'form-builder', label: 'Form Builder', description: 'Design custom input forms', icon: FileText, route: '/form-builder' },
+    { id: 'survey-builder', label: 'Survey Builder', description: 'Create surveys and questionnaires', icon: ClipboardList, route: '/survey-builder-v2' },
+    { id: 'flow-builder', label: 'Flow Builder', description: 'Visual automation designer', icon: Zap, route: '/flows' },
+    { id: 'task-manager', label: 'Task Manager', description: 'Project and task management', icon: ListTodo, route: '/task-manager' },
+    { id: 'import-builder', label: 'Import Builder', description: 'Bulk data import tools', icon: Upload, route: '/setup/import-builder' },
+    { id: 'export-builder', label: 'Export Builder', description: 'Export data and reports', icon: Download, route: '/setup/export-builder' },
+    { id: 'chatbot-manager', label: 'Chatbot Manager', description: 'Configure chat automation', icon: MessageSquare, route: '/setup/chatbot-manager' },
+    { id: 'docflow', label: 'DocFlow', description: 'Document workflows and e-signatures', icon: FileText, route: '/setup/docflow' },
+    { id: 'file-manager', label: 'File Manager', description: 'Browse and manage files', icon: FolderOpen, route: '/setup/file-manager' },
+    { id: 'app-manager', label: 'App Manager', description: 'Configure app settings', icon: Layers, route: '/setup/app-manager' },
+    { id: 'email-templates', label: 'Email Templates', description: 'Create reusable email templates', icon: Mail, route: '/setup/email-templates' },
+    { id: 'booking', label: 'Booking', description: 'Scheduling and appointments', icon: CalendarRange, route: '/booking' },
   ];
 
   // Sales Console dropdown options
@@ -1729,18 +1737,22 @@ const SalesConsolePageNew = () => {
                   <div className="grid grid-cols-2 gap-3">
                     {filteredApps.map(app => {
                       const AppIcon = app.icon;
-                      const isActive = true; // Sales Console is always active
+                      const isActive = app.id === 'sales-console';
                       return (
                         <button
                           key={app.id}
+                          data-testid={`app-launcher-app-${app.id}`}
                           onClick={() => {
+                            if (app.route) {
+                              navigate(app.route);
+                            }
                             setShowAppLauncher(false);
                             setAppSearchTerm('');
                           }}
                           className={`relative flex flex-col items-center p-4 rounded-xl transition-all duration-200 ${
                             isActive 
                               ? 'bg-blue-50 border-2 border-blue-500 shadow-md ring-2 ring-blue-100' 
-                              : 'hover:bg-slate-50 border-2 border-transparent hover:border-slate-200'
+                              : 'bg-white border border-slate-200 hover:border-blue-300 hover:shadow-md hover:bg-blue-50/30'
                           }`}
                         >
                           {/* Active indicator badge */}
@@ -1751,14 +1763,10 @@ const SalesConsolePageNew = () => {
                               </svg>
                             </div>
                           )}
-                          <div className={`w-14 h-14 rounded-xl flex items-center justify-center mb-3 shadow-lg ${
-                            isActive 
-                              ? 'bg-gradient-to-br from-blue-500 to-blue-700' 
-                              : 'bg-gradient-to-br from-slate-500 to-slate-600'
-                          }`}>
+                          <div className="w-14 h-14 rounded-xl flex items-center justify-center mb-3 shadow-lg bg-gradient-to-br from-blue-500 to-blue-700">
                             <AppIcon className="w-7 h-7 text-white" />
                           </div>
-                          <span className="text-sm font-semibold text-slate-900 text-center">{app.label}</span>
+                          <span className="text-sm font-semibold text-slate-900 text-center leading-tight">{app.label}</span>
                           {isActive && (
                             <span className="mt-1 px-2 py-0.5 text-xs font-medium text-blue-700 bg-blue-100 rounded-full">
                               Active
@@ -2014,6 +2022,7 @@ const SalesConsolePageNew = () => {
                         <button
                           key={app.id}
                           onClick={() => {
+                            if (app.route) navigate(app.route);
                             setShowViewMoreModal(false);
                             setShowAppLauncher(false);
                           }}
@@ -2075,6 +2084,7 @@ const SalesConsolePageNew = () => {
                       <button
                         key={app.id}
                         onClick={() => {
+                          if (app.route) navigate(app.route);
                           setShowViewMoreModal(false);
                           setShowAppLauncher(false);
                         }}

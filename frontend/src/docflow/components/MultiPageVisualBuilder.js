@@ -805,7 +805,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
           <div className="flex items-center gap-2">
             {hasPdf && onConvertToEditable && (
               <>
-                {hasBlocks ? (
+                {/* {hasBlocks ? (
                   editableMode ? (
                     <button
                       onClick={() => setEditableMode(false)}
@@ -842,7 +842,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   >
                     {convertingToEditable ? 'Converting...' : 'Convert to Editable'}
                   </button>
-                )}
+                )} */}
                 <div className="w-px h-5 bg-gray-200" />
               </>
             )}
@@ -1031,15 +1031,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         ))}
                       </div>
                     ) : (
-                      <span
-                        className="truncate text-xs font-medium text-center"
+                      <div
+                        className="truncate text-xs font-medium w-full px-1"
                         style={{
-                          color: config.color,
-                          ...((['label', 'text'].includes(field.type) && field.style) ? {
+                          color: field.style?.color || config.color,
+                          textAlign: (['label', 'text', 'merge'].includes(field.type) && field.style?.textAlign) ? field.style.textAlign : 'center',
+                          ...((['label', 'text', 'merge'].includes(field.type) && field.style) ? {
                             fontFamily: field.style.fontFamily || undefined,
                             fontSize: field.style.fontSize ? `${field.style.fontSize}px` : undefined,
                             fontWeight: field.style.fontWeight || undefined,
-                            textAlign: field.style.textAlign || undefined,
+                            fontStyle: field.style.fontStyle || undefined,
+                            textDecoration: field.style.textDecoration || undefined,
                           } : {})
                         }}
                       >
@@ -1050,7 +1052,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                             : signingTypes.has(field.type)
                               ? `${field.label}${getRecipientLabel(field.assigned_to || field.recipient_id) ? ` • ${getRecipientLabel(field.assigned_to || field.recipient_id)}` : ''}`
                               : field.label}
-                      </span>
+                      </div>
                     )}
                   </div>
 
@@ -1204,8 +1206,8 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 </div>
               )}
 
-              {/* Text Styling Controls — for Label and Text Input */}
-              {['label', 'text'].includes(selectedField.type) && (
+              {/* Text Styling Controls — for Label, Text Input, and Merge Field */}
+              {['label', 'text', 'merge'].includes(selectedField.type) && (
                 <div className="border-t border-gray-100 pt-3 mt-1 space-y-3" data-testid="text-styling-section">
                   <label className="block text-xs font-semibold text-gray-800 flex items-center gap-1.5">
                     <svg className="h-3.5 w-3.5 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
@@ -1245,20 +1247,29 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
-                      <label className="block text-[10px] font-medium text-gray-500 mb-1">Weight</label>
+                      <label className="block text-[10px] font-medium text-gray-500 mb-1">Weight / Style</label>
                       <div className="flex gap-1">
-                        {['normal', 'bold'].map(w => (
+                        {[
+                          { key: 'fontWeight', val: 'bold', label: 'B', title: 'Bold', active: (selectedField.style?.fontWeight || 'normal') === 'bold' },
+                          { key: 'fontStyle', val: 'italic', label: 'I', title: 'Italic', active: (selectedField.style?.fontStyle || 'normal') === 'italic', italic: true },
+                          { key: 'textDecoration', val: 'underline', label: 'U', title: 'Underline', active: (selectedField.style?.textDecoration || 'none') === 'underline', underline: true },
+                        ].map(btn => (
                           <button
-                            key={w}
-                            onClick={() => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), fontWeight: w })}
-                            className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors capitalize ${
-                              (selectedField.style?.fontWeight || 'normal') === w
-                                ? 'bg-indigo-600 text-white'
-                                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                            key={btn.key}
+                            title={btn.title}
+                            onClick={() => {
+                              const current = selectedField.style?.[btn.key] || (btn.key === 'textDecoration' ? 'none' : 'normal');
+                              const newVal = current === btn.val ? (btn.key === 'textDecoration' ? 'none' : 'normal') : btn.val;
+                              updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), [btn.key]: newVal });
+                            }}
+                            className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors ${
+                              btn.active ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                             }`}
-                            data-testid={`field-weight-${w}`}
+                            data-testid={`field-style-${btn.key}`}
                           >
-                            {w === 'bold' ? <strong>B</strong> : 'N'}
+                            <span style={{ fontWeight: btn.key === 'fontWeight' ? 'bold' : undefined, fontStyle: btn.italic ? 'italic' : undefined, textDecoration: btn.underline ? 'underline' : undefined }}>
+                              {btn.label}
+                            </span>
                           </button>
                         ))}
                       </div>
@@ -1281,6 +1292,25 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           </button>
                         ))}
                       </div>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-medium text-gray-500 mb-1">Text Color</label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="color"
+                        value={selectedField.style?.color || '#000000'}
+                        onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), color: e.target.value })}
+                        className="w-8 h-8 rounded-md border border-gray-200 cursor-pointer p-0.5"
+                        data-testid="field-text-color"
+                      />
+                      <input
+                        type="text"
+                        value={selectedField.style?.color || '#000000'}
+                        onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), color: e.target.value })}
+                        className="flex-1 px-2 py-1 text-xs border border-gray-200 rounded-md font-mono"
+                        data-testid="field-text-color-hex"
+                      />
                     </div>
                   </div>
                 </div>
@@ -1395,6 +1425,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       onChange={(e) => updateFieldProperty(selectedField.id, 'mergePattern', e.target.value)}
                       className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 font-mono"
                       placeholder="{{Object.Field}}"
+                      disabled
                     />
                   </div>
                   {/* Fallback to Input Toggle */}
@@ -1765,47 +1796,6 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                     + Add Condition
                   </button>
                 </div>
-              )}
-
-              {/* Label Style (for static labels) */}
-              {selectedField.type === 'label' && (
-                <>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Font Size</label>
-                    <select
-                      value={selectedField.style?.fontSize || '12px'}
-                      onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...selectedField.style, fontSize: e.target.value })}
-                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
-                    >
-                      <option value="10px">10px</option>
-                      <option value="12px">12px</option>
-                      <option value="14px">14px</option>
-                      <option value="16px">16px</option>
-                      <option value="18px">18px</option>
-                      <option value="24px">24px</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Font Weight</label>
-                    <select
-                      value={selectedField.style?.fontWeight || 'normal'}
-                      onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...selectedField.style, fontWeight: e.target.value })}
-                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
-                    >
-                      <option value="normal">Normal</option>
-                      <option value="bold">Bold</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Color</label>
-                    <input
-                      type="color"
-                      value={selectedField.style?.color || '#000000'}
-                      onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...selectedField.style, color: e.target.value })}
-                      className="w-full h-8 rounded-md border border-gray-300 cursor-pointer"
-                    />
-                  </div>
-                </>
               )}
 
               {/* Position & Size */}

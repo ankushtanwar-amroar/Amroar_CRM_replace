@@ -384,6 +384,7 @@ class SendPackageRecipient(BaseModel):
     role: str = "signer"  # signer, approver, reviewer, receive_copy
     routing_order: int = 1
     wave: Optional[int] = None
+    email_template_id: Optional[str] = None
 
 class SendPackageFieldAssignment(BaseModel):
     field_id: str
@@ -396,6 +397,10 @@ class SendPackageTemplateAssignment(BaseModel):
 class SendPackageAuth(BaseModel):
     otp_required: bool = True
 
+class TemplateMergeFields(BaseModel):
+    template_id: str
+    merge_fields: Dict[str, Any] = {}
+
 class SendPackageRequest(BaseModel):
     package_id: str
     recipients: List[SendPackageRecipient] = []
@@ -403,6 +408,7 @@ class SendPackageRequest(BaseModel):
     delivery_mode: str = "email"  # email, public_link, both, public_recipients
     field_assignments: List[SendPackageTemplateAssignment] = []
     authentication: Optional[SendPackageAuth] = None
+    template_merge_fields: Optional[List[TemplateMergeFields]] = None
 
 
 SEND_ROLE_MAP = {
@@ -475,6 +481,48 @@ async def send_package(
             if f.recipient_id not in ext_recipient_ids:
                 errors.append(f"Field '{f.field_id}' assigned to unknown recipient '{f.recipient_id}'")
 
+    # ── 6. Validate template_merge_fields ──
+    # Build lookups for flexible template matching:
+    # - template_group_id -> package template_id
+    # - template name -> package template_id
+    group_to_pkg_template = {}
+    name_to_pkg_template = {}
+    for doc_entry in package.get("documents", []):
+        tid = doc_entry.get("template_id")
+        if tid:
+            tmpl = await db.docflow_templates.find_one(
+                {"id": tid}, {"_id": 0, "template_group_id": 1, "name": 1}
+            )
+            if tmpl:
+                if tmpl.get("template_group_id"):
+                    group_to_pkg_template[tmpl["template_group_id"]] = tid
+                if tmpl.get("name"):
+                    name_to_pkg_template[tmpl["name"]] = tid
+
+    # Also check if the provided ID is a template that shares the same name
+    async def _resolve_template_id(provided_id):
+        """Resolve provided template ID to the actual ID in the package."""
+        if provided_id in template_ids:
+            return provided_id
+        if provided_id in group_to_pkg_template:
+            return group_to_pkg_template[provided_id]
+        # Check if provided ID is a template whose name matches one in the package
+        ext_tmpl = await db.docflow_templates.find_one(
+            {"id": provided_id}, {"_id": 0, "name": 1}
+        )
+        if ext_tmpl and ext_tmpl.get("name") in name_to_pkg_template:
+            return name_to_pkg_template[ext_tmpl["name"]]
+        return None
+
+    merge_fields_map: Dict[str, Dict[str, Any]] = {}
+    if req.template_merge_fields:
+        for tmf in req.template_merge_fields:
+            resolved_id = await _resolve_template_id(tmf.template_id)
+            if not resolved_id:
+                errors.append(f"template_merge_fields references unknown template '{tmf.template_id}'")
+                continue
+            merge_fields_map[resolved_id] = tmf.merge_fields
+
     if errors:
         raise HTTPException(status_code=400, detail={"errors": errors, "message": "Validation failed"})
 
@@ -504,6 +552,7 @@ async def send_package(
             "role_type": role,
             "routing_order": routing_order,
             "assigned_components": assignment_map.get(ext_id, {}),
+            "email_template_id": r.email_template_id,
         })
 
     routing_config = {
@@ -528,6 +577,7 @@ async def send_package(
             send_email=needs_email,
             user_id=api_key.get("created_by", "api"),
             tenant_id=tenant_id,
+            template_merge_fields=merge_fields_map,
         )
     except Exception as e:
         logger.error(f"Public API send_package failed: {e}")
@@ -809,6 +859,7 @@ async def create_package(
             "role_type": role,
             "routing_order": routing_order,
             "assigned_components": assignment_map.get(ext_id, {}),
+            "email_template_id": getattr(r, 'email_template_id', None),
         })
 
     # Routing config

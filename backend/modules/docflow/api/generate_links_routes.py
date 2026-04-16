@@ -115,6 +115,7 @@ class RecipientInput(BaseModel):
     routing_order: int = Field(default=1, ge=1)
     assigned_components: Optional[List[str]] = Field(default_factory=list, description="IDs of template fields assigned to this recipient (basic mode)")
     assigned_components_map: Optional[Dict[str, List[str]]] = Field(default=None, description="Package mode: {template_id: [field_ids]}")
+    email_template_id: Optional[str] = Field(default=None, description="Custom email template ID to use when notifying this recipient")
 
 
 class PackageDocumentInput(BaseModel):
@@ -289,6 +290,7 @@ async def generate_links(
                 "routing_order": r.routing_order,
                 "is_required": True,
                 "assigned_field_ids": r.assigned_components or [],
+                "email_template_id": r.email_template_id,
             })
 
         # For public_link only with no recipients, create a placeholder

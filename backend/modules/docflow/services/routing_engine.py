@@ -8,6 +8,7 @@ Wave-based sequential routing for packages.
 Core principle: The routing engine is stateless — it reads the package,
 determines the next action, and applies atomic updates.
 """
+import os
 import logging
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timezone
@@ -75,11 +76,16 @@ class RoutingEngine:
         # Fire webhook: package_sent
         if self.webhook_service:
             try:
+                first_recipient = recipients[0] if recipients else {}
                 await self.webhook_service.fire_package_event(
                     package_id=package_id,
                     event_type="package_sent",
                     tenant_id=package.get("tenant_id", ""),
-                    extra_data={"recipient_count": len(recipients)},
+                    extra_data={
+                        "recipient_count": len(recipients),
+                        "recipient_name": first_recipient.get("name", ""),
+                        "recipient_email": first_recipient.get("email", ""),
+                    },
                 )
             except Exception as e:
                 logger.warning(f"Webhook fire_package_event failed: {e}")
@@ -284,13 +290,16 @@ class RoutingEngine:
         # Fire webhook: wave_started
         if self.webhook_service:
             try:
+                first_wave_recipient = wave[0] if wave else {}
                 await self.webhook_service.fire_package_event(
                     package_id=package_id,
                     event_type="wave_started",
                     tenant_id=package.get("tenant_id", ""),
                     extra_data={
                         "wave_order": min_order,
-                        "recipients": [{"id": r["id"], "name": r.get("name"), "role_type": r.get("role_type")} for r in wave],
+                        "recipient_count": len(wave),
+                        "recipient_name": first_wave_recipient.get("name", ""),
+                        "recipient_email": first_wave_recipient.get("email", ""),
                     },
                 )
             except Exception as e:
@@ -432,19 +441,83 @@ class RoutingEngine:
                 logger.warning(f"[RoutingEngine] No email for recipient {recipient.get('id', '?')[:8]}, skipping notification")
             else:
                 logger.info(f"[RoutingEngine] Sending notification to {email} for package '{package.get('name', '?')}' (role={recipient.get('role_type', '?')})")
-                from ..services.email_notification_service import send_action_required_email
-                success = send_action_required_email(
-                    recipient_name=recipient.get("name", ""),
-                    recipient_email=email,
-                    role_type=recipient.get("role_type", "SIGN"),
-                    package_name=package.get("name", "Package"),
-                    package_id=package.get("id", ""),
-                    public_token=recipient.get("public_token", ""),
-                    document_count=len(package.get("documents", [])),
-                    sender_name=package.get("created_by_name"),
-                )
+
+                # Try to resolve a custom email template for this recipient
+                custom_subject = None
+                custom_html = None
+                email_template_id = recipient.get("email_template_id")
+                tenant_id = package.get("tenant_id", "")
+                role_type = recipient.get("role_type", "SIGN")
+
+                try:
+                    from ..services.email_template_service import EmailTemplateService
+                    ets = EmailTemplateService(self.db)
+                    resolved = await ets.resolve_for_sending(tenant_id, role_type, email_template_id)
+                    if resolved:
+                        from services.email_service import FRONTEND_URL as EMAIL_FRONTEND_URL
+                        base_url = EMAIL_FRONTEND_URL or os.environ.get("FRONTEND_URL", "")
+                        access_url = f"{base_url}/docflow/package/{package.get('id', '')}/view/{recipient.get('public_token', '')}"
+                        variables = {
+                            "recipient_name": recipient.get("name", ""),
+                            "recipient_email": email,
+                            "document_name": package.get("name", "Package"),
+                            "package_name": package.get("name", "Package"),
+                            "signing_link": access_url,
+                            "sender_name": package.get("created_by_name") or "DocFlow",
+                            "company_name": "Cluvik",
+                            "status": "Pending",
+                        }
+                        custom_subject = ets.render_template(resolved["subject"], variables)
+                        custom_html = ets.render_template(resolved["body_html"], variables)
+                except Exception as tmpl_err:
+                    logger.warning(f"[RoutingEngine] Custom email template lookup failed: {tmpl_err}")
+
+                if custom_subject and custom_html:
+                    # Send using custom template
+                    from services.email_service import send_email, FRONTEND_URL as EMAIL_FRONTEND_URL
+                    success = send_email(
+                        to_email=email,
+                        subject=custom_subject,
+                        html_content=custom_html,
+                        from_name="DocFlow",
+                    )
+                else:
+                    # Fallback to hardcoded action-required email
+                    from ..services.email_notification_service import send_action_required_email
+                    success = send_action_required_email(
+                        recipient_name=recipient.get("name", ""),
+                        recipient_email=email,
+                        role_type=role_type,
+                        package_name=package.get("name", "Package"),
+                        package_id=package.get("id", ""),
+                        public_token=recipient.get("public_token", ""),
+                        document_count=len(package.get("documents", [])),
+                        sender_name=package.get("created_by_name"),
+                    )
                 if success:
                     logger.info(f"[RoutingEngine] Email sent successfully to {email}")
+                    # Log to email history
+                    try:
+                        from .email_history_service import EmailHistoryService
+                        ehs = EmailHistoryService(self.db)
+                        doc_name = package.get("name", "Package")
+                        doc_id = package.get("documents", [{}])[0].get("document_id", "") if package.get("documents") else ""
+                        await ehs.log_email(
+                            template_id="",
+                            template_name=doc_name,
+                            document_id=doc_id,
+                            recipient_email=email,
+                            recipient_name=recipient.get("name", ""),
+                            crm_object_type="package",
+                            crm_object_id=package.get("id", ""),
+                            tenant_id=package.get("tenant_id", ""),
+                            status="sent",
+                            source="package",
+                            package_id=package.get("id"),
+                            package_name=package.get("name"),
+                        )
+                    except Exception as log_err:
+                        logger.warning(f"[RoutingEngine] Failed to log email history: {log_err}")
                 else:
                     logger.error(f"[RoutingEngine] Email FAILED for {email} — check email_service logs")
 

@@ -4,22 +4,50 @@ import { toast } from 'react-hot-toast';
 
 const WEBHOOK_EVENTS = [
   { id: 'signed', label: 'Signed', description: 'When document is signed by recipient' },
-  { id: 'viewed', label: 'Viewed', description: 'When document is viewed/opened' },
-  { id: 'opened', label: 'Opened', description: 'When email with document link is opened' },
+  { id: 'opened', label: 'Opened', description: 'When document is opened via link' },
   { id: 'sent', label: 'Sent', description: 'When document is sent to recipient' },
-  { id: 'expired', label: 'Expired', description: 'When document signing link expires' },
-  { id: 'declined', label: 'Declined', description: 'When recipient declines to sign' },
+  { id: 'approve', label: 'Approved', description: 'When approver approves the document' },
+  { id: 'reject', label: 'Rejected', description: 'When approver rejects the document' },
+  { id: 'review', label: 'Reviewed', description: 'When reviewer completes review' },
   { id: 'signed_copy', label: 'Signed Copy', description: 'When signed copy is generated' }
 ];
 
 const SAMPLE_PAYLOADS = {
-  signed: { event: 'signed', document_id: 'doc_abc123', recipient_email: 'signer@example.com', recipient_name: 'John Doe', signed_at: '2026-03-30T14:30:00Z', status: 'completed' },
-  viewed: { event: 'viewed', document_id: 'doc_abc123', viewer_email: 'viewer@example.com', viewed_at: '2026-03-30T14:00:00Z' },
-  opened: { event: 'opened', document_id: 'doc_abc123', recipient_email: 'user@example.com', opened_at: '2026-03-30T13:45:00Z' },
-  sent: { event: 'sent', document_id: 'doc_abc123', recipient_email: 'user@example.com', sent_at: '2026-03-30T12:00:00Z', delivery_method: 'email' },
-  expired: { event: 'expired', document_id: 'doc_abc123', expired_at: '2026-04-06T12:00:00Z' },
-  declined: { event: 'declined', document_id: 'doc_abc123', recipient_email: 'user@example.com', declined_at: '2026-03-30T15:00:00Z', reason: 'Terms not acceptable' },
-  signed_copy: { event: 'signed_copy', document_id: 'doc_abc123', pdf_url: 'https://storage.example.com/signed/doc_abc123.pdf', generated_at: '2026-03-30T15:05:00Z' }
+  signed: {
+    event: 'signed',
+    document_id: 'doc_abc123',
+    document_status: 'signed',
+    template_name: 'NDA Agreement',
+    recipient_email: 'signer@example.com',
+    recipient_name: 'John Doe',
+    signed_at: '2026-03-30T14:30:00Z',
+    status: 'completed',
+    signed_documents: [{
+      document_id: 'doc_abc123',
+      template_name: 'NDA Agreement',
+      signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+      signed_at: '2026-03-30T14:30:00Z'
+    }],
+    recipient_details: { name: 'John Doe', email: 'signer@example.com' },
+    metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', performed_by: 'John Doe', performed_by_email: 'signer@example.com' }
+  },
+  opened: { event: 'opened', document_id: 'doc_abc123', recipient_email: 'user@example.com', recipient_name: 'John Doe', opened_at: '2026-03-30T13:45:00Z', metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0' } },
+  sent: { event: 'sent', document_id: 'doc_abc123', recipient_email: 'user@example.com', recipient_name: 'John Doe', sent_at: '2026-03-30T12:00:00Z', delivery_method: 'email' },
+  approve: { event: 'approve', document_id: 'doc_abc123', action: 'approved', recipient_email: 'approver@example.com', recipient_name: 'Jane Smith', role_type: 'APPROVE_REJECT', metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh)', performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' } },
+  reject: { event: 'reject', document_id: 'doc_abc123', action: 'rejected', recipient_email: 'approver@example.com', recipient_name: 'Jane Smith', role_type: 'APPROVE_REJECT', reason: 'Terms not acceptable', metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh)', performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' } },
+  review: { event: 'review', document_id: 'doc_abc123', action: 'reviewed', recipient_email: 'reviewer@example.com', recipient_name: 'Bob Wilson', role_type: 'VIEW_ONLY', metadata: { ip_address: '192.0.2.55', user_agent: 'Mozilla/5.0 (iPhone)', performed_by: 'Bob Wilson', performed_by_email: 'reviewer@example.com' } },
+  signed_copy: {
+    event: 'signed_copy',
+    document_id: 'doc_abc123',
+    template_name: 'NDA Agreement',
+    signed_documents: [{
+      document_id: 'doc_abc123',
+      template_name: 'NDA Agreement',
+      signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+      signed_at: '2026-03-30T15:05:00Z'
+    }],
+    generated_at: '2026-03-30T15:05:00Z'
+  }
 };
 
 const IntegrationTab = ({ templateData, onUpdate }) => {

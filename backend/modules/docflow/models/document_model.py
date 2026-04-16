@@ -16,6 +16,8 @@ class DocumentStatus(str, Enum):
     COMPLETED = "completed"
     EXPIRED = "expired"
     FAILED = "failed"
+    DECLINED = "declined"
+    PARTIALLY_SIGNED = "partially_signed"
 
 
 class DeliveryChannel(str, Enum):
@@ -32,6 +34,10 @@ class RecipientStatus(str, Enum):
     SIGNED = "signed"
     DECLINED = "declined"
     COMPLETED = "completed"
+    APPROVED = "approved"
+    REVIEWED = "reviewed"
+    REJECTED = "rejected"
+    RECEIVE_COPY = "receive_copy"
 
 
 class Recipient(BaseModel):
@@ -40,8 +46,10 @@ class Recipient(BaseModel):
     name: str
     email: str
     role: Optional[str] = None
+    role_type: Optional[str] = None  # Normalized role: SIGN, APPROVE_REJECT, VIEW_ONLY, RECEIVE_COPY
     status: RecipientStatus = RecipientStatus.PENDING
     routing_order: int = 1
+    is_required: bool = True
     assigned_field_ids: List[str] = []  # List of component IDs assigned to this recipient
     public_token: Optional[str] = None  # Individual token for signing link
     sent_at: Optional[datetime] = None
@@ -49,6 +57,12 @@ class Recipient(BaseModel):
     signed_at: Optional[datetime] = None
     declined_at: Optional[datetime] = None
     decline_reason: Optional[str] = None
+    action_taken: Optional[str] = None  # approved, rejected, reviewed
+    action_at: Optional[datetime] = None
+    # Metadata captured on role-action
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    reject_reason: Optional[str] = None  # Rejection reason for this recipient
 
 
 class Signature(BaseModel):
@@ -80,6 +94,10 @@ class Document(BaseModel):
     viewed_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     expires_at: Optional[datetime] = None
+    # Rejection fields
+    reject_reason: Optional[str] = None
+    rejected_by: Optional[str] = None
+    rejected_at: Optional[datetime] = None
     created_by: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

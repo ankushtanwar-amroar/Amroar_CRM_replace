@@ -288,7 +288,7 @@ async def get_package_public(
         doc_detail = None
         if doc_id:
             doc_detail = await db.docflow_documents.find_one(
-                {"id": doc_id}, {"_id": 0, "id": 1, "status": 1, "unsigned_pdf_url": 1, "signed_file_url": 1, "signed_s3_key": 1}
+                {"id": doc_id}, {"_id": 0, "id": 1, "status": 1, "unsigned_pdf_url": 1, "signed_file_url": 1, "signed_s3_key": 1, "field_data": 1, "merge_field_values": 1}
             )
         documents.append({
             "document_id": doc_id,
@@ -299,7 +299,23 @@ async def get_package_public(
             "has_pdf": bool(doc_detail.get("unsigned_pdf_url") or doc_detail.get("signed_file_url")) if doc_detail else False,
             "signed_file_url": doc_detail.get("signed_file_url") if doc_detail else None,
             "has_signed_version": bool(doc_detail.get("signed_file_url") or doc_detail.get("signed_s3_key")) if doc_detail else False,
+            "merge_field_values": doc_detail.get("merge_field_values", {}) if doc_detail else {},
+            "field_data": doc_detail.get("field_data", {}) if doc_detail else {},
         })
+
+    # Fire "opened" webhook when recipient views the package
+    try:
+        await webhook_service.fire_package_event(
+            package_id=package["id"],
+            event_type="opened",
+            tenant_id=package.get("tenant_id", ""),
+            extra_data={
+                "recipient_name": active_recipient.get("name", ""),
+                "recipient_email": active_recipient.get("email", ""),
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Webhook fire_package_event (opened) failed: {e}")
 
     # Determine if all SIGN recipients in earlier waves have completed
     recipients = package.get("recipients", [])
@@ -487,20 +503,34 @@ async def sign_with_fields(
             if not document:
                 continue
 
+            # Merge pre-existing field_data (from document generation merge fields)
+            # with user-submitted field_data (signatures, text, dates)
+            existing_doc_field_data = document.get("field_data", {}) or {}
+            existing_merge_values = document.get("merge_field_values", {}) or {}
+            combined_field_data = {**existing_merge_values, **existing_doc_field_data, **field_data_for_doc}
+
             # Load template field placements
             template = await db.docflow_templates.find_one(
                 {"id": template_id},
-                {"_id": 0, "field_placements": 1}
+                {"_id": 0, "field_placements": 1, "template_group_id": 1, "name": 1, "tenant_id": 1}
             )
             field_placements = (template or {}).get("field_placements", [])
 
-            # STRICT: Filter fields to ONLY those assigned to this recipient
+            # If no field placements on this template version, resolve from latest
+            if not field_placements and template:
+                from ..services.document_service_enhanced import EnhancedDocumentService
+                _doc_svc = EnhancedDocumentService(db)
+                field_placements = await _doc_svc._resolve_latest_field_placements(template)
+                if field_placements:
+                    logger.info(f"sign-with-fields: Resolved {len(field_placements)} fields from latest template version")
+
+            # Filter fields: assigned fields + non-assignable fields (merge, checkbox, radio, label)
             assigned_field_ids = set(assigned_components.get(template_id, []))
+            NON_ASSIGNABLE_TYPES = {"merge", "checkbox", "radio", "label"}
             if assigned_field_ids:
-                # Only embed fields explicitly assigned to this recipient
                 relevant_fields = [
                     f for f in field_placements
-                    if f.get("id") in assigned_field_ids
+                    if f.get("id") in assigned_field_ids or f.get("type") in NON_ASSIGNABLE_TYPES
                 ]
             else:
                 # No assignment map — check template-level assigned_to
@@ -537,7 +567,25 @@ async def sign_with_fields(
             for field in relevant_fields:
                 field_id = field.get("id")
                 field_type = field.get("type")
-                field_value = field_data_for_doc.get(field_id)
+                field_value = combined_field_data.get(field_id)
+
+                # For merge fields, also check by merge pattern keys (e.g., "Account.name")
+                if not field_value and field_type == "merge":
+                    merge_obj = field.get("merge_object") or field.get("mergeObject", "")
+                    merge_fld = field.get("merge_field") or field.get("mergeField", "")
+                    full_key = f"{merge_obj}.{merge_fld}" if merge_obj and merge_fld else ""
+                    field_value = (combined_field_data.get(full_key)
+                                   or combined_field_data.get(merge_fld)
+                                   or "")
+
+                # If exact match not found, try prefix match (handles truncated IDs from frontend)
+                if not field_value and field_value is not False:
+                    for k, v in combined_field_data.items():
+                        if field_id.startswith(k) or k.startswith(field_id):
+                            if v:
+                                field_value = v
+                                break
+
                 if not field_value and field_value is not False:
                     continue
 
@@ -602,6 +650,23 @@ async def sign_with_fields(
                     except Exception as e:
                         logger.warning(f"Failed to embed checkbox for field {field_id}: {e}")
 
+                elif field_type == "merge" and field_value:
+                    try:
+                        # White background to cover placeholder text
+                        bg_rect = fitz.Rect(x, y, x + w, y + h)
+                        page.draw_rect(bg_rect, color=None, fill=(1, 1, 1))
+                        font_size = float(field.get("style", {}).get("fontSize", 10) or 10) * scale
+                        font_size = max(6, min(font_size, 24))
+                        text_point = fitz.Point(x + 2 * scale, y + h - 4 * scale)
+                        page.insert_text(
+                            text_point,
+                            str(field_value),
+                            fontsize=font_size,
+                            color=(0.05, 0.05, 0.15)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to embed merge field {field_id}: {e}")
+
             # Save modified PDF
             signed_pdf_bytes = pdf_doc.tobytes()
             pdf_doc.close()
@@ -619,7 +684,7 @@ async def sign_with_fields(
                 signed_url = s3_service.get_document_url(new_signed_key, expiration=604800)
                 # Merge field data cumulatively
                 existing_field_data = document.get("field_data", {}) or {}
-                merged_field_data = {**existing_field_data, **field_data_for_doc}
+                merged_field_data = {**existing_field_data, **combined_field_data}
 
                 # Update document record
                 update_data = {
@@ -842,10 +907,10 @@ async def mark_reviewed(
         )
 
     # Validate recipient role
-    if active_recipient.get("role_type") != "VIEW_ONLY":
+    if active_recipient.get("role_type") not in ("VIEW_ONLY", "REVIEWER"):
         raise HTTPException(
             status_code=400,
-            detail=f"Recipient role is '{active_recipient.get('role_type')}', not VIEW_ONLY"
+            detail=f"Recipient role is '{active_recipient.get('role_type')}', not VIEW_ONLY or REVIEWER"
         )
 
     # Validate recipient status (must be notified or in_progress)
@@ -951,6 +1016,22 @@ async def approve_package(
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update recipient status")
 
+    # Fire approve_reject webhook
+    try:
+        await webhook_service.fire_package_event(
+            package_id=package["id"],
+            event_type="approved",
+            tenant_id=package.get("tenant_id", ""),
+            extra_data={
+                "action": "approved",
+                "recipient_name": active_recipient.get("name", ""),
+                "recipient_email": active_recipient.get("email", ""),
+                "approver_name": req.approver_name or active_recipient.get("name"),
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Webhook fire_package_event (approved) failed: {e}")
+
     return {
         "success": True,
         "message": "Package approved",
@@ -1051,6 +1132,23 @@ async def reject_package(
         reason=f"Rejected by {actor}: {req.reason.strip()}",
         actor=actor,
     )
+
+    # Fire approve_reject webhook (rejected)
+    try:
+        await webhook_service.fire_package_event(
+            package_id=package["id"],
+            event_type="rejected",
+            tenant_id=package.get("tenant_id", ""),
+            extra_data={
+                "action": "rejected",
+                "recipient_name": active_recipient.get("name", ""),
+                "recipient_email": active_recipient.get("email", ""),
+                "reason": req.reason.strip(),
+                "reject_reason": req.reason.strip(),
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Webhook fire_package_event (rejected) failed: {e}")
 
     return {
         "success": True,

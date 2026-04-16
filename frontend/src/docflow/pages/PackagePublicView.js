@@ -4,7 +4,7 @@ import {
   Package, FileText, CheckCircle2, Eye, Loader2, AlertCircle,
   XCircle, ChevronRight, CheckSquare, Square,
   ThumbsUp, ThumbsDown, ShieldCheck, Mail, Lock, Clock,
-  Ban, AlertOctagon, Timer, ChevronDown
+  Ban, AlertOctagon, Timer, ChevronDown, Download
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import InteractiveDocumentViewer from '../components/InteractiveDocumentViewer';
@@ -15,6 +15,7 @@ const API_URL = process.env.REACT_APP_BACKEND_URL || '';
 const ROLE_META = {
   SIGN:           { label: 'Signer',   icon: FileText,    color: 'bg-indigo-100 text-indigo-700' },
   VIEW_ONLY:      { label: 'Reviewer', icon: Eye,         color: 'bg-blue-100 text-blue-700' },
+  REVIEWER:       { label: 'Reviewer', icon: Eye,         color: 'bg-blue-100 text-blue-700' },
   APPROVE_REJECT: { label: 'Approver', icon: ShieldCheck,  color: 'bg-amber-100 text-amber-700' },
 };
 
@@ -132,6 +133,17 @@ const PackagePublicView = () => {
             data.active_recipient?.status !== 'completed' &&
             data.documents?.length > 0) {
           loadFieldPlacements(data);
+          // Pre-populate field values with merge field data from generated documents
+          const initialValues = {};
+          for (const doc of data.documents) {
+            const mfv = doc.merge_field_values || doc.field_data || {};
+            if (doc.document_id && Object.keys(mfv).length > 0) {
+              initialValues[doc.document_id] = { ...mfv };
+            }
+          }
+          if (Object.keys(initialValues).length > 0) {
+            setDocFieldValues(initialValues);
+          }
         }
       }
 
@@ -164,8 +176,12 @@ const PackagePublicView = () => {
           // STRICT field filtering by assigned_components for this recipient
           const assignedFieldIds = assignedComponents[templateId] || [];
           if (assignedFieldIds.length > 0) {
-            // Strict mode: ONLY show fields explicitly assigned to this recipient
-            fields = fields.filter(f => assignedFieldIds.includes(f.id));
+            // Strict mode: show fields assigned to this recipient
+            // PLUS always show non-assignable fields (merge, checkbox, radio) — they're document-level, not signer-specific
+            const NON_ASSIGNABLE = ['merge', 'checkbox', 'radio', 'label'];
+            fields = fields.filter(f =>
+              assignedFieldIds.includes(f.id) || NON_ASSIGNABLE.includes(f.type)
+            );
           } else {
             // No assignment map exists for this template — check template-level assigned_to
             // If ANY field has assigned_to set, filter strictly by recipient
@@ -479,7 +495,7 @@ const PackagePublicView = () => {
   const roleType = active_recipient?.role_type || 'SIGN';
   const roleMeta = ROLE_META[roleType] || ROLE_META.SIGN;
   const RoleIcon = roleMeta.icon;
-  const isViewOnly = roleType === 'VIEW_ONLY';
+  const isViewOnly = roleType === 'VIEW_ONLY' || roleType === 'REVIEWER';
   const isApprover = roleType === 'APPROVE_REJECT';
   const isSigner = roleType === 'SIGN';
   const recipientCompleted = completed || active_recipient?.status === 'completed';
@@ -523,6 +539,26 @@ const PackagePublicView = () => {
               : `You have completed your action on "${package_name}".`}
           </p>
           <p className="text-xs text-gray-400">Action: {action}</p>
+
+          {/* Download signed documents */}
+          {isSigner && pkg.documents && pkg.documents.length > 0 && (
+            <div className="mt-6 space-y-2">
+              <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Signed Documents</p>
+              {pkg.documents.map((doc, i) => (
+                <a
+                  key={doc.document_id || i}
+                  href={`${process.env.REACT_APP_BACKEND_URL}/api/docflow/documents/${doc.document_id}/view/signed`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 rounded-lg text-sm text-indigo-600 hover:bg-indigo-50 transition-colors"
+                  data-testid={`download-signed-${doc.document_id}`}
+                >
+                  <Download className="h-4 w-4" />
+                  {doc.document_name || `Document ${i + 1}`}
+                </a>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     );

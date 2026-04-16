@@ -354,37 +354,51 @@ const AuthForm = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-cyan-50 flex items-center justify-center p-4">
-      <Card className="w-full max-w-md shadow-xl border-0 bg-white/80 backdrop-blur-sm">
-        <CardHeader className="text-center space-y-2">
-          <div className="mx-auto w-12 h-12 bg-gradient-to-r from-indigo-600 to-cyan-600 rounded-xl flex items-center justify-center mb-4">
-            <BarChart3 className="h-6 w-6 text-white" />
+    <div className="min-h-screen flex flex-col lg:flex-row" data-testid="login-page">
+
+      {/* ─── Left: Login Form ─── */}
+      <div className="flex-1 flex items-center justify-center p-6 sm:p-10 lg:px-16 lg:py-12 bg-white relative">
+        {/* Subtle noise texture */}
+        <div className="absolute inset-0 opacity-[0.02]" style={{ backgroundImage: 'url("data:image/svg+xml,%3Csvg viewBox=%270 0 256 256%27 xmlns=%27http://www.w3.org/2000/svg%27%3E%3Cfilter id=%27noise%27%3E%3CfeTurbulence type=%27fractalNoise%27 baseFrequency=%270.9%27 numOctaves=%274%27 stitchTiles=%27stitch%27/%3E%3C/filter%3E%3Crect width=%27100%25%27 height=%27100%25%27 filter=%27url(%23noise)%27/%3E%3C/svg%3E")' }} />
+
+        <div className="w-full max-w-[380px] relative z-10">
+
+          {/* Logo */}
+          <div className="flex items-center gap-3 mb-14">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center shadow-lg" style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}>
+              <span className="text-white font-bold text-lg">C</span>
+            </div>
+            <span className="text-[22px] font-bold tracking-tight text-slate-900" data-testid="login-brand-name">Cluvik</span>
           </div>
-          <CardTitle className="text-2xl font-bold text-slate-800">
-            {isLogin ? 'Welcome Back' : 'Get Started'}
-          </CardTitle>
-          <CardDescription className="text-slate-600">
-            {isLogin ? 'Sign in to your CRM' : 'Create your multi-tenant CRM workspace'}
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="email" className="text-sm font-medium">Email Address</Label>
+
+          {/* Heading */}
+          <div className="mb-10">
+            <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight leading-tight" data-testid="login-heading">
+              Welcome Back
+            </h1>
+            <p className="text-[15px] text-slate-500 mt-2 leading-relaxed" data-testid="login-subtext">
+              Manage your business, workflows, and growth in one place
+            </p>
+          </div>
+
+          {/* Form */}
+          <form onSubmit={handleSubmit} className="space-y-5">
+            <div className="space-y-1.5">
+              <Label htmlFor="email" className="text-sm font-medium text-slate-600">Email Address</Label>
               <Input
                 id="email"
                 type="email"
-                placeholder="Enter your email"
+                placeholder="name@company.com"
                 value={formData.email}
                 onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                 required
                 data-testid="email-input"
-                className="h-10"
+                className="h-12 rounded-xl border-slate-200 bg-slate-50/50 placeholder:text-slate-400 focus:border-indigo-500 focus:ring-indigo-500 focus:bg-white transition-colors"
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="password" className="text-sm font-medium">Password</Label>
+            <div className="space-y-1.5">
+              <Label htmlFor="password" className="text-sm font-medium text-slate-600">Password</Label>
               <Input
                 id="password"
                 type="password"
@@ -393,105 +407,73 @@ const AuthForm = () => {
                 onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                 required
                 data-testid="password-input"
-                className="h-10"
+                className="h-12 rounded-xl border-slate-200 bg-slate-50/50 placeholder:text-slate-400 focus:border-indigo-500 focus:ring-indigo-500 focus:bg-white transition-colors"
               />
-              {isLogin && (
-                <div className="text-right">
-                  <button
-                    type="button"
-                    onClick={() => navigate('/forgot-password')}
-                    className="text-xs text-indigo-600 hover:text-indigo-700 hover:underline"
-                  >
-                    Forgot password?
-                  </button>
-                </div>
-              )}
             </div>
 
-            {!isLogin && (
-              <>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="first_name" className="text-sm font-medium">First Name</Label>
-                    <Input
-                      id="first_name"
-                      placeholder="First name"
-                      value={formData.first_name}
-                      onChange={(e) => setFormData({ ...formData, first_name: e.target.value })}
-                      required
-                      className="h-10"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="last_name" className="text-sm font-medium">Last Name</Label>
-                    <Input
-                      id="last_name"
-                      placeholder="Last name"
-                      value={formData.last_name}
-                      onChange={(e) => setFormData({ ...formData, last_name: e.target.value })}
-                      required
-                      className="h-10"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="company_name" className="text-sm font-medium">Company Name</Label>
-                  <Input
-                    id="company_name"
-                    placeholder="Your company name"
-                    value={formData.company_name}
-                    onChange={(e) => setFormData({ ...formData, company_name: e.target.value })}
-                    required
-                    className="h-10"
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <Label htmlFor="industry" className="text-sm font-medium">Industry</Label>
-                  <Select
-                    value={formData.industry}
-                    onValueChange={(value) => setFormData({ ...formData, industry: value })}
-                  >
-                    <SelectTrigger data-testid="industry-select" className="h-10">
-                      <SelectValue placeholder="Select your industry" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(industries).map(([key, industry]) => (
-                        <SelectItem key={key} value={key}>
-                          <div className="flex items-center space-x-2">
-                            <span>{industry.name}</span>
-                          </div>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              </>
+            {isLogin && (
+              <div className="flex items-center justify-between text-sm pt-1">
+                <label className="flex items-center gap-2 cursor-pointer" data-testid="remember-me">
+                  <input type="checkbox" className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 focus:ring-offset-0" />
+                  <span className="text-slate-500">Remember me</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => navigate('/forgot-password')}
+                  className="text-indigo-600 hover:text-indigo-700 font-medium"
+                  data-testid="forgot-password-link"
+                >
+                  Forgot Password?
+                </button>
+              </div>
             )}
 
-            <Button
-              type="submit"
-              className="w-full h-10 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-700 hover:to-cyan-700 text-white font-medium"
-              disabled={loading}
-              data-testid="auth-submit-button"
-            >
-              {loading ? 'Loading...' : (isLogin ? 'Sign In' : 'Create Account')}
-            </Button>
+            <div className="pt-2">
+              <Button
+                type="submit"
+                className="w-full h-12 rounded-xl text-white font-semibold text-[15px] tracking-wide transition-all duration-200 flex items-center justify-center gap-2 shadow-lg shadow-indigo-500/25 hover:shadow-xl hover:shadow-indigo-500/30 hover:scale-[1.01]"
+                style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
+                disabled={loading}
+                data-testid="auth-submit-button"
+              >
+                {loading ? 'Signing in...' : (
+                  <>
+                    Sign In
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14 5l7 7m0 0l-7 7m7-7H3" /></svg>
+                  </>
+                )}
+              </Button>
+            </div>
           </form>
+        </div>
+      </div>
 
-          <div className="mt-6 text-center">
-            <Button
-              variant="ghost"
-              onClick={() => setIsLogin(!isLogin)}
-              data-testid="toggle-auth-mode"
-              className="text-slate-600 hover:text-slate-800"
-            >
-              {isLogin ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+      {/* ─── Right: Futuristic CRM Visual ─── */}
+      <div className="hidden lg:block lg:w-[55%] relative overflow-hidden" style={{ background: 'linear-gradient(160deg, #1e1145 0%, #1a0a3e 25%, #0f0628 50%, #130a30 75%, #1e1145 100%)' }}>
+        {/* Ambient glow effects */}
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[500px] h-[500px] rounded-full opacity-20" style={{ background: 'radial-gradient(circle, #7c3aed 0%, transparent 70%)' }} />
+        <div className="absolute bottom-1/4 right-1/4 w-[300px] h-[300px] rounded-full opacity-15" style={{ background: 'radial-gradient(circle, #6366f1 0%, transparent 70%)' }} />
+        <div className="absolute top-1/3 left-1/4 w-[200px] h-[200px] rounded-full opacity-10" style={{ background: 'radial-gradient(circle, #06b6d4 0%, transparent 70%)' }} />
+
+        {/* Subtle grid pattern */}
+        <div className="absolute inset-0 opacity-[0.03]" style={{ backgroundImage: 'linear-gradient(rgba(255,255,255,0.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.1) 1px, transparent 1px)', backgroundSize: '60px 60px' }} />
+
+        {/* Full-bleed visual */}
+        <div className="absolute inset-0 flex items-center justify-center">
+          <img
+            src="https://static.prod-images.emergentagent.com/jobs/a1ff4e9a-1135-440e-8b35-02b457152a75/images/d3252917ca41c2bc806f75936c2de04ea44e8f48d3511fc2fb5b7cd2e63e6dca.png"
+            alt="CRM analytics dashboard"
+            className="h-full w-full object-contain object-center p-8"
+            style={{ filter: 'brightness(1.05) contrast(1.05)' }}
+          />
+        </div>
+
+        {/* Bottom text overlay */}
+        <div className="absolute bottom-0 left-0 right-0 p-10 z-10" style={{ background: 'linear-gradient(to top, rgba(15,6,40,0.95) 0%, transparent 100%)' }}>
+          <h2 className="text-2xl font-bold text-white tracking-tight">Data-Driven Decisions</h2>
+          <p className="text-sm text-white/60 mt-1.5">Real-time analytics, pipelines, and insights — all in one view</p>
+        </div>
+      </div>
     </div>
   );
 };

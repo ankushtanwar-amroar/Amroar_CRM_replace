@@ -359,6 +359,11 @@ export const docflowService = {
   async deletePackageTemplate(templateId) {
     return api.delete(`/docflow/package-templates/${templateId}`);
   },
+
+  async deletePackage(packageId) {
+    const resp = await api.delete(`/docflow/packages/${packageId}`);
+    return resp.data;
+  },
 };
 
 export default docflowService;

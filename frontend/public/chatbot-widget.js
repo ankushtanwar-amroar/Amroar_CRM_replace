@@ -20,7 +20,7 @@
       API_BASE = 'http://localhost:8001';
     } else if (scriptTag.src.includes('emergentagent.com')) {
       // Production Emergent environment
-      API_BASE = 'https://sign-flow-fix-1.preview.emergentagent.com';
+      API_BASE = 'https://docflow-crm-fix.preview.emergentagent.com';
     } else {
       // Default: same origin
       API_BASE = window.location.origin;

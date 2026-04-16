@@ -5,6 +5,8 @@ import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import TriggerConfiguration from '../components/TriggerConfiguration';
 
+const API_URL = process.env.REACT_APP_BACKEND_URL;
+
 
 
 const routingModes = [
@@ -42,7 +44,7 @@ const GenerateDocumentWizard = () => {
     setup_trigger: false
   });
 
-  const [requireAuth, setRequireAuth] = useState(true);
+  const [requireAuth, setRequireAuth] = useState(false);
   
   const [triggerConfig, setTriggerConfig] = useState({
     enabled: false,
@@ -53,6 +55,10 @@ const GenerateDocumentWizard = () => {
   });
 
   const [crmRecords, setCrmRecords] = useState([]);
+
+  // Email templates
+  const [emailTemplates, setEmailTemplates] = useState([]);
+  const [emailTemplatesLoaded, setEmailTemplatesLoaded] = useState(false);
 
   // Derived state
   const deliveryChannels = formData.delivery_channels || [];
@@ -68,6 +74,7 @@ const GenerateDocumentWizard = () => {
     if (templateId) {
       loadTemplate();
     }
+    loadEmailTemplates();
   }, [templateId]);
 
   useEffect(() => {
@@ -142,6 +149,20 @@ const GenerateDocumentWizard = () => {
     }
   };
 
+  const loadEmailTemplates = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const resp = await fetch(`${API_URL}/api/docflow/email-templates`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await resp.json();
+      setEmailTemplates(data.templates || []);
+      setEmailTemplatesLoaded(true);
+    } catch {
+      setEmailTemplatesLoaded(true);
+    }
+  };
+
   const updateRecipient = (id, updates) => {
     setRecipientDrafts(prev => prev.map(r => r.id === id ? { ...r, ...updates } : r));
   };
@@ -160,10 +181,12 @@ const GenerateDocumentWizard = () => {
         template_recipient_id: null,
         name: '',
         email: '',
+        role_type: 'SIGN',
         routing_order: idx + 1,
         is_required: true,
         placeholder_name: `Recipient ${idx + 1}`,
-        assigned_field_ids: []
+        assigned_field_ids: [],
+        email_template_id: '',
       }
     ]);
   };
@@ -278,8 +301,10 @@ const GenerateDocumentWizard = () => {
         .map(r => ({
           name: r.name || '',
           email: r.email || '',
+          role: r.role_type === 'APPROVE_REJECT' ? 'approver' : r.role_type === 'REVIEWER' ? 'reviewer' : r.role_type === 'RECEIVE_COPY' ? 'receive_copy' : 'sign',
           routing_order: r.routing_order || 1,
           assigned_components: r.assigned_field_ids || [],
+          email_template_id: r.email_template_id || undefined,
         }));
 
       const result = await docflowService.generateLinks({
@@ -722,6 +747,20 @@ const GenerateDocumentWizard = () => {
 
                       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                         <div>
+                          <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Role</label>
+                          <select
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                            value={rd.role_type || 'SIGN'}
+                            onChange={(e) => updateRecipient(rd.id, { role_type: e.target.value })}
+                            data-testid={`recipient-role-${index}`}
+                          >
+                            <option value="SIGN">Signer</option>
+                            <option value="APPROVE_REJECT">Approver</option>
+                            <option value="REVIEWER">Reviewer</option>
+                            <option value="RECEIVE_COPY">Receive Copy</option>
+                          </select>
+                        </div>
+                        <div>
                           <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Routing Order</label>
                           <input
                             type="number"
@@ -743,7 +782,25 @@ const GenerateDocumentWizard = () => {
                           </label>
                         </div>
                       </div>
-                      {/* Assigned Components */}
+                      {/* Email Template Selector */}
+                      {emailTemplatesLoaded && emailTemplates.length > 0 && isEmailEnabled && (
+                        <div className="mt-4">
+                          <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-1">Email Template <span className="text-gray-400 normal-case font-normal">(optional)</span></label>
+                          <select
+                            className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm bg-white"
+                            value={rd.email_template_id || ''}
+                            onChange={(e) => updateRecipient(rd.id, { email_template_id: e.target.value })}
+                            data-testid={`recipient-email-template-${index}`}
+                          >
+                            <option value="">Default (based on role)</option>
+                            {emailTemplates.map(et => (
+                              <option key={et.id} value={et.id}>{et.name} — {(et.template_type || '').replace(/_/g, ' ')}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      {/* Assigned Components — only for Signers */}
+                      {(rd.role_type || 'SIGN') === 'SIGN' && (
                       <div className="mt-4">
                         <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Assigned Components</label>
                         <div className="bg-white border border-gray-200 rounded-lg p-3 max-h-40 overflow-y-auto space-y-2">
@@ -786,6 +843,7 @@ const GenerateDocumentWizard = () => {
                           )}
                         </div>
                       </div>
+                      )}
                     </div>
                   ))}
 

@@ -3,13 +3,14 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Plus, Search, FileText, Edit, Trash2, Send, Clock, CheckCircle, LayoutGrid, List, Filter,
   ArrowUpDown, ChevronDown, Sparkles, Eye, Mail, MoreVertical, Download, GitBranch, History,
-  Layers, Package, XCircle, AlertTriangle, Ban, Users, Loader2, Code
+  Layers, Package, XCircle, AlertTriangle, Ban, Users, Loader2, Code, MessageSquare
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import TemplateAnalytics from '../components/TemplateAnalytics';
 import EmailHistoryTable from '../components/EmailHistoryTable';
 import DeveloperSettingsPage from './DeveloperSettingsPage';
+import EmailTemplatesPage from './EmailTemplatesPage';
 
 const TEMPLATE_TYPE_COLORS = {
   quotation: { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-200', dot: 'bg-blue-500' },
@@ -66,9 +67,14 @@ const DocFlowDashboard = () => {
   const [packagesLoading, setPackagesLoading] = useState(false);
   const [pkgSearch, setPkgSearch] = useState('');
   const [pkgViewMode, setPkgViewMode] = useState('grid');
+  const [deletingPkgId, setDeletingPkgId] = useState(null);
+  const [showPkgDeleteModal, setShowPkgDeleteModal] = useState(false);
+  const [pkgDeleting, setPkgDeleting] = useState(false);
   const [pkgPage, setPkgPage] = useState(1);
   const [pkgPageSize] = useState(12);
   const [pkgStatusFilter, setPkgStatusFilter] = useState('all');
+  const [selectedRejectDoc, setSelectedRejectDoc] = useState(null);
+  const [showRejectReasonModal, setShowRejectReasonModal] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -143,6 +149,23 @@ const DocFlowDashboard = () => {
       setPackagesLoading(false);
     }
   };
+
+  const handleDeletePackage = async () => {
+    if (!deletingPkgId) return;
+    try {
+      setPkgDeleting(true);
+      await docflowService.deletePackage(deletingPkgId);
+      toast.success('Package deleted');
+      setPackages(prev => prev.filter(p => p.id !== deletingPkgId));
+    } catch (e) {
+      toast.error('Failed to delete package');
+    } finally {
+      setPkgDeleting(false);
+      setShowPkgDeleteModal(false);
+      setDeletingPkgId(null);
+    }
+  };
+
 
 
   const loadVersions = useCallback(async (templateId) => {
@@ -465,6 +488,7 @@ const DocFlowDashboard = () => {
               { id: 'documents', label: 'Documents', icon: Send },
               { id: 'analytics', label: 'Analytics', icon: Eye },
               { id: 'emails', label: 'Email History', icon: Mail },
+              { id: 'email_templates', label: 'Email Templates', icon: Mail },
               { id: 'developer', label: 'Developer', icon: Code },
             ].map(tab => (
               <button
@@ -1018,13 +1042,26 @@ const DocFlowDashboard = () => {
                         )}
                       </td>
                       <td className="px-5 py-4">
-                        <span className={`inline-flex px-2.5 py-1 text-xs font-medium rounded-full capitalize ${doc.status === 'signed' || doc.status === 'completed' ? 'bg-green-100 text-green-700' :
-                            doc.status === 'sent' ? 'bg-blue-100 text-blue-700' :
-                              doc.status === 'viewed' ? 'bg-yellow-100 text-yellow-700' :
-                                'bg-gray-100 text-gray-700'
-                          }`} data-testid={`doc-status-${doc.id}`}>
-                          {doc.status || 'draft'}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <span className={`inline-flex px-2.5 py-1 text-xs font-medium rounded-full capitalize ${doc.status === 'signed' || doc.status === 'completed' ? 'bg-green-100 text-green-700' :
+                              doc.status === 'sent' ? 'bg-blue-100 text-blue-700' :
+                                doc.status === 'viewed' ? 'bg-yellow-100 text-yellow-700' :
+                                  doc.status === 'declined' ? 'bg-red-100 text-red-700' :
+                                    'bg-gray-100 text-gray-700'
+                            }`} data-testid={`doc-status-${doc.id}`}>
+                            {doc.status || 'draft'}
+                          </span>
+                          {doc.status === 'declined' && doc.reject_reason && (
+                            <button
+                              onClick={() => { setSelectedRejectDoc(doc); setShowRejectReasonModal(true); }}
+                              className="p-1 text-red-400 hover:text-red-600 rounded hover:bg-red-50 transition-colors"
+                              title="View rejection reason"
+                              data-testid={`doc-reject-reason-${doc.id}`}
+                            >
+                              <MessageSquare className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                       <td className="px-5 py-4 text-sm text-gray-500" title={doc.created_at ? new Date(doc.created_at).toLocaleString() : ''} data-testid={`doc-created-${doc.id}`}>
                         {formatDate(doc.created_at)}
@@ -1049,14 +1086,6 @@ const DocFlowDashboard = () => {
                               <CheckCircle className="h-4 w-4" />
                             </button>
                           )}
-                          <button
-                            onClick={() => handleViewDocument(doc.id)}
-                            className="p-2 text-gray-400 hover:text-blue-600 rounded-lg hover:bg-blue-50"
-                            title="View Document"
-                            data-testid={`doc-view-${doc.id}`}
-                          >
-                            <Eye className="h-4 w-4" />
-                          </button>
                         </div>
                       </td>
                     </tr>
@@ -1225,6 +1254,14 @@ const DocFlowDashboard = () => {
                           {new Date(pkg.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                         </span>
                         <div className="flex items-center gap-2">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setDeletingPkgId(pkg.id); setShowPkgDeleteModal(true); }}
+                            className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors group-hover:opacity-100"
+                            title="Delete package"
+                            data-testid={`delete-pkg-btn-${pkg.id}`}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
                           {isBlueprint && (
                             <button
                               onClick={(e) => { e.stopPropagation(); navigate(`/setup/docflow/packages/${pkg.id}/send`); }}
@@ -1234,12 +1271,13 @@ const DocFlowDashboard = () => {
                               <Send className="h-3 w-3" /> Send
                             </button>
                           )}
-                          <span
+                          
+                          {/* <span
                             onClick={() => navigate(`/setup/docflow/packages/${pkg.id}`)}
                             className="text-xs text-indigo-500 font-medium cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1"
                           >
                             Open <ChevronDown className="h-3 w-3 -rotate-90" />
-                          </span>
+                          </span> */}
                         </div>
                       </div>
                     </div>
@@ -1300,15 +1338,25 @@ const DocFlowDashboard = () => {
                             </span>
                           </td>
                           <td className="px-5 py-3.5 text-right">
-                            {isBlueprint && (
+                            <div className="flex items-center justify-end gap-2">
+                              {isBlueprint && (
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); navigate(`/setup/docflow/packages/${pkg.id}/send`); }}
+                                  className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition-colors"
+                                  data-testid={`send-pkg-tbl-btn-${pkg.id}`}
+                                >
+                                  <Send className="h-3 w-3" /> Send
+                                </button>
+                              )}
                               <button
-                                onClick={(e) => { e.stopPropagation(); navigate(`/setup/docflow/packages/${pkg.id}/send`); }}
-                                className="inline-flex items-center gap-1 px-3 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700 transition-colors"
-                                data-testid={`send-pkg-tbl-btn-${pkg.id}`}
+                                onClick={(e) => { e.stopPropagation(); setDeletingPkgId(pkg.id); setShowPkgDeleteModal(true); }}
+                                className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                title="Delete package"
+                                data-testid={`delete-pkg-tbl-btn-${pkg.id}`}
                               >
-                                <Send className="h-3 w-3" /> Send
+                                <Trash2 className="h-3.5 w-3.5" />
                               </button>
-                            )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -1367,11 +1415,59 @@ const DocFlowDashboard = () => {
         {activeTab === 'developer' && (
           <DeveloperSettingsPage />
         )}
+
+        {activeTab === 'email_templates' && (
+          <EmailTemplatesPage />
+        )}
       </div>
 
       {/* Close menu on outside click */}
       {showDeleteMenu && (
         <div className="fixed inset-0 z-10" onClick={() => setShowDeleteMenu(null)} />
+      )}
+
+      {/* Package Delete Confirmation Modal */}
+      {showPkgDeleteModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" data-testid="pkg-delete-modal">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">Delete Package</h3>
+              <p className="text-sm text-gray-500 mt-1">This will permanently delete this package, all its runs, documents, and submissions. This action cannot be undone.</p>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => { setShowPkgDeleteModal(false); setDeletingPkgId(null); }} className="flex-1 py-2.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50" data-testid="pkg-delete-cancel">Cancel</button>
+              <button onClick={handleDeletePackage} disabled={pkgDeleting} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50" data-testid="pkg-delete-confirm">
+                {pkgDeleting ? <Clock className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}{pkgDeleting ? 'Deleting...' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rejection Reason Modal */}
+      {showRejectReasonModal && selectedRejectDoc && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" data-testid="reject-reason-view-modal">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                <XCircle className="h-5 w-5 text-red-600" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900">Document Rejected</h3>
+                <p className="text-xs text-gray-500">{selectedRejectDoc.template_name}</p>
+              </div>
+            </div>
+            {selectedRejectDoc.rejected_by && (
+              <p className="text-sm text-gray-500">Rejected by: <span className="font-medium text-gray-700">{selectedRejectDoc.rejected_by}</span></p>
+            )}
+            <div className="bg-red-50 border border-red-100 rounded-lg p-3">
+              <p className="text-sm text-gray-700" data-testid="reject-reason-text">{selectedRejectDoc.reject_reason}</p>
+            </div>
+            <button onClick={() => { setShowRejectReasonModal(false); setSelectedRejectDoc(null); }} className="w-full py-2.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 font-medium">
+              Close
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

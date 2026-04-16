@@ -359,9 +359,26 @@ const ApiDocumentation = () => {
         ],
         routing_mode: "sequential",
         delivery_mode: "email",
+        template_merge_fields: [
+          {
+            template_id: "uuid-of-template-1",
+            merge_fields: {
+              "client_name": "Acme Corp",
+              "effective_date": "2026-01-15",
+              "contract_amount": "$50,000"
+            }
+          },
+          {
+            template_id: "uuid-of-template-2",
+            merge_fields: {
+              "company_address": "123 Main St",
+              "city": "San Francisco"
+            }
+          }
+        ],
         field_assignments: [
           {
-            template_id: "uuid-of-template",
+            template_id: "uuid-of-template-1",
             fields: [
               { field_id: "field-uuid-1", recipient_id: "signer_1" },
               { field_id: "field-uuid-2", recipient_id: "signer_1" }

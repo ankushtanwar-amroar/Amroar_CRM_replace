@@ -60,6 +60,7 @@ const RunDetailPage = () => {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState('overview');
   const [refreshing, setRefreshing] = useState(false);
+  const [downloadingCombined, setDownloadingCombined] = useState(false);
 
   useEffect(() => { loadRun(); }, [packageId, runId]);
 
@@ -81,6 +82,25 @@ const RunDetailPage = () => {
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
     toast.success('Copied!');
+  };
+
+  const handleDownloadCombined = async () => {
+    try {
+      setDownloadingCombined(true);
+      const resp = await docflowService.downloadCombinedPdf(run.id);
+      const blob = new Blob([resp], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${run.name || 'package'}_combined_signed.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success('Combined document downloaded');
+    } catch (e) {
+      toast.error('Failed to download combined document');
+    } finally {
+      setDownloadingCombined(false);
+    }
   };
 
   if (loading) {
@@ -142,6 +162,12 @@ const RunDetailPage = () => {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              {run.status === 'completed' && isEmail && !isPublicRecipients && (
+                <button onClick={handleDownloadCombined} disabled={downloadingCombined}
+                  className="flex items-center gap-1.5 px-3 py-2 text-sm text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50" data-testid="download-combined-btn">
+                  {downloadingCombined ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />} Download Combined Signed Document
+                </button>
+              )}
               <button onClick={() => loadRun(true)} disabled={refreshing}
                 className="flex items-center gap-1.5 px-3 py-2 text-sm text-indigo-600 border border-indigo-200 rounded-lg hover:bg-indigo-50 disabled:opacity-50" data-testid="refresh-run-btn">
                 {refreshing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />} Refresh

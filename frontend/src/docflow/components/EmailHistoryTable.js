@@ -225,8 +225,11 @@ const EmailHistoryTable = ({ templateId = null }) => {
                     </td>
                     <td className="px-4 py-3">
                       <div className="text-sm font-medium text-gray-900 truncate max-w-[180px]" title={email.template_name}>
-                        {email.template_name}
+                        {email.template_name || email.package_name || 'Unknown'}
                       </div>
+                      <span className={`inline-block mt-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded ${email.source === 'package' ? 'bg-purple-50 text-purple-600' : 'bg-blue-50 text-blue-600'}`}>
+                        {email.source === 'package' ? 'Package' : 'Template'}
+                      </span>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-start gap-2">

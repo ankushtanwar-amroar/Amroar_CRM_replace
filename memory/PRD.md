@@ -190,6 +190,73 @@
 - **Multi-Org Ready**: Dynamic login URL per environment (production/sandbox/custom domain), stores per-connection `instance_url`/`refresh_token`, auto-refresh via `OAuthTokenManager`.
 - **Files Modified**: `users_routes.py`, `SetupPage.jsx`, `connection_routes.py`
 
+### Phase 30: DocFlow Navigation & UI Clarity (Apr 14)
+- **Users Page Back Button**: Added "Back to Setup" button at top-left of UsersPage (`/setup/users`), navigates to `/setup`
+- **Clickable Logo**: Made "Cluvik DocFlow" header title/logo clickable globally — navigates to `/setup` from any page. Uses `data-testid="header-logo-home"`
+- **DocFlow Dashboard Redesign v2**: Rewrote `DocFlowSetupDashboard.jsx` to match reference design:
+  - Quick Actions: Pill/chip buttons row (Create Template, Upload Document, Generate & Send, Create Package, Add Connection, Invite User) + 3 hero gradient cards below
+  - Stats header: Templates, Packages, Documents, Pending counts as pills
+  - MODULES section: 2x2 grid (Templates, Packages, Connections, AI & Automation) with colored count badges per card
+  - ORGANIZATION section: Company Information (Profile/Plan/Billing links) + Access & Security (Users/Roles/Permissions)
+  - Right sidebar: Recent Templates panel
+  - Fetches templates, documents, packages, connections, users counts from APIs
+- **No Regression**: CRM tenant dashboard and routing unchanged
+- **Files Modified**: `UsersPage.js` (back button), `SetupPage.jsx` (clickable logo), `DocFlowSetupDashboard.jsx` (full rewrite)
+- **Testing**: 100% pass rate (13/13 frontend tests) — iteration_284
+
+### Phase 31: Dashboard Polish, Connections Real Data, Auth Page Fix (Apr 14)
+- **Dashboard Overview Section**: Added right-sidebar Overview panel with 4 stat cards: Total Templates, Active Documents, Pending Signatures, Completed Documents — each with colored icon
+- **Tighter Layout**: Reduced spacing between sections (mb-8→mb-6, space-y-8→space-y-6) for better visual balance
+- **Connections Real Data**: Connections module card now fetches and displays actual connection rows (name, provider, Connected/Not Connected status) instead of just count badges
+- **Auth Page Rebranded**: Changed "Sign in to your CRM" → "Sign in to Cluvik DocFlow"; removed "Don't have an account? Sign up" toggle entirely. Login page now only shows Email, Password, Forgot password, Sign In
+- **No Regression**: Login flow unchanged; CRM tenants see standard CRM setup dashboard
+- **Files Modified**: `App.js` (auth page), `DocFlowSetupDashboard.jsx` (overview + connections + spacing)
+- **Testing**: 100% pass rate (14/14 frontend tests) — iteration_285
+
+### Phase 32: Login Page Redesign (Apr 15)
+- **Split-Screen Layout**: Left panel with illustration + "Cluvik" branding, right panel with login form
+- **Branding**: Shows "Cluvik" only — no "DocFlow" or "CRM" on login page
+- **Left Panel**: Soft slate-50 background, decorative circles, "Cluvik" logo at top-left, AI-generated document workflow illustration, tagline "Streamline your document workflows"
+- **Right Panel**: "Welcome back" heading, "Sign in to your account" subtext, Email input, Password input, Remember Me checkbox, Forgot Password link, LOGIN button (indigo, uppercase)
+- **Removed**: "Sign up" toggle, registration form (not needed for DocFlow flow)
+- **Responsive**: Mobile shows stacked layout (logo + form, no illustration), desktop shows 50/50 split
+- **No Auth Logic Changes**: All authentication endpoints and token handling unchanged
+- **Files Modified**: `App.js` (AuthForm component complete rewrite)
+- **Testing**: 100% pass rate (17/17 frontend tests) — iteration_286
+
+### Phase 33: Login Page Product-Neutral Branding (Apr 15)
+- **Removed DocFlow messaging**: Replaced "Streamline your document workflows / Create templates..." with "Welcome to Cluvik / Access your workspace"
+- **Product-neutral**: Login page shows NO module-specific text (no DocFlow, no CRM) — works for all users
+- **Files Modified**: `App.js` (left panel text only)
+- **Testing**: Verified via screenshot + curl login test
+
+### Phase 34: CRM App Launcher Enhancement (Apr 15)
+- **13 Module Apps Added**: Schema Builder, Form Builder, Survey Builder, Flow Builder, Task Manager, Import Builder, Export Builder, Chatbot Manager, DocFlow, File Manager, App Manager, Email Templates, Booking — all shown as independent apps alongside Sales Console
+- **Navigation**: Each app navigates to its respective module route (e.g., DocFlow → `/setup/docflow`, Flow Builder → `/flows`)
+- **Active State**: Sales Console shows "Active" badge with green checkmark; other apps show neutral styling
+- **Search**: Existing search filters both apps and records (e.g., typing "doc" shows only DocFlow)
+- **View More Modal**: Full-screen grid also shows all 14 apps with navigation
+- **No Regression**: Setup page unchanged, CRM Sales Console still works, no routing/permission changes
+- **Navigation-Only Layer**: App Launcher acts as an entry point, no backend logic duplication
+- **Files Modified**: `SalesConsolePageNew.js` (availableApps expanded + click handlers + icons)
+- **Testing**: 100% pass rate (10/10 frontend tests) — iteration_287
+
+### Phase 35: App Launcher Visual Polish (Apr 15)
+- **Blue Icons for All Apps**: Changed non-active app icons from grey (`from-slate-500 to-slate-600`) to blue (`from-blue-500 to-blue-700`) matching the View More modal
+- **Card Styling**: Added subtle card borders and hover effects to all non-active apps (`bg-white border border-slate-200 hover:border-blue-300 hover:shadow-md`)
+- **Visual Hierarchy**: Apps section now clearly distinct from All Items section — apps have card feel with blue icons, items remain minimal list style
+- **No Logic Changes**: Only CSS styling updated in sidebar app rendering
+- **Files Modified**: `SalesConsolePageNew.js` (app card className + icon gradient)
+- **Testing**: Verified via screenshot, both CRM and DocFlow logins working
+
+### Phase 36: Premium Futuristic Login Page (Apr 16)
+- **Right Panel**: Full-bleed dark purple/indigo gradient with futuristic CRM visual — floating glassmorphism analytics panels, line graphs, KPI cards, pipeline workflow nodes, circular gauges. Ambient glow effects + subtle grid pattern for depth
+- **Left Panel**: Clean minimal form with left-aligned logo, bold "Welcome Back" heading, descriptive subtext, rounded inputs with soft bg, gradient "Sign In →" button with hover glow/shadow
+- **Design Elements**: Noise texture overlay, radial ambient glows, bottom gradient text overlay ("Data-Driven Decisions"), 55/45 split layout
+- **No Logic Changes**: Auth flow, routing, validation all unchanged
+- **Files Modified**: `App.js` (AuthForm return block rewritten)
+- **Testing**: Login verified for both CRM and DocFlow users
+
 ## Remaining Tasks
 
 ### P1
@@ -205,3 +272,104 @@
 - Consolidate document_service.py vs document_service_enhanced.py
 - Redis caching, rich-text toolbar, Stripe Customer Portal
 - CRM-wide CluBot expansion (separate CRM Control Center)
+
+### Phase 30: Webhook + Signing + Performance + UI Enhancements (Apr 14)
+- **Webhook Signed Copy JSON**: Enriched `fire_document_event` and `fire_package_event` in `webhook_service.py` to include `signed_documents[]` array with `{document_id, template_name, signed_document_url, signed_at, status}` and `recipient_details` for signed/completed events
+- **Webhook Sample Payloads**: Updated both `PackageDetailPage.js` webhook sample and `IntegrationTab.js` `SAMPLE_PAYLOADS` to include signed_documents array and recipient_details in download/display
+- **Combined Signed Document Button**: Added "Download Combined Signed Document" button in `RunDetailPage.js` header — visible only when `status=completed` AND `delivery_mode=email`. Uses `PackageOutputService.generate_combined_pdf` which merges all signed PDFs
+- **Combined PDF Priority**: Fixed `PackageOutputService._get_document_pdf` to prefer signed PDF over unsigned for combined document generation
+- **Performance — Package Listing**: Replaced N+1 `count_documents` queries in `list_packages` with single MongoDB `$aggregate` pipeline. Same for `get_package` run stats and submission counts. Added lean projection to listing query. Added MongoDB indexes on `package_runs(package_id, status)` and `public_submissions(package_id, signed_at)`
+- **PDF Rendering**: Signing page already uses final generated PDF from S3 via `/view/unsigned` endpoint — the visual difference (HTML date picker vs PDF text) is by design for interactive field overlay
+
+### Phase 31: Template-Level Merge Fields in Send Package API (Apr 14)
+- **New `template_merge_fields` parameter**: Added to both internal `POST /api/docflow/packages/{id}/send` and Public API `POST /api/public/packages/send`
+- **Per-template merge data**: Each template in a package can receive its own `merge_fields` dict. API-provided fields override blueprint defaults.
+- **Backend flow**: `send_package_run` now builds `salesforce_context` per document from the merge fields map, passing them to `generate_document` for PDF injection
+- **Validation**: Unknown `template_id` references in `template_merge_fields` return structured errors
+- **Developer docs**: Updated DeveloperSettingsPage API docs with `template_merge_fields` sample showing multi-template merge
+- **Files modified**: `package_public_api_routes.py`, `package_routes.py`, `package_service.py`, `DeveloperSettingsPage.js`
+
+### Phase 32: Template Versioning, Roles, and DocFlow Enhancements (Apr 15)
+- **Role System**: Added `REVIEWER` role type alongside existing `SIGN`, `APPROVE_REJECT`, `RECEIVE_COPY`. Reviewer can only view and confirm. Updated SendPackagePage, GenerateDocumentWizard, PackagePublicView.
+- **Field assignment rule**: Only Signers see field assignments. Approver/Reviewer/Receive Copy have no field interaction.
+- **Version rendering protection**: Removed `content_blocks_modified` rendering path. All document generation now ALWAYS uses original uploaded PDF from S3 for pixel-perfect fidelity.
+- **Eye icon removed**: Removed preview/view eye icon from Documents listing in DocFlowDashboard.
+- **Email history for packages**: Added `source` field ("template"/"package") and `package_id`/`package_name` to email logs. Routing engine now logs package emails. EmailHistoryTable shows Template/Package badge.
+- **Package delete**: Added `DELETE /api/docflow/packages/{id}` endpoint that cascades to runs, documents, submissions, audit events. Frontend has delete button with confirmation modal.
+
+### Phase 33: Dynamic Email Template System (Apr 15)
+- **Backend Service**: `EmailTemplateService` (`email_template_service.py`) — CRUD for email templates with per-tenant isolation, auto-seeded system defaults (signer, approver, reviewer, package_send, document_signed, reminder), clone, set-default, render with variable substitution, `resolve_for_sending()` with role→type fallback
+- **Backend Routes**: `email_template_routes.py` registered at `/api/docflow/email-templates` — 8 endpoints: list, get, create, update, delete, clone, set-default, preview (renders with sample data)
+- **DB Collection**: `docflow_email_templates` — `{id, tenant_id, name, subject, body_html, template_type, is_default, is_system, created_at, updated_at}`
+- **11 Merge Variables**: `{{recipient_name}}`, `{{recipient_email}}`, `{{document_name}}`, `{{package_name}}`, `{{signing_link}}`, `{{sender_name}}`, `{{company_name}}`, `{{status}}`, `{{due_date}}`, `{{signed_date}}`, `{{download_link}}`
+- **Routing Engine Integration**: `_notify_recipient()` in `routing_engine.py` now looks up custom email template per recipient (via `email_template_id` or role-based default), renders with variables, and sends. Falls back to hardcoded action-required email if no custom template found.
+- **Send API Enhancement**: `email_template_id` field added to `SendRecipientInput` (package_routes.py) and `SendPackageRecipient` (package_public_api_routes.py). Stored on each run recipient, used by routing engine during notification.
+- **Frontend — Email Templates Page**: Full CRUD UI inside DocFlow Dashboard's "Email Templates" tab. Templates grouped by type with color-coded badges. Visual + HTML editor with live preview. Variable insertion panel. Preview modal renders with sample data. Clone, set-default, delete (system protected).
+- **Frontend — Send Package Integration**: Email template selector dropdown per recipient in `SendPackagePage.js`. Shows all tenant templates. Optional — defaults to role-based system template if unselected.
+- **Frontend — Generate Document Integration**: Email template selector dropdown per recipient in `GenerateDocumentWizard.js`. Appears when Email delivery is selected and templates are loaded. Passes `email_template_id` to `generateLinks` API.
+- **Standalone Document Email Wiring**: `document_service_enhanced.py` stores `email_template_id` per recipient instance. Initial email send and sequential routing email send both resolve custom templates via `EmailTemplateService.resolve_for_sending()`, with fallback to system default.
+- **Testing**: 100% pass rate (26/26 backend API tests, all frontend flows verified) — iteration_284, iteration_285
+
+### Phase 34: PRO Email Template Editor UX Overhaul (Apr 15)
+- **3-Column IDE Layout**: Full-height workspace with Left (Settings: Name, Type, Subject, Details), Center (Editor with Visual/HTML modes), Right (Variables with search and categories)
+- **Visual Mode**: Renders the actual email HTML as a live preview (not raw code), responsive with desktop/mobile canvas toggle
+- **HTML Mode**: Dark-themed code editor (slate-950 bg) with line numbers, monospaced font, syntax-like experience
+- **Sticky Header**: Template name, unsaved changes indicator (pulsing amber dot), saved status, device toggles, Test Email, Preview, Save (Ctrl+S) buttons
+- **Variables Panel**: Categorized into 5 groups (Recipient, Document, Package, Sender & Company, Links), each variable shows example value (e.g., "John Doe"), has Copy and Insert buttons, with full-text search
+- **Test Email**: New `/api/docflow/email-templates/send-test` endpoint; modal in UI to enter email and send rendered preview
+- **Preview Modal**: Full-screen rendered preview with desktop/mobile toggle, subject line display
+- **Smart Features**: Ctrl+S keyboard shortcut, unsaved changes confirmation on back navigation, saved indicator
+- **Testing**: 100% pass rate (16/16 backend, all PRO UX features verified) — iteration_287
+
+### Phase 35: Package Webhook Fix (Apr 15)
+- **Root Cause**: `PackageService.__init__()` was creating `RoutingEngine` WITHOUT passing a `WebhookService` instance. Since `self.webhook_service` was `None`, all `if self.webhook_service:` checks in the routing engine silently skipped webhook calls.
+- **Fix**: Added `WebhookService` import and initialization in `PackageService`, then passed it to `RoutingEngine` constructor.
+- **Verification**: Activity logs now show `webhook_success` entries for `package_sent` and `wave_started` events being delivered to the configured webhook URL.
+- **Testing**: 100% pass rate (14/14 backend tests) — iteration_288
+
+### Phase 36: Package Webhook Payload Alignment (Apr 16)
+- **Problem**: Actual webhook payload wrapped data in a `data` envelope, had `package_name: null` at top level, and was missing event-specific fields (document_id, recipient_email, signed_documents, etc.)
+- **Fix**: Rewrote `fire_package_event()` in `webhook_service.py` to produce flat payloads matching the downloadable sample. Each event type (signed, viewed, opened, sent, expired, declined, signed_copy) now includes its specific fields at the top level.
+- **Routing Engine**: Updated `package_sent` and `wave_started` webhook calls to pass recipient info.
+- **Frontend Samples**: Updated `SAMPLE_PAYLOADS` in `PackageDetailPage.js` to include `timestamp`, `tenant_id`, `package_name` for all 7 event types.
+- **Testing**: 100% pass rate (25/25 backend tests, payload structure verified against sample) — iteration_289
+
+### Phase 37: Webhook Event Cleanup & Approve/Reject (Apr 16)
+- **Removed**: "Viewed" event (merged with Opened), "Expired" event (not needed for packages)
+- **Renamed**: "Declined" → "Approve / Reject" (id: `approve_reject`) — fires on both approve and reject actions
+- **Fixed "Opened"**: Added `fire_package_event("opened")` call in `get_package_public` (package_public_routes.py) so webhook fires when a recipient opens a package via email/public link
+- **Added Approve/Reject webhooks**: `approve_package` fires `approved` event, `reject_package` fires `rejected` event — both map to `approve_reject` UI event
+- **Updated event mapping**: `_EVENT_MAP` in `webhook_service.py` now maps `approved`/`rejected` → `approve_reject`, removed `viewed`/`expired`/`declined`
+- **Frontend**: `WEBHOOK_EVENTS` reduced to 5 events (signed, opened, sent, approve_reject, signed_copy). Sample payloads updated for all.
+- **Testing**: 100% pass (14/14 backend, all frontend verified) — iteration_290
+
+### Phase 38: Advanced Field Styling + OTP Default (Apr 16)
+- **Unified Text Styling Panel**: Extended the styling section in Visual Builder to Label, Text Input, AND Merge Field types (previously only Label and Text had partial styling, Merge had none). All three now have: Font Family (7 options), Font Size (8-32px), Bold/Italic/Underline toggles, Left/Center/Right alignment, and Text Color picker with hex input.
+- **Builder Canvas Rendering**: Field overlays on the PDF canvas now apply all styling (fontFamily, fontSize, fontWeight, fontStyle, textDecoration, textAlign, color).
+- **Signing View Consistency**: `InteractiveDocumentViewer` updated to apply full styling to text inputs (inline style), merge field display, and label fields — including italic and underline.
+- **PDF Overlay Styling**: Added `_apply_field_style()`, `_draw_text_with_style()`, and `_draw_label_field()` to `pdf_overlay_service_enhanced.py`. Maps CSS fonts to ReportLab (Helvetica/Times/Courier with bold/italic variants), supports alignment and underline in final PDF.
+- **OTP Default Off**: Changed `requireAuth` to `false` in `GenerateDocumentWizard.js` and `otpEnabled` to `false` in `SendPackagePage.js`.
+- **Testing**: 100% pass (all code review + Playwright UI verification) — iteration_291
+
+### Phase 39: Role-Based Signing Flow Fix (Apr 16)
+- **Root Cause**: Document recipients were created WITHOUT `role_type` field. When the Approver/Reviewer opened their link, `active_recipient.role_type` was `undefined`, causing the frontend to default to the Signer UI.
+- **Backend Fix**: Added `_normalize_role_type()` to `document_service_enhanced.py` that maps `signer→SIGN`, `approver→APPROVE_REJECT`, `reviewer→VIEW_ONLY`, `receive_copy→RECEIVE_COPY`. Both `role` and `role_type` are now stored on every recipient instance.
+- **Frontend Fix**: The "Signer Information" panel (name, email, "Complete Signing" button) now only shows for `SIGN` role. Approver/Reviewer get full-width PDF viewer with their respective action buttons. Column span adapts: `lg:col-span-2` for signers (with left panel), `lg:col-span-3` for others.
+- **Behavior**: Signer → fill fields + sign + Complete Signing. Approver → read-only PDF + Approve/Reject. Reviewer → read-only PDF + Confirm Review.
+- **Testing**: 100% pass (9/9 backend, all frontend verified) — iteration_292
+
+### Phase 40: Complete Approval Workflow Fix (Apr 16)
+- **Workflow Sequencing**: Added sequential routing logic to `role-action` endpoint — after approve/review, the next recipient is automatically activated (status → `sent`) and emailed.
+- **Status Checks**: Updated `all_required_done` in `sign_document` to include `approved` and `reviewed` statuses so the document correctly transitions to `completed`.
+- **Signed PDF Access**: `getPdfViewUrl()` now returns `/view/signed` for non-signer roles when document is `partially_signed`, so approvers/reviewers see the signed version.
+- **UI Overhaul**: Action buttons (Approve/Reject/Confirm Review) moved to a sticky header bar above the PDF viewer. Status banners show after actions (Approved=green, Rejected=red, Review Completed=blue).
+- **Pydantic Model Fix**: Added `APPROVED`, `REVIEWED`, `REJECTED`, `RECEIVE_COPY` to `RecipientStatus` enum and `DECLINED`, `PARTIALLY_SIGNED` to `DocumentStatus` enum to prevent 500 errors.
+- **Testing**: 100% pass (10/10 backend, all frontend verified) — iteration_293
+
+### Phase 41: Rejection Comments + Webhook Metadata (Apr 16)
+- **Rejection Reason Required**: Backend `role-action` endpoint now returns 400 if reject action has no reason. Reason is stored at both document level (`reject_reason`, `rejected_by`, `rejected_at`) and recipient level (`reject_reason`, `ip_address`, `user_agent`).
+- **Rejection Modal**: Frontend shows a modal with mandatory textarea when approver clicks Reject. "Confirm Rejection" button disabled until reason entered.
+- **Rejection Visibility**: Status banner shows rejection reason inline. Document listing shows MessageSquare icon on declined docs — clicking opens a modal with the full rejection reason.
+- **Webhook Metadata**: All webhook events (template + package) now include a `metadata` object: `{ip_address, user_agent, performed_by, performed_by_email}`. Applied to signed, approve, reject, review, and all other events.
+- **Download Samples Updated**: Both IntegrationTab.js (template) and PackageDetailPage.js (package) sample payloads include metadata field.
+- **Testing**: 100% pass (15/15 backend, all frontend verified) — iteration_294

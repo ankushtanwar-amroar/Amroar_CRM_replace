@@ -12,7 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from '../../components/ui/table';
-import { Users, UserPlus, Loader, Search, MoreVertical, UserX, UserCheck, Snowflake, Sun, ExternalLink } from 'lucide-react';
+import { Users, UserPlus, Loader, Search, MoreVertical, UserX, UserCheck, Snowflake, Sun, ExternalLink, ArrowLeft } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -134,6 +134,20 @@ const UsersPage = () => {
 
   return (
     <div className="flex-1 p-8">
+      {/* Back to Setup */}
+      <div className="mb-4">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => navigate('/setup')}
+          className="text-slate-600 hover:text-slate-800 -ml-2"
+          data-testid="users-back-to-setup"
+        >
+          <ArrowLeft className="h-4 w-4 mr-1.5" />
+          Back to Setup
+        </Button>
+      </div>
+
       {/* Header */}
       <div className="mb-6">
         <div className="flex items-center justify-between mb-4">

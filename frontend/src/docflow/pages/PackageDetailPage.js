@@ -4,7 +4,7 @@ import {
   ArrowLeft, Package, FileText, Clock, CheckCircle2,
   XCircle, AlertTriangle, ChevronRight,
   Eye, Send, Ban, Loader2, AlertCircle,
-  Download, Webhook, Play,
+  Download, Webhook, Play, Bell,
   Link2, Mail, BarChart3, ScrollText,
   Plus, Trash2, GripVertical, Search, X
 } from 'lucide-react';
@@ -40,13 +40,11 @@ const formatDate = (d) => d ? new Date(d).toLocaleString('en-US', { month: 'shor
 const formatShortDate = (d) => d ? new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—';
 
 const WEBHOOK_EVENTS = [
-  { id: 'package_created', label: 'Package Created' },
-  { id: 'package_sent', label: 'Package Sent' },
-  { id: 'recipient_notified', label: 'Recipient Notified' },
-  { id: 'document_generated', label: 'Document Generated' },
-  { id: 'wave_started', label: 'Wave Started' },
-  { id: 'document_signed', label: 'Document Signed' },
-  { id: 'package_completed', label: 'Package Completed' },
+  { id: 'signed', label: 'Signed', description: 'When document is signed by recipient' },
+  { id: 'opened', label: 'Opened', description: 'When package is opened via link' },
+  { id: 'sent', label: 'Sent', description: 'When document is sent to recipient' },
+  { id: 'approve_reject', label: 'Approve / Reject', description: 'When approver approves or rejects the package' },
+  { id: 'signed_copy', label: 'Signed Copy', description: 'When signed copy is generated' },
 ];
 
 const SortableDocRow = ({ doc, idx, onRemove, canEdit }) => {
@@ -90,12 +88,17 @@ const PackageDetailPage = () => {
   const [webhookUrl, setWebhookUrl] = useState('');
   const [webhookEvents, setWebhookEvents] = useState([]);
   const [webhookSecret, setWebhookSecret] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [savingWebhook, setSavingWebhook] = useState(false);
 
   // Void modal
   const [showVoidModal, setShowVoidModal] = useState(false);
   const [voidReason, setVoidReason] = useState('');
   const [voiding, setVoiding] = useState(false);
+
+  // Delete modal
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Document management
   const [editingDocs, setEditingDocs] = useState(false);
@@ -175,13 +178,108 @@ const PackageDetailPage = () => {
 
   const toggleWebhookEvent = (eventId) => setWebhookEvents(prev => prev.includes(eventId) ? prev.filter(e => e !== eventId) : [...prev, eventId]);
 
+  const SAMPLE_PAYLOADS = {
+    signed: {
+      event: 'signed',
+      timestamp: new Date().toISOString(),
+      package_id: pkg?.id || 'pkg_abc123',
+      package_name: pkg?.name || 'Package',
+      tenant_id: 'tenant_abc123',
+      document_id: 'doc_abc123',
+      document_status: 'signed',
+      template_name: 'NDA Agreement',
+      recipient_email: 'signer@example.com',
+      recipient_name: 'John Doe',
+      signed_at: new Date().toISOString(),
+      status: 'completed',
+      signed_documents: [{
+        document_id: 'doc_abc123',
+        template_name: 'NDA Agreement',
+        signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+        signed_at: new Date().toISOString()
+      }],
+      recipient_details: { name: 'John Doe', email: 'signer@example.com' },
+      metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', performed_by: 'John Doe', performed_by_email: 'signer@example.com' }
+    },
+    opened: {
+      event: 'opened',
+      timestamp: new Date().toISOString(),
+      package_id: pkg?.id || 'pkg_abc123',
+      package_name: pkg?.name || 'Package',
+      tenant_id: 'tenant_abc123',
+      document_id: 'doc_abc123',
+      recipient_email: 'user@example.com',
+      recipient_name: 'John Doe',
+      opened_at: new Date().toISOString(),
+      metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0' }
+    },
+    sent: {
+      event: 'sent',
+      timestamp: new Date().toISOString(),
+      package_id: pkg?.id || 'pkg_abc123',
+      package_name: pkg?.name || 'Package',
+      tenant_id: 'tenant_abc123',
+      document_id: 'doc_abc123',
+      recipient_email: 'user@example.com',
+      recipient_name: 'John Doe',
+      sent_at: new Date().toISOString(),
+      delivery_method: 'email',
+      recipient_count: 1
+    },
+    approve_reject: {
+      event: 'approve_reject',
+      timestamp: new Date().toISOString(),
+      package_id: pkg?.id || 'pkg_abc123',
+      package_name: pkg?.name || 'Package',
+      tenant_id: 'tenant_abc123',
+      action: 'approved',
+      recipient_email: 'approver@example.com',
+      recipient_name: 'Jane Smith',
+      reason: null,
+      metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh)', performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' }
+    },
+    signed_copy: {
+      event: 'signed_copy',
+      timestamp: new Date().toISOString(),
+      package_id: pkg?.id || 'pkg_abc123',
+      package_name: pkg?.name || 'Package',
+      tenant_id: 'tenant_abc123',
+      document_id: 'doc_abc123',
+      template_name: 'NDA Agreement',
+      signed_documents: [{
+        document_id: 'doc_abc123',
+        template_name: 'NDA Agreement',
+        signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+        signed_at: new Date().toISOString()
+      }],
+      generated_at: new Date().toISOString()
+    }
+  };
+
   const downloadSamplePayload = () => {
-    const sample = { event: "document_signed", timestamp: new Date().toISOString(), package: { id: "pkg_abc123", name: "Bundle", status: "IN_PROGRESS" }, document: { id: "doc_xyz789", status: "SIGNED" }, recipient: { name: "Jane Doe", role_type: "SIGN" } };
-    const blob = new Blob([JSON.stringify(sample, null, 2)], { type: 'application/json' });
+    const config = {
+      webhook_url: webhookUrl || 'https://your-server.com/webhook',
+      events: WEBHOOK_EVENTS.map(event => ({
+        id: event.id,
+        label: event.label,
+        description: event.description,
+        enabled: webhookEvents.includes(event.id),
+        sample_payload: SAMPLE_PAYLOADS[event.id] || { event: event.id }
+      })),
+      settings: {
+        secret: webhookSecret ? '***' : null,
+      },
+      package_id: pkg?.id,
+      package_name: pkg?.name,
+      generated_at: new Date().toISOString()
+    };
+
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = 'docflow_webhook_sample.json'; a.click();
+    a.href = url; a.download = `webhook-config-${pkg?.name || 'package'}.json`; a.click();
     URL.revokeObjectURL(url);
+    toast.success('Webhook config downloaded');
   };
 
   // Void package
@@ -204,6 +302,21 @@ const PackageDetailPage = () => {
   };
 
   // Document management
+
+  const handleDeletePackage = async () => {
+    try {
+      setDeleting(true);
+      await docflowService.deletePackage(packageId);
+      toast.success('Package deleted successfully');
+      navigate('/setup/docflow/packages');
+    } catch (e) {
+      toast.error('Failed to delete package');
+    } finally {
+      setDeleting(false);
+      setShowDeleteModal(false);
+    }
+  };
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
@@ -323,6 +436,9 @@ const PackageDetailPage = () => {
                 <>
                   <button onClick={() => setShowVoidModal(true)} className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors" data-testid="void-package-btn">
                     <Ban className="h-4 w-4" /> Void
+                  </button>
+                  <button onClick={() => setShowDeleteModal(true)} className="flex items-center gap-1.5 px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 transition-colors" data-testid="delete-package-btn">
+                    <Trash2 className="h-4 w-4" /> Delete
                   </button>
                   <button onClick={() => navigate(`/setup/docflow/packages/${packageId}/send`)} className="flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm" data-testid="send-package-btn">
                     <Send className="h-4 w-4" /> Send Package
@@ -590,37 +706,107 @@ const PackageDetailPage = () => {
 
         {/* ═══ Webhooks ═══ */}
         {activeSection === 'webhooks' && (
-          <div className="space-y-6" data-testid="webhooks-section">
-            <div className="bg-white rounded-xl border border-gray-200 p-6">
-              <div className="flex items-center justify-between mb-5">
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-800 flex items-center gap-2"><Webhook className="h-4 w-4 text-indigo-600" /> Webhook Configuration</h3>
-                  <p className="text-xs text-gray-500 mt-1">Configured once per package. Applies to ALL future sends.</p>
+          <div className="space-y-5" data-testid="webhooks-section">
+            {/* Webhook URL */}
+            <div className="bg-white rounded-lg border border-gray-200 p-5">
+              <h3 className="text-base font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                <Webhook className="h-5 w-5 text-indigo-600" />
+                Webhook URL
+              </h3>
+              <div className="flex gap-2">
+                <div className="flex-1 relative">
+                  <input
+                    type="url"
+                    data-testid="webhook-url-input"
+                    value={webhookUrl}
+                    onChange={(e) => setWebhookUrl(e.target.value)}
+                    placeholder="https://api.example.com/docflow/webhook/..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm pr-10"
+                  />
+                  {webhookUrl && (
+                    <div className="absolute right-3 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full bg-green-500" title="Active" />
+                  )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className={`text-xs font-medium ${webhookUrl ? 'text-emerald-600' : 'text-gray-400'}`}>{webhookUrl ? 'Active' : 'Inactive'}</span>
-                  <div className={`h-2.5 w-2.5 rounded-full ${webhookUrl ? 'bg-emerald-500' : 'bg-gray-300'}`} data-testid="webhook-status-dot" />
-                </div>
-              </div>
-              <div className="space-y-4">
-                <div><label className="block text-xs font-medium text-gray-600 mb-1">Webhook URL</label><input type="url" value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} placeholder="https://your-server.com/webhook" className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" data-testid="webhook-url-input" /></div>
-                <div><label className="block text-xs font-medium text-gray-600 mb-2">Events</label><div className="grid gap-2 sm:grid-cols-2">{WEBHOOK_EVENTS.map(evt => (<button key={evt.id} onClick={() => toggleWebhookEvent(evt.id)} className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-left transition-colors border ${webhookEvents.includes(evt.id) ? 'bg-indigo-50 text-indigo-700 border-indigo-300' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'}`} data-testid={`webhook-event-${evt.id}`}><div className={`h-4 w-4 rounded border flex items-center justify-center ${webhookEvents.includes(evt.id) ? 'bg-indigo-600 border-indigo-600' : 'border-gray-300'}`}>{webhookEvents.includes(evt.id) && <CheckCircle2 className="h-3 w-3 text-white" />}</div>{evt.label}</button>))}</div></div>
-                <div><label className="block text-xs font-medium text-gray-600 mb-1">Signing Secret</label><input type="text" value={webhookSecret} onChange={(e) => setWebhookSecret(e.target.value)} placeholder="Optional" className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500" data-testid="webhook-secret-input" /></div>
-                <button onClick={handleSaveWebhook} disabled={savingWebhook} className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm font-medium" data-testid="save-webhook-btn">{savingWebhook ? <Loader2 className="h-4 w-4 animate-spin" /> : <Webhook className="h-4 w-4" />}{savingWebhook ? 'Saving...' : 'Save Webhook'}</button>
+                <button
+                  data-testid="download-sample-btn"
+                  onClick={downloadSamplePayload}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors text-sm font-medium"
+                  title="Download webhook config with sample payloads"
+                >
+                  <Download className="h-4 w-4" />
+                  Download
+                </button>
               </div>
             </div>
-            <div className="bg-white rounded-xl border border-gray-200 p-6" data-testid="webhook-sample-section">
-              <div className="flex items-center justify-between mb-3">
-                <div><h4 className="text-sm font-semibold text-gray-800">Sample Payload</h4><p className="text-xs text-gray-500 mt-0.5">Download JSON to test your endpoint</p></div>
-                <button onClick={downloadSamplePayload} className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-gray-300 rounded-lg text-xs font-medium text-gray-700 hover:bg-gray-100" data-testid="download-sample-btn"><Download className="h-3.5 w-3.5" /> Download</button>
+
+            {/* Event Notifications */}
+            <div className="bg-white rounded-lg border border-gray-200 p-5">
+              <h3 className="text-base font-semibold text-gray-900 mb-3 flex items-center gap-2">
+                <Bell className="h-5 w-5 text-indigo-600" />
+                Send Event Notifications
+              </h3>
+              <div className="space-y-2">
+                {WEBHOOK_EVENTS.map(event => (
+                  <label
+                    key={event.id}
+                    data-testid={`webhook-event-${event.id}`}
+                    className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                      webhookEvents.includes(event.id)
+                        ? 'border-indigo-300 bg-indigo-50/50'
+                        : 'border-gray-200 hover:bg-gray-50'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={webhookEvents.includes(event.id)}
+                      onChange={() => toggleWebhookEvent(event.id)}
+                      className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                    />
+                    <div className="flex-1">
+                      <span className="font-medium text-sm text-gray-900">{event.label}</span>
+                      <p className="text-xs text-gray-500 mt-0.5">{event.description}</p>
+                    </div>
+                  </label>
+                ))}
               </div>
-              <pre className="mt-2 p-3 bg-gray-900 text-gray-100 rounded-lg text-[11px] font-mono overflow-x-auto max-h-40 leading-relaxed">{`{
-  "event": "document_signed",
-  "package": { "id": "pkg_abc", "name": "..." },
-  "document": { "id": "doc_xyz", "status": "SIGNED" },
-  "recipient": { "name": "Jane", "role_type": "SIGN" }
-}`}</pre>
             </div>
+
+            {/* Advanced Settings */}
+            <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+              <button
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                className="w-full px-5 py-3 flex items-center justify-between text-left hover:bg-gray-50 transition-colors"
+              >
+                <span className="flex items-center gap-2 font-semibold text-sm text-gray-900">
+                  <ScrollText className="h-4 w-4 text-gray-500" />
+                  Advanced Settings
+                </span>
+                <ChevronRight className={`h-4 w-4 text-gray-400 transition-transform ${showAdvanced ? 'rotate-90' : ''}`} />
+              </button>
+
+              {showAdvanced && (
+                <div className="px-5 pb-5 space-y-4 border-t border-gray-100 pt-4">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Webhook Secret</label>
+                    <input
+                      type="text"
+                      value={webhookSecret}
+                      onChange={(e) => setWebhookSecret(e.target.value)}
+                      placeholder="Optional security secret"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 text-sm"
+                      data-testid="webhook-secret-input"
+                    />
+                    <p className="text-[10px] text-gray-500 mt-1">Used to verify webhook payloads (HMAC signature)</p>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Save Button */}
+            <button onClick={handleSaveWebhook} disabled={savingWebhook} className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 text-sm font-medium" data-testid="save-webhook-btn">
+              {savingWebhook ? <Loader2 className="h-4 w-4 animate-spin" /> : <Webhook className="h-4 w-4" />}
+              {savingWebhook ? 'Saving...' : 'Save Webhook'}
+            </button>
           </div>
         )}
 
@@ -670,6 +856,23 @@ const PackageDetailPage = () => {
               <button onClick={() => { setShowVoidModal(false); setVoidReason(''); }} className="flex-1 py-2.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50" data-testid="void-cancel-btn">Cancel</button>
               <button onClick={handleVoidPackage} disabled={voiding || !voidReason.trim()} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50" data-testid="void-confirm-btn">
                 {voiding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}{voiding ? 'Voiding...' : 'Void Package'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Delete Package Modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4" data-testid="delete-modal">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900">Delete Package</h3>
+              <p className="text-sm text-gray-500 mt-1">This will permanently delete this package, all its runs, documents, and submissions. This action cannot be undone.</p>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={() => setShowDeleteModal(false)} className="flex-1 py-2.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50" data-testid="delete-cancel-btn">Cancel</button>
+              <button onClick={handleDeletePackage} disabled={deleting} className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700 disabled:opacity-50" data-testid="delete-confirm-btn">
+                {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}{deleting ? 'Deleting...' : 'Delete Package'}
               </button>
             </div>
           </div>

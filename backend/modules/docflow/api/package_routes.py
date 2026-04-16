@@ -106,6 +106,7 @@ class SendRecipientInput(BaseModel):
     role_type: str = "SIGN"
     routing_order: int = 1
     assigned_components_map: Optional[Dict[str, List[str]]] = None
+    email_template_id: Optional[str] = None
 
 class SendRoutingConfig(BaseModel):
     mode: str = "sequential"
@@ -115,11 +116,16 @@ class SendSecurityInput(BaseModel):
     require_auth: bool = True
     session_timeout_minutes: int = 15
 
+class TemplateMergeFieldsInput(BaseModel):
+    template_id: str
+    merge_fields: Dict[str, Any] = {}
+
 class SendPackageRequest(BaseModel):
     recipients: List[SendRecipientInput] = Field(default_factory=list)
     delivery_mode: str = Field(default="email")
     routing_config: Optional[SendRoutingConfig] = None
     security: Optional[SendSecurityInput] = None
+    template_merge_fields: Optional[List[TemplateMergeFieldsInput]] = None
 
 @router.post("/{package_id}/send")
 async def send_package(
@@ -161,6 +167,7 @@ async def send_package(
             "role_type": r.role_type,
             "routing_order": r.routing_order,
             "assigned_components": r.assigned_components_map or {},
+            "email_template_id": r.email_template_id,
         })
 
     routing_config = {"mode": "sequential", "on_reject": "void"}
@@ -170,6 +177,32 @@ async def send_package(
     security = {"require_auth": True, "session_timeout_minutes": 15}
     if req.security:
         security = {"require_auth": req.security.require_auth, "session_timeout_minutes": req.security.session_timeout_minutes}
+
+    # Build template merge fields map — resolve by group_id, name, or direct match
+    merge_fields_map = {}
+    if req.template_merge_fields:
+        pkg_template_ids = {d.get("template_id") for d in package.get("documents", [])}
+        group_to_pkg = {}
+        name_to_pkg = {}
+        for doc_entry in package.get("documents", []):
+            tid = doc_entry.get("template_id")
+            if tid:
+                tmpl = await db.docflow_templates.find_one({"id": tid}, {"_id": 0, "template_group_id": 1, "name": 1})
+                if tmpl:
+                    if tmpl.get("template_group_id"):
+                        group_to_pkg[tmpl["template_group_id"]] = tid
+                    if tmpl.get("name"):
+                        name_to_pkg[tmpl["name"]] = tid
+        for tmf in req.template_merge_fields:
+            resolved = tmf.template_id
+            if resolved not in pkg_template_ids:
+                if resolved in group_to_pkg:
+                    resolved = group_to_pkg[resolved]
+                else:
+                    ext = await db.docflow_templates.find_one({"id": resolved}, {"_id": 0, "name": 1})
+                    if ext and ext.get("name") in name_to_pkg:
+                        resolved = name_to_pkg[ext["name"]]
+            merge_fields_map[resolved] = tmf.merge_fields
 
     run = await package_service.send_package_run(
         package_id=package_id,
@@ -181,6 +214,7 @@ async def send_package(
         send_email=needs_email,
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
+        template_merge_fields=merge_fields_map,
     )
 
     frontend_url = os.environ.get("FRONTEND_URL", "")
@@ -345,16 +379,25 @@ async def get_package(
     if not package:
         raise HTTPException(status_code=404, detail="Package not found")
 
-    # Include run stats
-    runs_count = await db.docflow_package_runs.count_documents({"package_id": package_id})
-    completed_runs = await db.docflow_package_runs.count_documents({"package_id": package_id, "status": "completed"})
-    last_run = await db.docflow_package_runs.find_one(
-        {"package_id": package_id}, {"_id": 0, "created_at": 1, "status": 1},
-        sort=[("created_at", -1)]
-    )
-    package["runs_count"] = runs_count
-    package["completed_runs"] = completed_runs
-    package["last_run_at"] = last_run["created_at"] if last_run else None
+    # Include run stats — use aggregation to avoid multiple count queries
+    run_stats_pipeline = [
+        {"$match": {"package_id": package_id}},
+        {"$group": {
+            "_id": None,
+            "runs_count": {"$sum": 1},
+            "completed_runs": {"$sum": {"$cond": [{"$eq": ["$status", "completed"]}, 1, 0]}},
+            "last_created_at": {"$max": "$created_at"}
+        }}
+    ]
+    run_agg = await db.docflow_package_runs.aggregate(run_stats_pipeline).to_list(1)
+    if run_agg:
+        package["runs_count"] = run_agg[0]["runs_count"]
+        package["completed_runs"] = run_agg[0]["completed_runs"]
+        package["last_run_at"] = run_agg[0]["last_created_at"]
+    else:
+        package["runs_count"] = 0
+        package["completed_runs"] = 0
+        package["last_run_at"] = None
 
     # Aggregate recipient/submission stats across ALL runs
     all_runs = await db.docflow_package_runs.find(
@@ -367,6 +410,7 @@ async def get_package(
     total_submissions = 0
     completed_submissions = 0
 
+    public_link_run_ids = []
     for run in all_runs:
         dm = run.get("delivery_mode", "email")
         if dm in ("email", "both", "public_recipients"):
@@ -375,10 +419,22 @@ async def get_package(
             signed_recipients += sum(1 for r in rcpts if r.get("status") == "completed")
             pending_recipients += sum(1 for r in rcpts if r.get("status") != "completed")
         if dm in ("public_link", "both"):
-            run_subs = await db.docflow_public_submissions.count_documents({"package_id": run["id"]})
-            run_subs_done = await db.docflow_public_submissions.count_documents({"package_id": run["id"], "signed_at": {"$ne": None}})
-            total_submissions += run_subs
-            completed_submissions += run_subs_done
+            public_link_run_ids.append(run["id"])
+
+    # Batch submission counts for public_link runs
+    if public_link_run_ids:
+        sub_pipeline = [
+            {"$match": {"package_id": {"$in": public_link_run_ids}}},
+            {"$group": {
+                "_id": None,
+                "total": {"$sum": 1},
+                "completed": {"$sum": {"$cond": [{"$ne": ["$signed_at", None]}, 1, 0]}}
+            }}
+        ]
+        sub_agg = await db.docflow_public_submissions.aggregate(sub_pipeline).to_list(1)
+        if sub_agg:
+            total_submissions = sub_agg[0]["total"]
+            completed_submissions = sub_agg[0]["completed"]
 
     package["total_recipients"] = total_recipients
     package["signed_recipients"] = signed_recipients
@@ -718,3 +774,39 @@ async def get_package_submissions(
     total = await db.docflow_public_submissions.count_documents({"package_id": package_id})
 
     return {"submissions": submissions, "total": total}
+
+
+@router.delete("/{package_id}")
+async def delete_package(
+    package_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a package and all related data (runs, documents, submissions)."""
+    package = await db.docflow_packages.find_one({
+        "id": package_id,
+        "tenant_id": current_user.tenant_id,
+        "_type": {"$ne": "run"}
+    })
+    if not package:
+        raise HTTPException(status_code=404, detail="Package not found")
+
+    # Delete related runs
+    run_ids = []
+    async for run in db.docflow_package_runs.find({"package_id": package_id}, {"_id": 0, "id": 1}):
+        run_ids.append(run["id"])
+    if run_ids:
+        # Delete documents for each run
+        await db.docflow_documents.delete_many({"package_id": {"$in": run_ids}})
+        # Delete public submissions
+        await db.docflow_public_submissions.delete_many({"package_id": {"$in": run_ids}})
+        # Delete audit events
+        await db.docflow_audit_events.delete_many({"package_id": {"$in": run_ids}})
+        # Delete runs
+        await db.docflow_package_runs.delete_many({"package_id": package_id})
+        # Delete run entries from packages collection (type=run)
+        await db.docflow_packages.delete_many({"package_id": package_id, "_type": "run"})
+
+    # Delete the package itself
+    await db.docflow_packages.delete_one({"id": package_id})
+
+    return {"success": True, "message": f"Package and {len(run_ids)} run(s) deleted"}

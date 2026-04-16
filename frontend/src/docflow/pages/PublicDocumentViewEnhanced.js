@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { CheckCircle, FileText, Download, Eye, Loader2, Send, ArrowLeft } from 'lucide-react';
+import { CheckCircle, FileText, Download, Eye, Loader2, Send, ArrowLeft, XCircle } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { PDFDocument, rgb } from 'pdf-lib';
 import InteractiveDocumentViewer from '../components/InteractiveDocumentViewer';
@@ -26,6 +26,9 @@ const PublicDocumentViewEnhanced = () => {
   const [signatureModalOpen, setSignatureModalOpen] = useState(false);
   const [currentFieldId, setCurrentFieldId] = useState(null);
   const [isInitialsField, setIsInitialsField] = useState(false);
+  const [roleAction, setRoleAction] = useState(null); // 'approving', 'rejecting', 'reviewing'
+  const [showRejectModal, setShowRejectModal] = useState(false);
+  const [rejectReason, setRejectReason] = useState('');
 
   // User identity + verification
   const [formData, setFormData] = useState({ signer_name: '', signer_email: '' });
@@ -404,8 +407,48 @@ const PublicDocumentViewEnhanced = () => {
     }
   };
 
+  // Role-based actions for Approver/Reviewer on template-level documents
+  const handleRoleAction = async (action, reason) => {
+    if (action === 'reject' && !reason) {
+      setShowRejectModal(true);
+      return;
+    }
+    try {
+      setRoleAction(action === 'approve' ? 'approving' : action === 'reject' ? 'rejecting' : 'reviewing');
+      const resp = await fetch(`${API_URL}/api/docflow/documents/${docData.id}/role-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: action,
+          recipient_token: activeToken,
+          name: formData.signer_name,
+          email: formData.signer_email,
+          reason: reason || undefined,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json();
+        throw new Error(err.detail || `Failed to ${action}`);
+      }
+      toast.success(action === 'approve' ? 'Document approved!' : action === 'reject' ? 'Document rejected!' : 'Review confirmed!');
+      setShowRejectModal(false);
+      setRejectReason('');
+      await loadChildDocument(activeToken);
+    } catch (error) {
+      toast.error(error.message || `Failed to ${action}`);
+    } finally {
+      setRoleAction(null);
+    }
+  };
+
+
   const getPdfViewUrl = () => {
-    const version = ['signed', 'completed'].includes(docData?.status) ? 'signed' : viewMode;
+    // Show signed version if doc is signed/completed/partially_signed (has been signed by signer)
+    // Approver/Reviewer should always see the signed version
+    const activeRole = (docData?.active_recipient?.role_type || docData?.active_recipient?.role || 'SIGN').toUpperCase();
+    const isNonSigner = activeRole !== 'SIGN' && activeRole !== 'SIGNER';
+    const hasSigned = ['signed', 'completed', 'partially_signed'].includes(docData?.status);
+    const version = (hasSigned && (isNonSigner || ['signed', 'completed'].includes(docData?.status))) ? 'signed' : viewMode;
     return `${API_URL}/api/docflow/documents/${docData?.id}/view/${version}`;
   };
 
@@ -597,8 +640,13 @@ const PublicDocumentViewEnhanced = () => {
         )}
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Panel - Signer Info */}
-          {docData.status !== 'completed' && docData.status !== 'signed' && (
+          {/* Left Panel - Signer Info (only for SIGN role) */}
+          {docData.status !== 'completed' && docData.status !== 'signed' && (() => {
+            const leftRole = (docData?.active_recipient?.role_type || docData?.active_recipient?.role || 'SIGN').toUpperCase();
+            const leftIsSigner = leftRole === 'SIGN' || leftRole === 'SIGNER';
+            const leftRecipientDone = ['completed', 'signed', 'approved', 'reviewed', 'declined'].includes(docData?.active_recipient?.status);
+            if (!leftIsSigner || leftRecipientDone) return null;
+            return (
             <div className="lg:col-span-1">
               <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
                 <h3 className="text-lg font-semibold text-gray-900 mb-4">Signer Information</h3>
@@ -628,10 +676,17 @@ const PublicDocumentViewEnhanced = () => {
                 </div>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* Document Viewer */}
-          <div className={(docData.status !== 'signed' && docData.status !== 'completed') ? 'lg:col-span-2' : 'lg:col-span-3'}>
+          {(() => {
+            const viewerRole = (docData?.active_recipient?.role_type || docData?.active_recipient?.role || 'SIGN').toUpperCase();
+            const viewerIsSigner = viewerRole === 'SIGN' || viewerRole === 'SIGNER';
+            const viewerRecipientDone = ['completed', 'signed', 'approved', 'reviewed', 'declined'].includes(docData?.active_recipient?.status);
+            const showLeftPanel = (docData.status !== 'signed' && docData.status !== 'completed') && viewerIsSigner && !viewerRecipientDone;
+            return (
+          <div className={showLeftPanel ? 'lg:col-span-2' : 'lg:col-span-3'}>
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden relative" style={{ height: '800px' }}>
               {/* Verification Overlay (for direct/email links that still need auth) */}
               {!isVerified && (
@@ -731,19 +786,105 @@ const PublicDocumentViewEnhanced = () => {
                 </div>
               )}
 
-              {isVerified && (
-                docData.status === 'completed' || docData.status === 'signed' ? (
-                  <div className="h-full flex flex-col">
-                    <div className="flex-1 relative">
-                      <iframe
-                        src={`${getPdfViewUrl()}#toolbar=1&navpanes=0&scrollbar=1`}
-                        className="w-full h-full border-0"
-                        title="Signed Document"
-                        data-testid="signed-pdf-iframe"
-                      />
+              {isVerified && (() => {
+                const activeRole = (docData?.active_recipient?.role_type || docData?.active_recipient?.role || 'SIGN').toUpperCase();
+                const isCompleted = ['completed', 'signed'].includes(docData.status);
+                const isDeclined = docData.status === 'declined';
+                const isApprover = activeRole === 'APPROVE_REJECT';
+                const isReviewer = activeRole === 'VIEW_ONLY' || activeRole === 'REVIEWER';
+                const recipientStatus = docData?.active_recipient?.status;
+                const recipientDone = ['completed', 'signed', 'approved', 'reviewed', 'declined'].includes(recipientStatus);
+
+                // Status banner for completed actions
+                const StatusBanner = () => {
+                  if (!recipientDone && !isCompleted && !isDeclined) return null;
+                  const statusConfig = {
+                    approved: { label: 'Approved', bg: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700', icon: <CheckCircle className="h-5 w-5 text-emerald-600" /> },
+                    reviewed: { label: 'Review Completed', bg: 'bg-blue-50 border-blue-200', text: 'text-blue-700', icon: <CheckCircle className="h-5 w-5 text-blue-600" /> },
+                    signed: { label: 'Signed', bg: 'bg-emerald-50 border-emerald-200', text: 'text-emerald-700', icon: <CheckCircle className="h-5 w-5 text-emerald-600" /> },
+                    declined: { label: 'Rejected', bg: 'bg-red-50 border-red-200', text: 'text-red-700', icon: <XCircle className="h-5 w-5 text-red-600" /> },
+                  };
+                  const st = statusConfig[recipientStatus] || statusConfig[isDeclined ? 'declined' : 'signed'] || statusConfig['signed'];
+                  const rejectComment = docData?.reject_reason || docData?.active_recipient?.reject_reason;
+                  return (
+                    <div className={`flex flex-col px-5 py-3 ${st.bg} border ${st.text} rounded-lg mb-3`} data-testid="action-status-banner">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2.5">
+                          {st.icon}
+                          <span className="font-semibold text-sm">{st.label}</span>
+                        </div>
+                        <span className="text-xs opacity-70">{new Date(docData?.active_recipient?.action_at || Date.now()).toLocaleString()}</span>
+                      </div>
+                      {rejectComment && (
+                        <div className="mt-2 pt-2 border-t border-red-200/50 text-sm">
+                          <span className="font-medium">Reason: </span>{rejectComment}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ) : (
+                  );
+                };
+
+                // Approver/Reviewer action header
+                const ActionHeader = () => {
+                  if (recipientDone || isCompleted || isDeclined) return null;
+                  if (isApprover) {
+                    return (
+                      <div className="flex items-center justify-between px-5 py-3 bg-white border border-gray-200 rounded-lg mb-3" data-testid="approver-actions">
+                        <p className="text-sm text-gray-600 font-medium">Review the document, then approve or reject</p>
+                        <div className="flex gap-2">
+                          <button onClick={() => handleRoleAction('reject')} disabled={!!roleAction}
+                            className="px-5 py-2 bg-white border-2 border-red-500 text-red-600 rounded-lg text-sm font-semibold hover:bg-red-50 disabled:opacity-50 flex items-center gap-1.5 transition-colors"
+                            data-testid="reject-btn">
+                            {roleAction === 'rejecting' ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
+                            Reject
+                          </button>
+                          <button onClick={() => handleRoleAction('approve')} disabled={!!roleAction}
+                            className="px-5 py-2 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 flex items-center gap-1.5 shadow-sm transition-colors"
+                            data-testid="approve-btn">
+                            {roleAction === 'approving' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
+                            Approve
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  }
+                  if (isReviewer) {
+                    return (
+                      <div className="flex items-center justify-between px-5 py-3 bg-white border border-gray-200 rounded-lg mb-3" data-testid="reviewer-actions">
+                        <p className="text-sm text-gray-600 font-medium">Review the document below, then confirm</p>
+                        <button onClick={() => handleRoleAction('review')} disabled={!!roleAction}
+                          className="px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-1.5 shadow-sm transition-colors"
+                          data-testid="confirm-review-btn">
+                          {roleAction === 'reviewing' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
+                          Confirm Review
+                        </button>
+                      </div>
+                    );
+                  }
+                  return null;
+                };
+
+                // For non-signer roles or completed docs, show read-only PDF with action header
+                if (isApprover || isReviewer || isCompleted || isDeclined || recipientDone) {
+                  return (
+                    <div className="h-full flex flex-col" style={{ minHeight: '70vh' }}>
+                      <StatusBanner />
+                      <ActionHeader />
+                      <div className="flex-1 relative rounded-lg overflow-hidden border border-gray-200">
+                        <iframe
+                          src={`${getPdfViewUrl()}#toolbar=1&navpanes=0&scrollbar=1`}
+                          className="w-full h-full border-0"
+                          style={{ minHeight: '60vh' }}
+                          title="Document"
+                          data-testid="pdf-iframe"
+                        />
+                      </div>
+                    </div>
+                  );
+                }
+
+                // Default: Signer view
+                return (
                   <InteractiveDocumentViewer
                     pdfUrl={getPdfViewUrl()}
                     fields={(template?.field_placements || []).map((f) => {
@@ -772,10 +913,12 @@ const PublicDocumentViewEnhanced = () => {
                     showSignatureModal={showSignatureModal}
                     externalFieldValues={fieldValues}
                   />
-                )
-              )}
+                );
+              })()}
             </div>
           </div>
+            );
+          })()}
         </div>
       </div>
 
@@ -786,6 +929,46 @@ const PublicDocumentViewEnhanced = () => {
         fieldId={currentFieldId}
         isInitials={isInitialsField}
       />
+
+      {/* Rejection Reason Modal */}
+      {showRejectModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" data-testid="reject-reason-modal">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+                <XCircle className="h-5 w-5 text-red-600" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900">Reject Document</h3>
+                <p className="text-xs text-gray-500">Please provide a reason for rejection</p>
+              </div>
+            </div>
+            <textarea
+              value={rejectReason}
+              onChange={(e) => setRejectReason(e.target.value)}
+              placeholder="Enter reason for rejection (required)..."
+              rows={4}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500 focus:border-transparent resize-none"
+              data-testid="reject-reason-input"
+              autoFocus
+            />
+            <div className="flex gap-2">
+              <button onClick={() => { setShowRejectModal(false); setRejectReason(''); }} className="flex-1 py-2.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 font-medium">
+                Cancel
+              </button>
+              <button
+                onClick={() => handleRoleAction('reject', rejectReason)}
+                disabled={!rejectReason.trim() || !!roleAction}
+                className="flex-1 py-2.5 bg-red-600 text-white rounded-lg text-sm font-semibold hover:bg-red-700 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                data-testid="confirm-reject-btn"
+              >
+                {roleAction === 'rejecting' ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
+                Confirm Rejection
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

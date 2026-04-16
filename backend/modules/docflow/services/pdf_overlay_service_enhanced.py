@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.utils import ImageReader
+from reportlab.lib import colors
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from PIL import Image
@@ -41,13 +42,14 @@ class PDFOverlayService:
             input_pdf = PdfReader(io.BytesIO(pdf_bytes))
             output = PdfWriter()
             
-            # Group fields by page
+            # Group fields by page (convert 1-based page numbers to 0-based)
             fields_by_page = {}
             for field in field_placements:
-                page = field.get('page', 0)
-                if page not in fields_by_page:
-                    fields_by_page[page] = []
-                fields_by_page[page].append(field)
+                page = field.get('page', 1)
+                page_idx = page - 1 if page > 0 else 0  # Convert to 0-based
+                if page_idx not in fields_by_page:
+                    fields_by_page[page_idx] = []
+                fields_by_page[page_idx].append(field)
             
             # Process each page
             for page_num in range(len(input_pdf.pages)):
@@ -64,9 +66,13 @@ class PDFOverlayService:
                     
                     if overlay_bytes:
                         # Merge overlay with original page
-                        overlay_pdf = PdfReader(io.BytesIO(overlay_bytes))
-                        overlay_page = overlay_pdf.pages[0]
-                        original_page.merge_page(overlay_page)
+                        try:
+                            overlay_pdf = PdfReader(io.BytesIO(overlay_bytes))
+                            if len(overlay_pdf.pages) > 0:
+                                overlay_page = overlay_pdf.pages[0]
+                                original_page.merge_page(overlay_page)
+                        except Exception as merge_err:
+                            logger.warning(f"Failed to merge overlay for page {page_num}: {merge_err}")
                 
                 output.add_page(original_page)
             
@@ -120,13 +126,17 @@ class PDFOverlayService:
                 if field_type == 'signature':
                     self._draw_signature_field(c, x, y_pdf, width, height, field_id, field_values)
                 elif field_type == 'text':
-                    self._draw_text_field(c, x, y_pdf, width, height, field_id, field_values)
+                    self._draw_text_field(c, x, y_pdf, width, height, field_id, field_values, field)
                 elif field_type == 'date':
                     self._draw_date_field(c, x, y_pdf, width, height, field_id, field_values)
                 elif field_type == 'checkbox':
                     self._draw_checkbox_field(c, x, y_pdf, width, height, field_id, field_values)
                 elif field_type == 'initials':
                     self._draw_initials_field(c, x, y_pdf, width, height, field_id, field_values)
+                elif field_type == 'merge':
+                    self._draw_merge_field(c, x, y_pdf, width, height, field, field_values)
+                elif field_type == 'label':
+                    self._draw_label_field(c, x, y_pdf, width, height, field)
 
             c.save()
             buffer.seek(0)
@@ -160,8 +170,109 @@ class PDFOverlayService:
             except Exception as e:
                 logger.error(f"Error drawing signature: {e}")
     
+    # Font family mapping from CSS to ReportLab
+    FONT_MAP = {
+        'Arial': 'Helvetica',
+        'Helvetica': 'Helvetica',
+        'Times New Roman': 'Times-Roman',
+        'Georgia': 'Times-Roman',
+        'Courier New': 'Courier',
+        'Verdana': 'Helvetica',
+        'Trebuchet MS': 'Helvetica',
+    }
+
+    def _apply_field_style(self, c: canvas.Canvas, field: Dict[str, Any], height: float, default_size: float = 10):
+        """Apply field styling (font, color, weight, italic) from the style dict."""
+        style = field.get('style') or {}
+        font_family = style.get('fontFamily', 'Arial')
+        font_size_raw = style.get('fontSize', str(int(default_size)))
+        font_weight = style.get('fontWeight', 'normal')
+        font_style_css = style.get('fontStyle', 'normal')
+        text_color = style.get('color', '#000000')
+
+        # Resolve font size
+        try:
+            font_size = float(str(font_size_raw).replace('px', ''))
+        except (ValueError, TypeError):
+            font_size = default_size
+
+        # Cap font size to fit height
+        font_size = min(font_size, height * 0.8)
+
+        # Map CSS font to ReportLab font
+        base_font = self.FONT_MAP.get(font_family, 'Helvetica')
+        is_bold = font_weight == 'bold'
+        is_italic = font_style_css == 'italic'
+
+        if base_font == 'Helvetica':
+            if is_bold and is_italic:
+                rl_font = 'Helvetica-BoldOblique'
+            elif is_bold:
+                rl_font = 'Helvetica-Bold'
+            elif is_italic:
+                rl_font = 'Helvetica-Oblique'
+            else:
+                rl_font = 'Helvetica'
+        elif base_font == 'Times-Roman':
+            if is_bold and is_italic:
+                rl_font = 'Times-BoldItalic'
+            elif is_bold:
+                rl_font = 'Times-Bold'
+            elif is_italic:
+                rl_font = 'Times-Italic'
+            else:
+                rl_font = 'Times-Roman'
+        elif base_font == 'Courier':
+            if is_bold and is_italic:
+                rl_font = 'Courier-BoldOblique'
+            elif is_bold:
+                rl_font = 'Courier-Bold'
+            elif is_italic:
+                rl_font = 'Courier-Oblique'
+            else:
+                rl_font = 'Courier'
+        else:
+            rl_font = 'Helvetica-Bold' if is_bold else 'Helvetica'
+
+        c.setFont(rl_font, font_size)
+
+        # Apply color
+        try:
+            c.setFillColor(colors.HexColor(text_color))
+        except Exception:
+            c.setFillColorRGB(0, 0, 0)
+
+        return font_size, style
+
+    def _draw_text_with_style(self, c: canvas.Canvas, x: float, y: float, width: float,
+                               height: float, text: str, field: Dict[str, Any]):
+        """Draw text with full styling applied (alignment, underline)."""
+        font_size, style = self._apply_field_style(c, field, height)
+        text_align = style.get('textAlign', 'left')
+        text_decoration = style.get('textDecoration', 'none')
+        pad = 3
+
+        text_y = y + (height - font_size) / 2 + 1
+
+        # Draw aligned text
+        text_width = c.stringWidth(text, c._fontname, c._fontsize)
+        if text_align == 'center':
+            text_x = x + (width - text_width) / 2
+        elif text_align == 'right':
+            text_x = x + width - text_width - pad
+        else:
+            text_x = x + pad
+
+        c.drawString(text_x, text_y, text)
+
+        # Draw underline if needed
+        if text_decoration == 'underline':
+            c.setLineWidth(0.5)
+            c.line(text_x, text_y - 1.5, text_x + text_width, text_y - 1.5)
+
     def _draw_text_field(self, c: canvas.Canvas, x: float, y: float, width: float,
-                        height: float, field_id: str, field_values: Dict[str, Any]):
+                        height: float, field_id: str, field_values: Dict[str, Any],
+                        field: Dict[str, Any] = None):
         """Draw text field value on PDF"""
         if not field_values or field_id not in field_values:
             return
@@ -171,13 +282,13 @@ class PDFOverlayService:
             return
         
         try:
-            # Set font
-            c.setFont("Helvetica", 10)
-            c.setFillColorRGB(0, 0, 0)
-            
-            # Draw text (centered vertically in field box)
-            text_y = y + (height / 2) - 3
-            c.drawString(x + 5, text_y, value)
+            if field and field.get('style'):
+                self._draw_text_with_style(c, x, y, width, height, value, field)
+            else:
+                c.setFont("Helvetica", 10)
+                c.setFillColorRGB(0, 0, 0)
+                text_y = y + (height / 2) - 3
+                c.drawString(x + 5, text_y, value)
             
             logger.info(f"Drew text field '{value}' at ({x}, {y})")
         except Exception as e:
@@ -199,7 +310,7 @@ class PDFOverlayService:
             try:
                 dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
                 value = dt.strftime('%Y-%m-%d')
-            except:
+            except Exception:
                 pass
             
             # Set font
@@ -262,6 +373,62 @@ class PDFOverlayService:
             except Exception as e:
                 logger.error(f"Error drawing initials: {e}")
     
+
+    def _draw_merge_field(self, c: canvas.Canvas, x: float, y: float, width: float,
+                          height: float, field: Dict[str, Any], field_values: Dict[str, Any]):
+        """Draw merge field value on PDF"""
+        field_id = field.get('id') or field.get('name', '')
+        merge_obj = field.get('merge_object') or field.get('mergeObject', '')
+        merge_field = field.get('merge_field') or field.get('mergeField', '')
+        full_key = f"{merge_obj}.{merge_field}" if merge_obj and merge_field else ''
+
+        # Try multiple key formats to find the value
+        value = (field_values.get(field_id)
+                 or field_values.get(full_key)
+                 or field_values.get(merge_field)
+                 or '')
+
+        if not value:
+            return
+
+        try:
+            # White background to cover placeholder text
+            c.setFillColor(colors.white)
+            c.rect(x, y, width, height, fill=True, stroke=False)
+
+            if field.get('style'):
+                self._draw_text_with_style(c, x, y, width, height, str(value)[:100], field)
+            else:
+                font_size = min(10, height * 0.7)
+                c.setFillColor(colors.HexColor('#1a1a2e'))
+                c.setFont("Helvetica", font_size)
+                text_y = y + (height - font_size) / 2 + 1
+                c.drawString(x + 3, text_y, str(value)[:100])
+
+            logger.info(f"Drew merge field '{field_id}' = '{value}' at ({x}, {y})")
+        except Exception as e:
+            logger.error(f"Error drawing merge field: {e}")
+
+    def _draw_label_field(self, c: canvas.Canvas, x: float, y: float, width: float,
+                          height: float, field: Dict[str, Any]):
+        """Draw a static label on PDF with styling."""
+        text = field.get('text') or field.get('label', '')
+        if not text:
+            return
+
+        try:
+            if field.get('style'):
+                self._draw_text_with_style(c, x, y, width, height, text, field)
+            else:
+                c.setFont("Helvetica", 10)
+                c.setFillColorRGB(0, 0, 0)
+                text_y = y + (height / 2) - 3
+                c.drawString(x + 3, text_y, text)
+
+            logger.info(f"Drew label '{text}' at ({x}, {y})")
+        except Exception as e:
+            logger.error(f"Error drawing label field: {e}")
+
     def add_completion_certificate(self, pdf_bytes: bytes, document_data: Dict[str, Any], 
                                   signatures: List[Dict[str, Any]]) -> bytes:
         """

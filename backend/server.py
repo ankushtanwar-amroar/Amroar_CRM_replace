@@ -555,6 +555,7 @@ try:
     from modules.docflow.api.template_public_routes import router as template_public_router
     from modules.docflow.api.package_public_link_routes import router as package_public_link_router
     from modules.docflow.api.package_public_api_routes import router as package_public_api_router
+    from modules.docflow.api.email_template_routes import router as email_template_router
 
     app.include_router(template_router, prefix="/api", tags=["DocFlow"])
     app.include_router(template_enhanced_router, prefix="/api", tags=["DocFlow"])
@@ -570,6 +571,7 @@ try:
     app.include_router(package_public_link_router, prefix="/api", tags=["DocFlow Public Link"])
     app.include_router(package_public_api_router, prefix="/api", tags=["DocFlow Public API"])
     app.include_router(template_public_router, prefix="/api", tags=["DocFlow Public Templates"])
+    app.include_router(email_template_router, prefix="/api", tags=["DocFlow Email Templates"])
     logger.info("DocFlow routes loaded successfully (including CRM routes)")
 except Exception as e:
     logger.warning(f"DocFlow routes not loaded: {str(e)}")
@@ -981,6 +983,11 @@ async def startup_event():
         # DocFlow Package Runs indexes
         await db.docflow_package_runs.create_index([("package_id", 1), ("tenant_id", 1)])
         await db.docflow_package_runs.create_index([("tenant_id", 1), ("created_at", -1)])
+        await db.docflow_package_runs.create_index([("package_id", 1), ("status", 1)])
+        
+        # DocFlow Public Submissions index for batch aggregation
+        await db.docflow_public_submissions.create_index("package_id")
+        await db.docflow_public_submissions.create_index([("package_id", 1), ("signed_at", 1)])
         
         logger.info("✅ DocFlow database indexes created/verified")
     except Exception as e:

@@ -29,7 +29,10 @@ class EmailHistoryService:
         crm_object_id: str,
         tenant_id: str,
         status: str = "sent",
-        error_message: Optional[str] = None
+        error_message: Optional[str] = None,
+        source: str = "template",
+        package_id: Optional[str] = None,
+        package_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Log email send event"""
         now = datetime.now(timezone.utc)
@@ -45,6 +48,9 @@ class EmailHistoryService:
             "tenant_id": tenant_id,
             "status": status,
             "error_message": error_message,
+            "source": source,
+            "package_id": package_id,
+            "package_name": package_name,
             "subject": f"Your {template_name} is ready to review and sign",
             "sent_at": now.isoformat(),
             "delivered_at": None,
