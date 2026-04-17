@@ -21,6 +21,7 @@ from ..models import (
     ReadFilePayload, FetchUrlPayload, AnalyzeWithContextPayload,
     ALLOWED_FILE_TYPES, MAX_CONTENT_CHARS
 )
+import google.generativeai as genai
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +49,112 @@ class ExternalContextMCPService:
 
     def __init__(self, db):
         self.db = db
+
+    @staticmethod
+    def _extract_query_terms(query: str) -> List[str]:
+        """Extract meaningful search terms from a user query."""
+        if not query:
+            return []
+        terms: List[str] = []
+        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-]{1,}", query):
+            t = token.strip()
+            if not t:
+                continue
+            # Keep acronyms like IREDA and normal words with useful length.
+            if t.isupper() and len(t) >= 2:
+                terms.append(t.lower())
+            elif len(t) >= 3:
+                terms.append(t.lower())
+        # Preserve order while de-duplicating
+        seen = set()
+        deduped: List[str] = []
+        for t in terms:
+            if t not in seen:
+                seen.add(t)
+                deduped.append(t)
+        return deduped
+
+    def _build_query_focused_context(self, content: str, query: str, max_chars: int) -> tuple[str, bool]:
+        """
+        Build a query-focused context window from long content.
+        Returns (selected_context, truncated_flag).
+        """
+        if not content:
+            return "", False
+        if len(content) <= max_chars:
+            return content, False
+
+        terms = self._extract_query_terms(query)
+        chunk_size = 2200
+        overlap = 250
+        step = max(500, chunk_size - overlap)
+        chunks: List[tuple[int, str]] = []
+        idx = 0
+        for start in range(0, len(content), step):
+            chunk = content[start:start + chunk_size]
+            if not chunk:
+                break
+            chunks.append((idx, chunk))
+            idx += 1
+            if start + chunk_size >= len(content):
+                break
+
+        def score_chunk(text: str) -> int:
+            if not terms:
+                return 0
+            lower_text = text.lower()
+            score = 0
+            for term in terms:
+                # Count exact term hits and give slight bonus to early hits.
+                hits = lower_text.count(term)
+                if hits:
+                    score += hits * 10
+                    first_pos = lower_text.find(term)
+                    if 0 <= first_pos < 300:
+                        score += 2
+            return score
+
+        scored: List[tuple[int, int]] = []
+        for chunk_idx, chunk_text in chunks:
+            scored.append((chunk_idx, score_chunk(chunk_text)))
+
+        scored.sort(key=lambda x: (-x[1], x[0]))
+        selected_indexes: List[int] = []
+        used = 0
+
+        # Prefer chunks that actually match the query terms.
+        for chunk_idx, sc in scored:
+            if sc <= 0:
+                continue
+            chunk_len = len(chunks[chunk_idx][1])
+            if used + chunk_len > max_chars and selected_indexes:
+                continue
+            selected_indexes.append(chunk_idx)
+            used += chunk_len
+            if used >= max_chars:
+                break
+
+        # Fallback: include beginning + end snippets if no lexical match.
+        if not selected_indexes:
+            first_chunk = chunks[0][1][: max_chars // 2]
+            last_chunk = chunks[-1][1][: max_chars - len(first_chunk)]
+            merged = f"{first_chunk}\n\n... (content omitted) ...\n\n{last_chunk}"
+            return merged[:max_chars], True
+
+        selected_indexes.sort()
+        selected_text_parts: List[str] = []
+        remaining = max_chars
+        for chunk_idx in selected_indexes:
+            chunk_text = chunks[chunk_idx][1]
+            if len(chunk_text) > remaining:
+                chunk_text = chunk_text[:remaining]
+            selected_text_parts.append(chunk_text)
+            remaining -= len(chunk_text)
+            if remaining <= 0:
+                break
+
+        merged = "\n\n... (content omitted) ...\n\n".join(selected_text_parts)
+        return merged[:max_chars], True
 
     # =========================================================================
     # File Content Extraction
@@ -90,13 +197,18 @@ class ExternalContextMCPService:
                     "message": f"Could not extract text content from '{file_name}'. The file may be empty or in an unsupported format."
                 }
 
-            truncated = len(content) > MAX_CONTENT_CHARS
-            content = content[:MAX_CONTENT_CHARS]
+            full_length = len(content)
+            truncated = full_length > MAX_CONTENT_CHARS
 
             # If user has a specific query, use LLM to answer it
             if payload.query:
-                answer = await self._llm_analyze_content(
+                focused_content, focused_truncated = self._build_query_focused_context(
                     content=content,
+                    query=payload.query,
+                    max_chars=MAX_CONTENT_CHARS
+                )
+                answer = await self._llm_analyze_content(
+                    content=focused_content,
                     query=payload.query,
                     source_label=f"file '{file_name}'"
                 )
@@ -104,14 +216,15 @@ class ExternalContextMCPService:
                     "success": True,
                     "file_name": file_name,
                     "file_type": file_type,
-                    "content_length": len(content),
-                    "truncated": truncated,
+                    "content_length": full_length,
+                    "truncated": focused_truncated,
                     "query": payload.query,
                     "answer": answer,
                     "summary": answer
                 }
 
             # Return a summary of the content
+            content = content[:MAX_CONTENT_CHARS]
             summary = await self._llm_summarize_content(
                 content=content,
                 source_label=f"file '{file_name}' ({file_type.upper()})"
@@ -121,7 +234,7 @@ class ExternalContextMCPService:
                 "success": True,
                 "file_name": file_name,
                 "file_type": file_type,
-                "content_length": len(content),
+                "content_length": full_length,
                 "truncated": truncated,
                 "summary": summary
             }
@@ -503,71 +616,162 @@ class ExternalContextMCPService:
     # LLM Helper Methods
     # =========================================================================
 
+    # async def _llm_summarize_content(self, content: str, source_label: str) -> str:
+    #     """Use LLM to summarize extracted content"""
+    #     try:
+    #         from emergentintegrations.llm.chat import LlmChat, UserMessage
+    #         import uuid
+
+    #         chat = LlmChat(
+    #             api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+    #             session_id=f"clubot-ctx-{uuid.uuid4().hex[:8]}",
+    #             system_message=(
+    #                 "You are a CRM assistant that summarizes documents and web content concisely. "
+    #                 "Provide a structured summary with key points. Be specific and actionable. "
+    #                 "Format using bullet points and bold headers where helpful."
+    #             )
+    #         ).with_model("gemini", "gemini-2.5-flash")
+
+    #         response = await chat.send_message(
+    #             UserMessage(text=f"Summarize the following content from {source_label}:\n\n{content}")
+    #         )
+    #         return response
+
+    #     except Exception as e:
+    #         logger.error(f"LLM summarize error: {e}")
+    #         return f"**Content from {source_label}** (auto-extract, LLM unavailable):\n\n{content[:2000]}"
+
+
+
+    # async def _llm_analyze_content(self, content: str, query: str, source_label: str) -> str:
+    #     """Use LLM to analyze content against a specific query"""
+    #     try:
+    #         from emergentintegrations.llm.chat import LlmChat, UserMessage
+    #         import uuid
+
+    #         chat = LlmChat(
+    #             api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
+    #             session_id=f"clubot-ctx-{uuid.uuid4().hex[:8]}",
+    #             system_message=(
+    #                 "You are a CRM assistant that analyzes documents, web content, and CRM data. "
+    #                 "Answer the user's question based on the provided context. Be specific, "
+    #                 "accurate, and actionable. If the context doesn't contain enough information "
+    #                 "to fully answer, say so clearly."
+    #             )
+    #         ).with_model("gemini", "gemini-2.5-flash")
+
+    #         response = await chat.send_message(
+    #             UserMessage(text=f"Context from {source_label}:\n\n{content}\n\n---\n\nQuestion: {query}")
+    #         )
+    #         return response
+
+    #     except Exception as e:
+    #         logger.error(f"LLM analyze error: {e}")
+    #         return f"Unable to analyze content from {source_label} at this time. Error: {str(e)}"
+
     async def _llm_summarize_content(self, content: str, source_label: str) -> str:
-        """Use LLM to summarize extracted content"""
+
+        """Use Gemini LLM to summarize extracted content"""
         try:
-            from emergentintegrations.llm.chat import LlmChat, UserMessage
-            import uuid
 
-            chat = LlmChat(
-                api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
-                session_id=f"clubot-ctx-{uuid.uuid4().hex[:8]}",
-                system_message=(
-                    "You are a CRM assistant that summarizes documents and web content concisely. "
-                    "Provide a structured summary with key points. Be specific and actionable. "
-                    "Format using bullet points and bold headers where helpful."
-                )
-            ).with_model("gemini", "gemini-2.5-flash")
+            # Configure API
+            genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 
-            response = await chat.send_message(
-                UserMessage(text=f"Summarize the following content from {source_label}:\n\n{content}")
-            )
-            return response
+            model = genai.GenerativeModel("gemini-2.5-flash")
+
+            prompt = f"""
+                You are a CRM assistant that summarizes documents and web content concisely.
+
+                Provide:
+                - Structured summary
+                - Key points
+                - Actionable insights
+
+                Use bullet points and bold headers.
+
+                Content source: {source_label}
+
+                Content:
+                {content}
+                """
+
+            response = await model.generate_content_async(prompt)
+
+            return response.text
 
         except Exception as e:
-            logger.error(f"LLM summarize error: {e}")
+            logger.error(f"Gemini summarize error: {e}")
             return f"**Content from {source_label}** (auto-extract, LLM unavailable):\n\n{content[:2000]}"
-
+    
     async def _llm_analyze_content(self, content: str, query: str, source_label: str) -> str:
-        """Use LLM to analyze content against a specific query"""
+
+        """Use Gemini LLM to analyze content against a specific query"""
         try:
-            from emergentintegrations.llm.chat import LlmChat, UserMessage
-            import uuid
+            # Configure API
+            genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 
-            chat = LlmChat(
-                api_key=os.environ.get("EMERGENT_LLM_KEY", ""),
-                session_id=f"clubot-ctx-{uuid.uuid4().hex[:8]}",
-                system_message=(
-                    "You are a CRM assistant that analyzes documents, web content, and CRM data. "
-                    "Answer the user's question based on the provided context. Be specific, "
-                    "accurate, and actionable. If the context doesn't contain enough information "
-                    "to fully answer, say so clearly."
-                )
-            ).with_model("gemini", "gemini-2.5-flash")
+            model = genai.GenerativeModel("gemini-2.5-flash")
 
-            response = await chat.send_message(
-                UserMessage(text=f"Context from {source_label}:\n\n{content}\n\n---\n\nQuestion: {query}")
+            prompt = f"""
+            You are a CRM assistant that analyzes documents, web content, and CRM data.
+
+            Instructions:
+            - Answer the user's question using ONLY the provided context
+            - Be specific, accurate, and actionable
+            - If the answer is not fully available in the context, clearly say what is missing
+            - Prefer structured output (bullet points if helpful)
+
+            Context source: {source_label}
+
+            Context:
+            {content}
+
+            ---
+
+            User Question:
+            {query}
+            """
+
+            generation_config = {
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "max_output_tokens": 1024,
+            }
+
+            response = await model.generate_content_async(
+                prompt,
+                generation_config=generation_config
             )
-            return response
+
+            return response.text
 
         except Exception as e:
-            logger.error(f"LLM analyze error: {e}")
+            logger.error(f"Gemini analyze error: {e}")
             return f"Unable to analyze content from {source_label} at this time. Error: {str(e)}"
-
     # =========================================================================
     # File Upload Management
     # =========================================================================
 
     async def get_user_files(self, tenant_id: str, user_id: str) -> List[Dict[str, Any]]:
         """Get list of files uploaded by this user for CLU-BOT context"""
+        uid = str(user_id) if user_id is not None else user_id
         cursor = self.db.clu_bot_file_uploads.find(
-            {"tenant_id": tenant_id, "user_id": user_id},
+            {"tenant_id": tenant_id, "user_id": uid},
             {"_id": 0}
         ).sort("uploaded_at", -1).limit(20)
         return await cursor.to_list(20)
 
     async def get_latest_file(self, tenant_id: str, user_id: str) -> Optional[Dict[str, Any]]:
         """Get the most recently uploaded file for this user"""
+        uid = str(user_id) if user_id is not None else user_id
+        doc = await self.db.clu_bot_file_uploads.find_one(
+            {"tenant_id": tenant_id, "user_id": uid},
+            {"_id": 0},
+            sort=[("uploaded_at", -1)]
+        )
+        if doc or not user_id:
+            return doc
+        # Legacy rows may have stored user_id as non-string (e.g. UUID type)
         return await self.db.clu_bot_file_uploads.find_one(
             {"tenant_id": tenant_id, "user_id": user_id},
             {"_id": 0},

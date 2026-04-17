@@ -7,6 +7,18 @@ const MODES = [
   { id: 'validation', label: 'AI Validation', icon: ShieldCheck, color: 'amber' }
 ];
 
+const VALIDATION_INTENT_PATTERNS = [
+  /\bvalidate\b/i,
+  /\bvalidation\b/i,
+  /\brun ai validation\b/i,
+  /\bdo validation\b/i,
+  /\bcheck (whether|if).*(complete|looks complete|completeness)\b/i,
+  /\blegally weak\b/i,
+  /\bmissing (important )?clauses?\b/i,
+  /\bmissing clauses?\b/i,
+  /\bcheck.*contract.*missing\b/i,
+];
+
 const ClueBotPanel = ({ isOpen, onClose, templateData, fieldPlacements, contentBlocks, selectedText, selectedBlockId, onFieldsUpdate, onContentBlocksUpdate, onContentUpdate }) => {
   const [mode, setMode] = useState('assistant');
   const [messages, setMessages] = useState([]);
@@ -142,6 +154,11 @@ const ClueBotPanel = ({ isOpen, onClose, templateData, fieldPlacements, contentB
   };
 
   const handleAssistantMode = async (msg) => {
+    if (VALIDATION_INTENT_PATTERNS.some((pattern) => pattern.test(msg || ''))) {
+      await handleValidationMode(true);
+      return;
+    }
+
     const context = {
       fields: fieldPlacements || [],
       content_blocks: contentBlocks || [],
@@ -202,7 +219,10 @@ const ClueBotPanel = ({ isOpen, onClose, templateData, fieldPlacements, contentB
   };
 
   const handleValidationMode = async () => {
-    const data = { ...templateData, field_placements: fieldPlacements || [] };
+    const data = {
+      ...templateData,
+      field_placements: fieldPlacements || []
+    };
     const result = await docflowService.cluebotValidate(data);
     if (result.success) {
       setValidationResult(result);
@@ -211,8 +231,8 @@ const ClueBotPanel = ({ isOpen, onClose, templateData, fieldPlacements, contentB
       ).join('\n');
       setMessages(prev => [...prev, {
         role: 'bot',
-        text: `AI Validation Score: ${result.score}/100\n\n${result.summary}\n\n${suggestions || 'No issues found!'}`,
-        isValidation: true,
+        text: `🛡️ **AI Validation Score: ${result.score}/100**\n\n${result.summary}\n\n${suggestions || 'No issues found!'}`,
+        isValidation: true
       }]);
     } else {
       throw new Error(result.error || 'AI validation failed');
@@ -282,7 +302,9 @@ const ClueBotPanel = ({ isOpen, onClose, templateData, fieldPlacements, contentB
             key={m.id}
             onClick={() => setMode(m.id)}
             className={`flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-              mode === m.id ? 'bg-indigo-100 text-indigo-700 shadow-sm' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+              mode === m.id
+                ? 'bg-indigo-100 text-indigo-700 shadow-sm'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
             }`}
             data-testid={`cluebot-mode-${m.id}`}
           >
@@ -296,8 +318,7 @@ const ClueBotPanel = ({ isOpen, onClose, templateData, fieldPlacements, contentB
       <div className="flex-1 overflow-y-auto p-3 space-y-3 bg-gray-50/50">
         {messages.map((msg, idx) => (
           <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[85%] px-3 py-2 rounded-xl text-sm whitespace-pre-wrap leading-relaxed ${
-              msg.role === 'user'
+            <div className={`max-w-[85%] px-3 py-2 rounded-xl text-sm whitespace-pre-wrap leading-relaxed ${msg.role === 'user'
                 ? 'bg-indigo-600 text-white rounded-br-md'
                 : msg.isError
                   ? 'bg-red-50 text-red-700 border border-red-200 rounded-bl-md'
@@ -432,7 +453,7 @@ const ClueBotPanel = ({ isOpen, onClose, templateData, fieldPlacements, contentB
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={isListening ? 'Listening...' : 'Type a command or question...'}
+            placeholder={isListening ? 'Listening...' : mode === 'email' ? 'Describe the email tone/style...' : 'Type a command or question...'}
             className={`flex-1 px-3 py-2 border rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-colors ${
               isListening ? 'border-red-300 bg-red-50' : 'border-gray-200'
             }`}
@@ -443,7 +464,9 @@ const ClueBotPanel = ({ isOpen, onClose, templateData, fieldPlacements, contentB
             <button
               onClick={toggleMic}
               className={`p-2 rounded-lg transition-colors ${
-                isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                isListening
+                  ? 'bg-red-500 text-white animate-pulse'
+                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
               }`}
               title={isListening ? 'Stop listening' : 'Voice input'}
               data-testid="cluebot-mic-btn"

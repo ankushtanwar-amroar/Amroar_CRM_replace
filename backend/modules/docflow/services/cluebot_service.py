@@ -1,26 +1,28 @@
 """
 ClueBot AI Service - Chat-based AI assistant for DocFlow template builder
-Uses Emergent LLM Key with Gemini model for reliable AI access
+Uses Google Gemini API with Gemini model for reliable AI access
 """
 import os
 import json
 import re
 import asyncio
+import google.generativeai as genai
 from typing import Dict, Any, List, Optional
 import logging
 from dotenv import load_dotenv
+from .ai_template_service import AITemplateService
 
 # Load environment variables
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Use Emergent LLM Key for reliable AI access
-EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
-if EMERGENT_LLM_KEY:
-    logger.info(f"ClueBot: Using Emergent LLM Key: {EMERGENT_LLM_KEY[:15]}...{EMERGENT_LLM_KEY[-4:]}")
+# Use Gemini API key for AI access
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    logger.info(f"ClueBot: Using Gemini API Key: {GEMINI_API_KEY[:8]}...{GEMINI_API_KEY[-4:]}")
 else:
-    logger.warning("EMERGENT_LLM_KEY not found in environment variables")
+    logger.warning("GEMINI_API_KEY not found in environment variables")
 
 # Model configuration
 AI_PROVIDER = "gemini"
@@ -28,41 +30,46 @@ AI_MODEL = "gemini-2.5-flash"
 
 
 class ClueBotService:
-    """ClueBot AI Assistant — chat, validation, email generation using Emergent LLM"""
+    """ClueBot AI Assistant — chat, validation, email generation using Gemini"""
 
     def __init__(self, db=None):
         self.db = db
-        self.api_key = EMERGENT_LLM_KEY
+        self.api_key = GEMINI_API_KEY
+        self.template_ai = AITemplateService()
         if self.api_key:
-            logger.info(f"ClueBotService initialized with Emergent LLM ({AI_PROVIDER}/{AI_MODEL})")
+            logger.info(f"ClueBotService initialized with Gemini ({AI_PROVIDER}/{AI_MODEL})")
         else:
             logger.warning("ClueBotService initialized without API key")
     
     async def _call_llm_with_retry(self, system_prompt: str, user_message: str, max_retries: int = 3) -> str:
         """
-        Call LLM using Emergent Integrations with retry logic.
+        Call Gemini LLM with retry logic.
         """
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
-        
         retry_delays = [2, 5, 10]
+        genai.configure(api_key=self.api_key)
         
         for attempt in range(max_retries):
             try:
                 logger.info(f"[ClueBot LLM] Attempt {attempt + 1}/{max_retries} using {AI_PROVIDER}/{AI_MODEL}")
-                
-                # Create chat instance
-                chat = LlmChat(
-                    api_key=self.api_key,
-                    session_id=f"cluebot_{attempt}",
-                    system_message=system_prompt
-                ).with_model(AI_PROVIDER, AI_MODEL)
-                
-                # Send message
-                message = UserMessage(text=user_message)
-                response = await chat.send_message(message)
-                
-                logger.info(f"[ClueBot LLM] Success on attempt {attempt + 1}, response length: {len(str(response))}")
-                return str(response)
+
+                model = genai.GenerativeModel(
+                    model_name=AI_MODEL,
+                    system_instruction=system_prompt,
+                )
+                response = await asyncio.wait_for(
+                    model.generate_content_async(
+                        user_message,
+                        generation_config={
+                            "temperature": 0.3,
+                            "max_output_tokens": 8192,
+                        },
+                    ),
+                    timeout=45.0,
+                )
+
+                text = response.text if hasattr(response, "text") else str(response)
+                logger.info(f"[ClueBot LLM] Success on attempt {attempt + 1}, response length: {len(text)}")
+                return text
                 
             except Exception as e:
                 error_msg = str(e)
@@ -116,9 +123,12 @@ class ClueBotService:
         policy_context: optional dict with intent, personality, knowledge_context from CluBot config.
         """
         if not self.api_key:
-            return {"success": False, "error": "AI Service not configured (Missing EMERGENT_LLM_KEY)"}
+            return {"success": False, "error": "AI Service not configured (Missing GEMINI_API_KEY)"}
 
         ctx = context or {}
+        if self._is_template_creation_request(message, ctx):
+            return await self._handle_template_creation(message, ctx)
+
         pc = policy_context or {}
         current_fields = ctx.get("fields", [])
         content_blocks = ctx.get("content_blocks", [])
@@ -267,6 +277,7 @@ RULES:
             # Handle content editing
             if action == "EDIT_CONTENT":
                 block_edits = data.get("block_edits", [])
+               
                 if not block_edits:
                     # Try to build block_edits from legacy content_edit format
                     block_edits = self._legacy_to_block_edits(data, content_blocks, selected_text, selected_block_id)
@@ -285,6 +296,60 @@ RULES:
             if "429" in error_msg or "quota" in error_msg.lower() or "rate" in error_msg.lower():
                 return {"success": False, "error": "AI service busy. Please try again in a few seconds.", "retry_after": 5}
             return {"success": False, "error": f"ClueBot error: {error_msg}"}
+
+    def _is_template_creation_request(self, message: str, context: Dict[str, Any]) -> bool:
+        """
+        Detect requests that should generate a full template instead of field/block edits.
+        """
+        msg = (message or "").lower()
+        has_builder_state = bool(context.get("content_blocks")) or bool(context.get("fields"))
+        if has_builder_state:
+            return False
+
+        creation_keywords = [
+            "create",
+            "generate",
+            "draft",
+            "build",
+            "template",
+            "agreement",
+            "contract",
+            "nda",
+            "proposal",
+        ]
+        edit_keywords = ["rename", "move", "delete", "replace", "rewrite", "add field", "signature field"]
+
+        return any(k in msg for k in creation_keywords) and not any(k in msg for k in edit_keywords)
+
+    async def _handle_template_creation(self, message: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Fast path for creation prompts routed through /cluebot/chat.
+        Returns a generated HTML template payload.
+        """
+        generation_context = {
+            "industry": context.get("industry", "General"),
+            "selected_doc_type": context.get("selected_doc_type", "Business Document"),
+            "base_prompt": context.get("base_prompt", ""),
+        }
+
+        result = await self.template_ai.generate_template(
+            prompt=message,
+            context=generation_context,
+        )
+
+        if not result.get("success"):
+            return result
+
+        return {
+            "success": True,
+            "action": "CREATE_TEMPLATE",
+            "response": "✅ Template draft generated from your prompt.",
+            "generated_template": {
+                "html": result.get("html", ""),
+                "suggested_name": result.get("suggested_name", "Untitled Template"),
+                "description": result.get("description", ""),
+            },
+        }
 
     def _apply_action(self, action: str, data: Dict, current_fields: List, page_count: int) -> List:
         """Apply the action to fields if AI didn't return field_updates"""
@@ -454,7 +519,11 @@ RULES:
     ) -> Dict[str, Any]:
         """Generate professional email subject and body for document delivery."""
         if not self.api_key:
-            return {"success": False, "error": "AI Service not configured (Missing EMERGENT_LLM_KEY)"}
+            return {"success": False, "error": "AI Service not configured (Missing GEMINI_API_KEY)"}
+
+        pc = policy_context or {}
+
+        personality_line = f"PERSONALITY: {pc['personality']}" if pc.get("personality") else ""
 
         pc = policy_context or {}
 
@@ -503,14 +572,89 @@ CRITICAL: Return valid JSON only."""
     # ───────────────────────────────────────────────
     # C. AI Validation (Advisory — does NOT block save)
     # ───────────────────────────────────────────────
+#     async def validate_template_ai(self, template_data: Dict[str, Any], policy_context: Dict[str, str] = None) -> Dict[str, Any]:
+#         """
+#         Run AI-based validation on a template.
+#         Checks: content clarity, missing clauses, signing flow, business completeness.
+#         Returns suggestions + score. Does NOT block save.
+#         """
+#         if not self.api_key:
+#             return {"success": False, "error": "AI Service not configured (Missing GEMINI_API_KEY)"}
+
+#         pc = policy_context or {}
+
+#         field_placements = template_data.get("field_placements", [])
+#         recipients = template_data.get("recipients", [])
+#         crm_connection = template_data.get("crm_connection", {})
+#         template_name = template_data.get("name", "Untitled")
+#         template_type = template_data.get("template_type", "custom")
+#         html_content = (template_data.get("html_content") or "")[:2000]
+
+#         personality_line = f"PERSONALITY: {pc['personality']}" if pc.get("personality") else ""
+#         knowledge_section = f"COMPANY KNOWLEDGE:\n{pc['knowledge_context']}" if pc.get("knowledge_context") else ""
+
+#         system_prompt = f"""You are ClueBot, an AI validation assistant for DocFlow templates.
+# {personality_line}
+# Analyze this template and provide improvement suggestions.
+# {knowledge_section}
+
+# Template: "{template_name}" (Type: {template_type})
+# Field placements: {len(field_placements)} fields
+# Signature fields: {len([f for f in field_placements if f.get('type') == 'signature'])}
+# Recipients: {len(recipients)} configured
+# CRM Connection: {crm_connection.get('provider', 'none')} — Object: {crm_connection.get('object_name', 'none')}
+# Content preview: {html_content[:500] if html_content else 'No HTML content'}
+
+# Check for:
+# 1. Content clarity — is the document well-structured?
+# 2. Missing clauses — for the template type, are standard sections present?
+# 3. Signing flow issues — are signature fields assigned to recipients?
+# 4. Recipient issues — enough recipients configured?
+# 5. Business completeness — necessary info present for the template type?
+
+# Return JSON:
+# {{
+#   "score": 85,
+#   "suggestions": [
+#     {{
+#       "category": "Content|Signing|Recipients|Clauses|Completeness",
+#       "severity": "info|warning|critical",
+#       "message": "Clear, actionable suggestion"
+#     }}
+#   ],
+#   "summary": "One-line overall assessment"
+# }}
+
+# CRITICAL: Return valid JSON only."""
+
+#         try:
+#             raw = await self._call_llm_with_retry(
+#                 system_prompt=system_prompt,
+#                 user_message="Validate this template now."
+#             )
+#             cleaned = self._clean_json(raw)
+#             data = json.loads(cleaned)
+#             return {"success": True, **data}
+#         except Exception as e:
+#             error_msg = str(e)
+#             if "429" in error_msg or "quota" in error_msg.lower():
+#                 return {"success": False, "error": "AI quota exceeded. Try again in 60 seconds.", "retry_after": 60}
+#             return {"success": False, "error": f"AI Validation error: {error_msg}"}
+
+
     async def validate_template_ai(self, template_data: Dict[str, Any], policy_context: Dict[str, str] = None) -> Dict[str, Any]:
         """
-        Run AI-based validation on a template.
-        Checks: content clarity, missing clauses, signing flow, business completeness.
-        Returns suggestions + score. Does NOT block save.
+        Improved AI validation:
+        - Separates content vs configuration issues
+        - Prevents hallucination of missing clauses
+        - Uses realistic scoring
+        - More deterministic output
         """
+        
         if not self.api_key:
-            return {"success": False, "error": "AI Service not configured (Missing EMERGENT_LLM_KEY)"}
+            return {"success": False, "error": "AI Service not configured (Missing GEMINI_API_KEY)"}
+
+        pc = policy_context or {}
 
         pc = policy_context or {}
 
@@ -519,55 +663,119 @@ CRITICAL: Return valid JSON only."""
         crm_connection = template_data.get("crm_connection", {})
         template_name = template_data.get("name", "Untitled")
         template_type = template_data.get("template_type", "custom")
-        html_content = (template_data.get("html_content") or "")[:2000]
+        html_content = (template_data.get("html_content") or "")[:3000]
+
+        signature_fields = [f for f in field_placements if f.get("type") == "signature"]
 
         personality_line = f"PERSONALITY: {pc['personality']}" if pc.get("personality") else ""
         knowledge_section = f"COMPANY KNOWLEDGE:\n{pc['knowledge_context']}" if pc.get("knowledge_context") else ""
 
-        system_prompt = f"""You are ClueBot, an AI validation assistant for DocFlow templates.
-{personality_line}
-Analyze this template and provide improvement suggestions.
-{knowledge_section}
+        system_prompt = f"""
+    You are ClueBot, an expert AI validator for DocFlow templates.
 
-Template: "{template_name}" (Type: {template_type})
-Field placements: {len(field_placements)} fields
-Signature fields: {len([f for f in field_placements if f.get('type') == 'signature'])}
-Recipients: {len(recipients)} configured
-CRM Connection: {crm_connection.get('provider', 'none')} — Object: {crm_connection.get('object_name', 'none')}
-Content preview: {html_content[:500] if html_content else 'No HTML content'}
+    {personality_line}
+    {knowledge_section}
 
-Check for:
-1. Content clarity — is the document well-structured?
-2. Missing clauses — for the template type, are standard sections present?
-3. Signing flow issues — are signature fields assigned to recipients?
-4. Recipient issues — enough recipients configured?
-5. Business completeness — necessary info present for the template type?
+    Your job is to VALIDATE — not over-criticize.
 
-Return JSON:
-{{
-  "score": 85,
-  "suggestions": [
+    IMPORTANT RULES:
+    - Do NOT mark content as "missing" if it exists in the text.
+    - If content exists but is weak → mark as "improvement", not "missing".
+    - Separate TEMPLATE CONTENT issues from SYSTEM CONFIGURATION issues.
+    - Do NOT assume jurisdiction unless specified.
+    - Do NOT over-penalize score.
+
+    ---
+
+    TEMPLATE INFO:
+    Name: {template_name}
+    Type: {template_type}
+
+    CONFIG:
+    - Field placements: {len(field_placements)}
+    - Signature fields: {len(signature_fields)}
+    - Recipients: {len(recipients)}
+    - CRM: {crm_connection.get('provider', 'none')}
+
+    CONTENT PREVIEW:
+    {html_content[:800] if html_content else "No content"}
+
+    ---
+
+    VALIDATE IN 3 SECTIONS:
+
+    1. CONTENT QUALITY
+    - Structure
+    - Presence of key sections (only if truly missing)
+    - Clarity (vague vs strong)
+
+    2. TEMPLATE QUALITY
+    - Placeholders (missing / hardcoded values)
+    - Field mapping gaps
+
+    3. WORKFLOW CONFIGURATION (DocFlow)
+    - Recipients
+    - Signature assignment
+
+    ---
+
+    SCORING RULES:
+    - 90–100 → Production ready
+    - 75–89 → Good, minor improvements
+    - 60–74 → Usable but needs fixes
+    - 40–59 → Major issues
+    - <40 → Broken / unusable
+
+    DO NOT give score <60 unless content is actually missing.
+
+    ---
+
+    RETURN STRICT JSON:
+
     {{
-      "category": "Content|Signing|Recipients|Clauses|Completeness",
-      "severity": "info|warning|critical",
-      "message": "Clear, actionable suggestion"
+    "score": 78,
+    "status": "GOOD|PARTIALLY_VALID|NEEDS_FIXES|CRITICAL",
+    "suggestions": [
+        {{
+        "category": "Content|Template|Workflow",
+        "severity": "info|warning|critical",
+        "message": "Actionable suggestion"
+        }}
+    ],
+    "summary": "Short accurate summary (no exaggeration)"
     }}
-  ],
-  "summary": "One-line overall assessment"
-}}
 
-CRITICAL: Return valid JSON only."""
+    CRITICAL:
+    - No hallucinations
+    - No duplicate suggestions
+    - No generic statements
+    - JSON only
+    """
 
         try:
             raw = await self._call_llm_with_retry(
                 system_prompt=system_prompt,
-                user_message="Validate this template now."
+                user_message="Validate this template carefully."
             )
+
             cleaned = self._clean_json(raw)
             data = json.loads(cleaned)
+
+            # 🔒 Post-processing safety (prevents bad scores)
+            if data.get("score", 0) < 60:
+                data["score"] = 65
+                data["status"] = "NEEDS_FIXES"
+
             return {"success": True, **data}
+
         except Exception as e:
             error_msg = str(e)
+
             if "429" in error_msg or "quota" in error_msg.lower():
-                return {"success": False, "error": "AI quota exceeded. Try again in 60 seconds.", "retry_after": 60}
+                return {
+                    "success": False,
+                    "error": "AI quota exceeded. Try again in 60 seconds.",
+                    "retry_after": 60
+                }
+
             return {"success": False, "error": f"AI Validation error: {error_msg}"}

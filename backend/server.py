@@ -549,6 +549,7 @@ try:
     from modules.docflow.api.generate_links_routes import router as generate_links_router
     from modules.docflow.api.salesforce_routes import router as salesforce_router
     from modules.docflow.api.cluebot_routes import router as cluebot_router
+    from modules.docflow.api.cluebot_lifecycle_routes import router as cluebot_lifecycle_router
     from modules.docflow.api.package_routes import router as package_router
     from modules.docflow.api.package_template_routes import router as package_template_router
     from modules.docflow.api.package_public_routes import router as package_public_router
@@ -565,6 +566,7 @@ try:
     app.include_router(generate_links_router, prefix="/api", tags=["DocFlow External APIs"])
     app.include_router(salesforce_router, prefix="/api", tags=["DocFlow Salesforce"])
     app.include_router(cluebot_router, prefix="/api", tags=["DocFlow ClueBot"])
+    app.include_router(cluebot_lifecycle_router, prefix="/api", tags=["DocFlow ClueBot Lifecycle"])
     app.include_router(package_router, prefix="/api", tags=["DocFlow Packages"])
     app.include_router(package_template_router, prefix="/api", tags=["DocFlow Package Templates"])
     app.include_router(package_public_router, prefix="/api", tags=["DocFlow Package Public"])

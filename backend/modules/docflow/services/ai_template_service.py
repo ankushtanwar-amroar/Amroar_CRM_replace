@@ -1,11 +1,12 @@
 """
-AI Template Service - Generates templates using Emergent LLM
-Uses Emergent LLM Key with Gemini model for reliable AI access
+AI Template Service - Generates templates using Google Gemini
+Uses GEMINI_API_KEY with Gemini model for reliable AI access
 """
 import os
 import json
 import re
 import asyncio
+import google.generativeai as genai
 from typing import Optional, Dict, Any, List
 import logging
 from dotenv import load_dotenv
@@ -14,12 +15,12 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Use Emergent LLM Key for reliable AI access
-EMERGENT_LLM_KEY = os.environ.get("EMERGENT_LLM_KEY")
-if EMERGENT_LLM_KEY:
-    logger.info(f"AITemplateService: Using Emergent LLM Key: {EMERGENT_LLM_KEY[:15]}...{EMERGENT_LLM_KEY[-4:]}")
+# Use Gemini API key for reliable AI access
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    logger.info(f"AITemplateService: Using GEMINI_API_KEY: {GEMINI_API_KEY[:8]}...{GEMINI_API_KEY[-4:]}")
 else:
-    logger.warning("EMERGENT_LLM_KEY not found in environment variables")
+    logger.warning("GEMINI_API_KEY not found in environment variables")
 
 # Model configuration
 AI_PROVIDER = "gemini"
@@ -28,36 +29,41 @@ AI_MODEL = "gemini-2.5-flash"
 
 class AITemplateService:
     def __init__(self):
-        self.api_key = EMERGENT_LLM_KEY
+        self.api_key = GEMINI_API_KEY
         if self.api_key:
-            logger.info(f"AITemplateService initialized with Emergent LLM ({AI_PROVIDER}/{AI_MODEL})")
+            logger.info(f"AITemplateService initialized with Gemini ({AI_PROVIDER}/{AI_MODEL})")
         else:
             logger.warning("AITemplateService initialized without API key")
     
     async def _call_llm_with_retry(self, system_prompt: str, user_message: str, max_retries: int = 3) -> str:
-        """Call LLM using Emergent Integrations with retry logic."""
-        from emergentintegrations.llm.chat import LlmChat, UserMessage
+        """Call LLM using Google Gemini with retry logic."""
         
         retry_delays = [2, 5, 10]
+        genai.configure(api_key=self.api_key)
         
         for attempt in range(max_retries):
             try:
                 logger.info(f"[AITemplate] LLM attempt {attempt + 1}/{max_retries} using {AI_PROVIDER}/{AI_MODEL}")
-                
-                chat = LlmChat(
-                    api_key=self.api_key,
-                    session_id=f"ai_template_{attempt}",
-                    system_message=system_prompt
-                ).with_model(AI_PROVIDER, AI_MODEL)
-                
-                message = UserMessage(text=user_message)
+
+                model = genai.GenerativeModel(
+                    model_name=AI_MODEL,
+                    system_instruction=system_prompt
+                )
+
                 response = await asyncio.wait_for(
-                    chat.send_message(message),
+                    model.generate_content_async(
+                        user_message,
+                        generation_config={
+                            "temperature": 0.3,
+                            "max_output_tokens": 8192,
+                        }
+                    ),
                     timeout=45.0
                 )
                 
-                logger.info(f"[AITemplate] Success on attempt {attempt + 1}, response length: {len(str(response))}")
-                return str(response)
+                text = response.text if hasattr(response, "text") else str(response)
+                logger.info(f"[AITemplate] Success on attempt {attempt + 1}, response length: {len(text)}")
+                return text
                 
             except asyncio.TimeoutError:
                 logger.warning(f"[AITemplate] Timeout on attempt {attempt + 1}")
@@ -119,47 +125,47 @@ class AITemplateService:
 
     async def generate_template(self, prompt: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Generate template HTML from natural language prompt
-        OPTIMIZED: Uses Emergent LLM with timeout, retry logic, and better error handling
+        OPTIMIZED: Uses Gemini with timeout, retry logic, and better error handling
         """
         if not self.api_key:
-            return {"success": False, "error": "AI Service not configured (Missing EMERGENT_LLM_KEY)"}
+            return {"success": False, "error": "AI Service not configured (Missing GEMINI_API_KEY)"}
 
         industry = context.get('industry', 'General') if context else 'General'
         doc_type = context.get('selected_doc_type', 'General Document') if context else 'General Document'
         base_prompt = context.get('base_prompt', '') if context else ''
 
         system_prompt = f"""
-You are generating a professional business-ready legal/commercial document draft for DocFlow.
+        You are generating a professional business-ready legal/commercial document draft for DocFlow.
 
-Document type: {doc_type}
-Industry context: {industry}
-Base Type Instruction: {base_prompt}
-User instruction: {prompt}
+        Document type: {doc_type}
+        Industry context: {industry}
+        Base Type Instruction: {base_prompt}
+        User instruction: {prompt}
 
-Generate a clean, structured, formal draft suitable for business review.
-Use plain professional legal language.
-Include clear section headings using <h1>, <h2> tags, numbered clauses, and editable placeholders in brackets.
+        Generate a clean, structured, formal draft suitable for business review.
+        Use plain professional legal language.
+        Include clear section headings using <h1>, <h2> tags, numbered clauses, and editable placeholders in brackets.
 
-Important requirements:
-- FORMATTING: Use semantic HTML (<p>, <ul>, <li>, <br/>) for ALL spacing and structure.
-- CRITICAL: DO NOT use the literal characters "\\n" or "\n" anywhere in the document text. Use HTML tags for newlines.
-- Do not invent company names, addresses, dates, pricing, laws, or governing jurisdictions unless the user provides them.
-- Use placeholders like [Client Name], [Effective Date], [Service Provider Name], [Jurisdiction], [Fees], [Data Retention Period].
-- Include only sections relevant to the selected document type.
-- Avoid unnecessary legal complexity, but ensure the draft looks complete and business-grade.
-- Where relevant, include confidentiality, data protection, security, term, termination, liability, dispute resolution, and signature blocks.
-- Output the result as a polished final draft in HTML format, not as notes or commentary.
-- Keep the document concise but complete - target under 2000 words for faster generation.
+        Important requirements:
+        - FORMATTING: Use semantic HTML (<p>, <ul>, <li>, <br/>) for ALL spacing and structure.
+        - CRITICAL: DO NOT use the literal characters "\\n" or "\n" anywhere in the document text. Use HTML tags for newlines.
+        - Do not invent company names, addresses, dates, pricing, laws, or governing jurisdictions unless the user provides them.
+        - Use placeholders like [Client Name], [Effective Date], [Service Provider Name], [Jurisdiction], [Fees], [Data Retention Period].
+        - Include only sections relevant to the selected document type.
+        - Avoid unnecessary legal complexity, but ensure the draft looks complete and business-grade.
+        - Where relevant, include confidentiality, data protection, security, term, termination, liability, dispute resolution, and signature blocks.
+        - Output the result as a polished final draft in HTML format, not as notes or commentary.
+        - Keep the document concise but complete - target under 2000 words for faster generation.
 
-Return ONLY a valid JSON response.
+        Return ONLY a valid JSON response.
 
-JSON Structure:
-{{
-  "html": "<html>...</html>",
-  "suggested_name": "Industry - Document Type",
-  "description": "Brief professional description"
-}}
-"""
+        JSON Structure:
+        {{
+        "html": "<html>...</html>",
+        "suggested_name": "Industry - Document Type",
+        "description": "Brief professional description"
+        }}
+        """
 
         try:
             logger.info(f"[AITemplate] Generating template for: {doc_type}")
@@ -201,7 +207,7 @@ JSON Structure:
     async def process_visual_command(self, instruction: str, current_fields: list, page_count: int) -> Dict[str, Any]:
         """Process visual builder AI commands (Add, Move, Rename)"""
         if not self.api_key:
-            return {"success": False, "error": "AI Service not configured (Missing EMERGENT_LLM_KEY)"}
+            return {"success": False, "error": "AI Service not configured (Missing GEMINI_API_KEY)"}
 
         system_prompt = f"""
 You are an expert UI/UX layout assistant for Cluvik DocFlow Visual Builder.

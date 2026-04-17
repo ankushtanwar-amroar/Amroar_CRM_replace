@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Bot, User, Loader2, X, Check, Undo2, MessageSquare, Trash2, ChevronDown, Paperclip, FileText, Globe } from 'lucide-react';
+import { Send, Bot, User, Loader2, X, Check, Undo2, MessageSquare, Paperclip, FileText, Download } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { ScrollArea } from '../../components/ui/scroll-area';
@@ -10,7 +10,7 @@ const API_URL = process.env.REACT_APP_BACKEND_URL;
 const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt', 'csv', 'xlsx'];
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
-const CluBotChat = ({ isOpen, onClose, context = null }) => {
+const CluBotChat = ({ isOpen, onClose, context = null, onOpenRecord = null }) => {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -137,54 +137,170 @@ const CluBotChat = ({ isOpen, onClose, context = null }) => {
       const chatContext = { ...context };
       if (attachedFile) {
         chatContext.attached_file_id = attachedFile.id;
+        chatContext.file_id = attachedFile.id;
         chatContext.attached_file_name = attachedFile.name;
       }
 
-      const response = await axios.post(
-        `${API_URL}/api/clu-bot/chat`,
-        {
+      const assistantMessageId = Date.now() + 1;
+      const assistantMessage = {
+        id: assistantMessageId,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date(),
+        isStreaming: true
+      };
+      setMessages(prev => [...prev, assistantMessage]);
+
+      const token = localStorage.getItem('token');
+      const streamResponse = await fetch(`${API_URL}/api/clu-bot/chat/stream`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
           message,
           conversation_id: conversationId,
           context: chatContext
-        },
-        { headers: getAuthHeaders() }
-      );
+        })
+      });
 
-      const data = response.data;
-      setConversationId(data.conversation_id);
+      if (!streamResponse.ok || !streamResponse.body) {
+        throw new Error('Unable to start stream response.');
+      }
 
-      const assistantMessage = {
-        id: Date.now() + 1,
-        role: 'assistant',
-        content: data.message,
-        timestamp: new Date(),
-        actionType: data.action_type,
-        requiresConfirmation: data.requires_confirmation,
-        previewData: data.preview_data,
-        resultData: data.result_data,
-        suggestions: data.suggestions
+      const reader = streamResponse.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let streamedContent = '';
+      let pendingDelta = '';
+      let flushTimer = null;
+      let finalData = null;
+
+      const flushPendingDelta = () => {
+        if (!pendingDelta) return;
+        streamedContent += pendingDelta;
+        pendingDelta = '';
+        setMessages(prev => prev.map(msg =>
+          msg.id === assistantMessageId
+            ? { ...msg, content: streamedContent, isStreaming: true }
+            : msg
+        ));
       };
 
-      setMessages(prev => [...prev, assistantMessage]);
+      const scheduleFlush = () => {
+        if (flushTimer) return;
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          flushPendingDelta();
+        }, 16);
+      };
 
-      if (data.requires_confirmation && data.preview_data) {
-        setPendingPreview(data.preview_data);
+      const processSseBlock = (eventBlock) => {
+        const lines = eventBlock
+          .split(/\r?\n/)
+          .map(line => line.trim())
+          .filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trim());
+
+        for (const line of lines) {
+          if (!line || line === '[DONE]') continue;
+
+          let parsed;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue;
+          }
+
+          if (parsed.type === 'chunk') {
+            pendingDelta += parsed.delta || '';
+            scheduleFlush();
+          } else if (parsed.type === 'final') {
+            finalData = parsed.data;
+          } else if (parsed.type === 'error') {
+            throw new Error(parsed.message || 'Streaming failed.');
+          }
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          if (buffer.trim()) {
+            processSseBlock(buffer);
+            buffer = '';
+          }
+          if (flushTimer) {
+            clearTimeout(flushTimer);
+            flushTimer = null;
+          }
+          flushPendingDelta();
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split(/\r?\n\r?\n/);
+        buffer = events.pop() || '';
+
+        for (const eventBlock of events) {
+          processSseBlock(eventBlock);
+        }
+      }
+
+      if (!finalData) {
+        throw new Error('No final response received from stream.');
+      }
+
+      setConversationId(finalData.conversation_id);
+      setMessages(prev => prev.map(msg =>
+        msg.id === assistantMessageId
+          ? {
+              ...msg,
+              content: finalData.message || streamedContent,
+              actionType: finalData.action_type,
+              requiresConfirmation: finalData.requires_confirmation,
+              previewData: finalData.preview_data,
+              resultData: finalData.result_data,
+              suggestions: finalData.suggestions,
+              isStreaming: false
+            }
+          : msg
+      ));
+
+      if (finalData.requires_confirmation && finalData.preview_data) {
+        setPendingPreview(finalData.preview_data);
       }
 
     } catch (error) {
       console.error('CLU-BOT error:', error);
-      const errorMessage = {
-        id: Date.now() + 1,
-        role: 'assistant',
-        content: 'Sorry, I encountered an error. Please try again.',
-        timestamp: new Date(),
-        isError: true
-      };
-      setMessages(prev => [...prev, errorMessage]);
+      setMessages(prev => {
+        const hasStreamingMessage = prev.some(msg => msg.isStreaming);
+        if (!hasStreamingMessage) {
+          return [...prev, {
+            id: Date.now() + 1,
+            role: 'assistant',
+            content: 'Sorry, I encountered an error. Please try again.',
+            timestamp: new Date(),
+            isError: true
+          }];
+        }
+
+        return prev.map(msg =>
+          msg.isStreaming
+            ? {
+                ...msg,
+                content: msg.content || 'Sorry, I encountered an error. Please try again.',
+                isError: true,
+                isStreaming: false
+              }
+            : msg
+        );
+      });
     } finally {
       setIsLoading(false);
     }
-  }, [conversationId, context]);
+  }, [conversationId, context, attachedFile]);
 
   const handleConfirm = async (confirmed) => {
     if (!pendingPreview) return;
@@ -204,7 +320,6 @@ const CluBotChat = ({ isOpen, onClose, context = null }) => {
       );
 
       const data = response.data;
-      
       const confirmMessage = {
         id: Date.now(),
         role: 'assistant',
@@ -260,6 +375,48 @@ const CluBotChat = ({ isOpen, onClose, context = null }) => {
     }
   };
 
+  const handleExport = async (format, reportData, reportName = 'crm_analytics_report') => {
+    setIsLoading(true);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.post(
+        `${API_URL}/api/clu-bot/export`,
+        {
+          format,
+          report_data: reportData || {},
+          report_name: reportName
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          responseType: 'blob'
+        }
+      );
+
+      const contentDisposition = response.headers?.['content-disposition'] || '';
+      const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/i);
+      const filename = filenameMatch?.[1] || `crm_analytics_report.${format}`;
+      const blobUrl = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (error) {
+      const errorMessage = error.response?.data?.detail || 'Failed to download export file.';
+      setMessages(prev => [...prev, {
+        id: Date.now(),
+        role: 'assistant',
+        content: typeof errorMessage === 'string' ? errorMessage : 'Failed to download export file.',
+        timestamp: new Date(),
+        isError: true
+      }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -281,7 +438,7 @@ const CluBotChat = ({ isOpen, onClose, context = null }) => {
   if (!isOpen) return null;
 
   return (
-    <div 
+    <div
       className="fixed bottom-4 right-4 w-96 h-[600px] bg-white dark:bg-gray-900 rounded-2xl shadow-2xl border border-gray-200 dark:border-gray-700 flex flex-col z-50 overflow-hidden"
       data-testid="clu-bot-chat-panel"
     >
@@ -364,6 +521,8 @@ const CluBotChat = ({ isOpen, onClose, context = null }) => {
               message={msg}
               onUndo={handleUndo}
               onSuggestionClick={handleSuggestionClick}
+              onRecordClick={onOpenRecord}
+              onExport={handleExport}
             />
           ))}
         </div>
@@ -466,9 +625,10 @@ const CluBotChat = ({ isOpen, onClose, context = null }) => {
   );
 };
 
-const MessageBubble = ({ message, onUndo, onSuggestionClick }) => {
+const MessageBubble = ({ message, onUndo, onSuggestionClick, onRecordClick, onExport }) => {
   const isUser = message.role === 'user';
   const journalEntryId = message.resultData?.journal_entry_id;
+  const exportsList = message.resultData?.exports || [];
 
   return (
     <div className={cn("flex gap-2", isUser ? "justify-end" : "justify-start")}>
@@ -477,12 +637,12 @@ const MessageBubble = ({ message, onUndo, onSuggestionClick }) => {
           <Bot className="w-4 h-4 text-blue-600 dark:text-blue-400" />
         </div>
       )}
-      
+
       <div className={cn(
         "max-w-[80%] rounded-2xl px-4 py-2",
-        isUser 
-          ? "bg-blue-600 text-white" 
-          : message.isError 
+        isUser
+          ? "bg-blue-600 text-white"
+          : message.isError
             ? "bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800"
             : message.isUndo
               ? "bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 border border-yellow-200 dark:border-yellow-800"
@@ -497,11 +657,11 @@ const MessageBubble = ({ message, onUndo, onSuggestionClick }) => {
             <span className="truncate">{message.attachedFile.name}</span>
           </div>
         )}
-        
+
         <div className="text-sm whitespace-pre-wrap">
-          {formatMessage(message.content)}
+          {formatMessage(message.content, onRecordClick)}
         </div>
-        
+
         {/* Suggestions */}
         {message.suggestions && message.suggestions.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-2">
@@ -513,6 +673,24 @@ const MessageBubble = ({ message, onUndo, onSuggestionClick }) => {
                 data-testid={`clu-bot-suggestion-${idx}`}
               >
                 {suggestion}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Export buttons for analytics responses */}
+        {!isUser && exportsList.length > 0 && onExport && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {exportsList.map((item, idx) => (
+              <button
+                key={`${item.format || 'export'}-${idx}`}
+                onClick={() => onExport(item.format, message.resultData, message.resultData?.report_type || message.actionType || 'crm_analytics_report')}
+                className="text-xs px-2 py-1 rounded-full bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-200 dark:hover:bg-emerald-900/50 transition-colors inline-flex items-center gap-1"
+                data-testid={`clu-bot-export-${item.format || idx}`}
+                title={item.label || `Download ${item.format?.toUpperCase()}`}
+              >
+                <Download className="w-3 h-3" />
+                {item.label || `Download ${item.format?.toUpperCase()}`}
               </button>
             ))}
           </div>
@@ -536,7 +714,7 @@ const MessageBubble = ({ message, onUndo, onSuggestionClick }) => {
         {message.resultData?.records && message.resultData.records.length > 0 && (
           <div className="mt-3 space-y-2">
             {message.resultData.records.slice(0, 3).map((record, idx) => (
-              <RecordCard key={idx} record={record} />
+              <RecordCard key={idx} record={record} onClick={onRecordClick} />
             ))}
           </div>
         )}
@@ -551,17 +729,30 @@ const MessageBubble = ({ message, onUndo, onSuggestionClick }) => {
   );
 };
 
-const RecordCard = ({ record }) => {
+const RecordCard = ({ record, onClick }) => {
+  const handleClick = () => {
+    if (onClick && record.object_type && record.series_id) {
+      onClick(record.object_type, record.series_id, record.name);
+    }
+  };
+
   return (
-    <div className="p-2 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
-      <div className="font-medium text-gray-900 dark:text-gray-100">
-        {record.name}
+    <div
+      onClick={handleClick}
+      className={cn(
+        "p-2 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 text-xs transition-all",
+        onClick ? "cursor-pointer hover:border-blue-400 hover:shadow-sm active:scale-[0.98]" : ""
+      )}
+    >
+      <div className="font-medium text-gray-900 dark:text-gray-100 flex items-center justify-between">
+        <span>{record.name}</span>
+        {onClick && <span className="text-[10px] text-blue-500 font-normal">Open →</span>}
       </div>
       <div className="text-gray-500 dark:text-gray-400">
         {record.series_id} • {record.object_type}
       </div>
       {record.data?.email && (
-        <div className="text-gray-600 dark:text-gray-300 mt-1">
+        <div className="text-gray-600 dark:text-gray-300 mt-1 truncate">
           {record.data.email}
         </div>
       )}
@@ -569,14 +760,39 @@ const RecordCard = ({ record }) => {
   );
 };
 
-const formatMessage = (content) => {
+const formatMessage = (content, onRecordClick) => {
   if (!content) return '';
-  
-  // Convert **text** to bold
-  return content.split(/(\*\*[^*]+\*\*)/g).map((part, i) => {
+
+  // 1. Detect record links [[Name|Type|ID]]
+  // 2. Detect **bold**
+  // We use a complex regex to split by both record links and bold tags
+  const parts = content.split(/(\[\[[^\]]+\]\]|\*\*[^*]+\*\*)/g);
+
+  return parts.map((part, i) => {
+    // Record Link: [[Name|Type|ID]]
+    if (part.startsWith('[[') && part.endsWith(']]')) {
+      const inner = part.slice(2, -2);
+      const [name, type, id] = inner.split('|');
+      
+      if (onRecordClick && type && id) {
+        return (
+          <button
+            key={i}
+            onClick={() => onRecordClick(type, id, name)}
+            className="text-blue-600 dark:text-blue-400 font-medium hover:underline focus:outline-none text-left"
+          >
+            {name}
+          </button>
+        );
+      }
+      return <span key={i} className="font-medium">{name || inner}</span>;
+    }
+
+    // Bold: **text**
     if (part.startsWith('**') && part.endsWith('**')) {
       return <strong key={i}>{part.slice(2, -2)}</strong>;
     }
+
     return part;
   });
 };

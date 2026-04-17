@@ -2,25 +2,55 @@ import os
 import logging
 from typing import Optional, List
 from dotenv import load_dotenv
+import asyncio
+import google.generativeai as genai
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Import emergent integrations
-try:
-    from emergentintegrations.llm.chat import LlmChat, UserMessage
-    EMERGENT_AVAILABLE = True
-except ImportError:
-    EMERGENT_AVAILABLE = False
-    logger.warning("emergentintegrations not available")
-
-
 class EmailAIService:
     def __init__(self):
-        self.api_key = os.environ.get('EMERGENT_LLM_KEY')
-        self.model_provider = "gemini"
+        self.api_key = os.environ.get("GEMINI_API_KEY")
         self.model_name = "gemini-2.5-flash"
+
+    async def _generate_content(self, prompt: str, system_message: str) -> str:
+        """Generate content using Gemini with retry logic."""
+        if not self.api_key:
+            raise ValueError("Missing GEMINI_API_KEY")
+
+        genai.configure(api_key=self.api_key)
+        model = genai.GenerativeModel(
+            model_name=self.model_name,
+            system_instruction=system_message,
+        )
+
+        retry_delays = [2, 5, 10]
+        for attempt in range(3):
+            try:
+                response = await asyncio.wait_for(
+                    model.generate_content_async(
+                        prompt,
+                        generation_config={
+                            "temperature": 0.4,
+                            "max_output_tokens": 2048,
+                        },
+                    ),
+                    timeout=45.0,
+                )
+                text = response.text if hasattr(response, "text") else str(response)
+                return (text or "").strip()
+            except asyncio.TimeoutError:
+                if attempt < 2:
+                    await asyncio.sleep(retry_delays[attempt])
+                    continue
+                raise
+            except Exception as e:
+                error_text = str(e).lower()
+                if ("429" in error_text or "quota" in error_text or "rate" in error_text) and attempt < 2:
+                    await asyncio.sleep(retry_delays[attempt])
+                    continue
+                raise
     
     async def generate_email(
         self,
@@ -31,7 +61,7 @@ class EmailAIService:
         additional_context: Optional[str] = None
     ) -> dict:
         """Generate email subject and body using AI"""
-        if not EMERGENT_AVAILABLE or not self.api_key:
+        if not self.api_key:
             return {"error": "AI service not configured"}
         
         try:
@@ -58,13 +88,7 @@ Tone: {tone}
 Use merge fields like {{{{FirstName}}}}, {{{{LastName}}}}, {{{{Company}}}}, {{{{Email}}}} where appropriate.
 Format the body as clean HTML with proper paragraph tags."""
             
-            chat = LlmChat(
-                api_key=self.api_key,
-                session_id=f"email-gen-{os.urandom(8).hex()}",
-                system_message=system_message
-            ).with_model(self.model_provider, self.model_name)
-            
-            response = await chat.send_message(UserMessage(text=prompt))
+            response = await self._generate_content(prompt, system_message)
             
             # Parse JSON response
             import json
@@ -91,7 +115,7 @@ Format the body as clean HTML with proper paragraph tags."""
         style: str = "professional"
     ) -> dict:
         """Rewrite content in a different style"""
-        if not EMERGENT_AVAILABLE or not self.api_key:
+        if not self.api_key:
             return {"error": "AI service not configured"}
         
         try:
@@ -109,13 +133,10 @@ Original content:
 
 Provide only the rewritten content, maintaining any merge fields like {{{{FirstName}}}} exactly as they are."""
             
-            chat = LlmChat(
-                api_key=self.api_key,
-                session_id=f"email-rewrite-{os.urandom(8).hex()}",
-                system_message="You are a professional email editor. Rewrite content while maintaining the original intent and any merge field placeholders."
-            ).with_model(self.model_provider, self.model_name)
-            
-            response = await chat.send_message(UserMessage(text=prompt))
+            response = await self._generate_content(
+                prompt,
+                "You are a professional email editor. Rewrite content while maintaining the original intent and any merge field placeholders."
+            )
             return {"content": response.strip()}
             
         except Exception as e:
@@ -128,7 +149,7 @@ Provide only the rewritten content, maintaining any merge fields like {{{{FirstN
         count: int = 5
     ) -> dict:
         """Generate subject line suggestions"""
-        if not EMERGENT_AVAILABLE or not self.api_key:
+        if not self.api_key:
             return {"error": "AI service not configured"}
         
         try:
@@ -144,13 +165,10 @@ Email content:
 Respond with a JSON array of subject lines:
 ["subject 1", "subject 2", ...]"""
             
-            chat = LlmChat(
-                api_key=self.api_key,
-                session_id=f"email-subjects-{os.urandom(8).hex()}",
-                system_message="You are an email marketing expert. Generate compelling subject lines."
-            ).with_model(self.model_provider, self.model_name)
-            
-            response = await chat.send_message(UserMessage(text=prompt))
+            response = await self._generate_content(
+                prompt,
+                "You are an email marketing expert. Generate compelling subject lines."
+            )
             
             import json
             import re
@@ -172,7 +190,7 @@ Respond with a JSON array of subject lines:
         content: str
     ) -> dict:
         """Fix grammar and spelling"""
-        if not EMERGENT_AVAILABLE or not self.api_key:
+        if not self.api_key:
             return {"error": "AI service not configured"}
         
         try:
@@ -184,13 +202,10 @@ Content:
 
 Provide only the corrected content."""
             
-            chat = LlmChat(
-                api_key=self.api_key,
-                session_id=f"email-grammar-{os.urandom(8).hex()}",
-                system_message="You are a professional editor. Fix grammar and spelling while maintaining the original voice."
-            ).with_model(self.model_provider, self.model_name)
-            
-            response = await chat.send_message(UserMessage(text=prompt))
+            response = await self._generate_content(
+                prompt,
+                "You are a professional editor. Fix grammar and spelling while maintaining the original voice."
+            )
             return {"content": response.strip()}
             
         except Exception as e:

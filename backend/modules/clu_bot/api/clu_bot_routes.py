@@ -4,14 +4,19 @@ RESTful API for the AI-powered CRM Assistant.
 """
 import os
 import uuid
+import io
+import csv
+import json
+import asyncio
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from typing import Optional
+from fastapi.responses import StreamingResponse
+from typing import Optional, List, Dict, Any, AsyncGenerator
 import logging
 
 from ..models import (
     ChatRequest, ChatResponse, PreviewConfirmRequest,
-    ConversationListResponse, ALLOWED_FILE_TYPES, MAX_FILE_SIZE_MB
+    ConversationListResponse, ExportReportRequest, ALLOWED_FILE_TYPES, MAX_FILE_SIZE_MB
 )
 from ..services import get_clu_bot_orchestrator, get_conversation_service
 
@@ -25,9 +30,62 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/clu-bot", tags=["CLU-BOT"])
 
-# File upload storage directory
-CLU_BOT_UPLOAD_DIR = os.path.join(settings.STORAGE_BASE_DIR, "uploads", "clu_bot")
+# File upload storage: env override for Docker (`/app/uploads/clu_bot`), else under backend/uploads (local Windows/macOS/Linux)
+_CLU_BOT_API_DIR = os.path.dirname(os.path.abspath(__file__))
+_BACKEND_ROOT = os.path.abspath(os.path.join(_CLU_BOT_API_DIR, "..", "..", ".."))
+_DEFAULT_UPLOAD_DIR = os.path.join(_BACKEND_ROOT, "uploads", "clu_bot")
+CLU_BOT_UPLOAD_DIR = os.environ.get("CLU_BOT_UPLOAD_DIR", _DEFAULT_UPLOAD_DIR)
 os.makedirs(CLU_BOT_UPLOAD_DIR, exist_ok=True)
+STREAM_CHUNK_SIZE = max(1, int(os.environ.get("CLU_BOT_STREAM_CHUNK_SIZE", "4")))
+STREAM_CHUNK_DELAY_SEC = max(0.0, float(os.environ.get("CLU_BOT_STREAM_CHUNK_DELAY_SEC", "0.08")))
+
+
+def _flatten_export_rows(report_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Build tabular rows from analytics result payload for file exports.
+    Keeps a generic fallback so all report shapes can be exported.
+    """
+    data = report_data.get("data")
+    report_type = str(report_data.get("report_type", "report"))
+    rows: List[Dict[str, Any]] = []
+
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict):
+                rows.append(item)
+            else:
+                rows.append({"value": item})
+    elif isinstance(data, dict):
+        # Nested dict report (e.g. leads by status/source)
+        if "by_status" in data and isinstance(data["by_status"], list):
+            for item in data["by_status"]:
+                rows.append({
+                    "section": "by_status",
+                    "label": item.get("_id"),
+                    "count": item.get("count")
+                })
+        if "by_source" in data and isinstance(data["by_source"], list):
+            for item in data["by_source"]:
+                rows.append({
+                    "section": "by_source",
+                    "label": item.get("_id"),
+                    "count": item.get("count")
+                })
+        if not rows:
+            # Flat dict fallback
+            rows.append({k: v for k, v in data.items() if not isinstance(v, (dict, list))})
+    else:
+        rows.append({"value": data})
+
+    if not rows:
+        rows = [{"report_type": report_type, "summary": report_data.get("summary", "")}]
+
+    return rows
+
+
+def _normalize_filename(prefix: str, ext: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in (prefix or "crm_analytics_report"))
+    return f"{safe}.{ext}"
 
 
 # =============================================================================
@@ -60,6 +118,7 @@ async def send_message(
         response = await orchestrator.process_message(
             tenant_id=current_user.tenant_id,
             user_id=current_user.id,
+            current_user=current_user,
             request=request
         )
         
@@ -71,6 +130,72 @@ async def send_message(
             status_code=500,
             detail=f"Failed to process message: {str(e)}"
         )
+
+
+@router.post("/chat/stream")
+async def send_message_stream(
+    request: ChatRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Stream CLU-BOT response as Server-Sent Events (SSE).
+    Emits `chunk` events for incremental message text and a final payload event.
+    """
+    async def event_generator() -> AsyncGenerator[str, None]:
+        try:
+            orchestrator = get_clu_bot_orchestrator(db)
+            stream_queue: asyncio.Queue[str] = asyncio.Queue()
+            streamed_any = False
+
+            async def stream_callback(token: str) -> None:
+                if token:
+                    await stream_queue.put(token)
+
+            response_task = asyncio.create_task(
+                orchestrator.process_message(
+                    tenant_id=current_user.tenant_id,
+                    user_id=current_user.id,
+                    current_user=current_user,
+                    request=request,
+                    stream_callback=stream_callback
+                )
+            )
+
+            while not response_task.done() or not stream_queue.empty():
+                try:
+                    token = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
+                    streamed_any = True
+                    yield f"data: {json.dumps({'type': 'chunk', 'delta': token})}\n\n"
+                except asyncio.TimeoutError:
+                    continue
+
+            response = await response_task
+
+            # Fallback: if action path had no token stream, keep progressive UX
+            if not streamed_any:
+                message_text = response.message or ""
+                for i in range(0, len(message_text), STREAM_CHUNK_SIZE):
+                    chunk = message_text[i:i + STREAM_CHUNK_SIZE]
+                    yield f"data: {json.dumps({'type': 'chunk', 'delta': chunk})}\n\n"
+                    await asyncio.sleep(STREAM_CHUNK_DELAY_SEC)
+
+            final_payload = response.model_dump(mode="json")
+            yield f"data: {json.dumps({'type': 'final', 'data': final_payload})}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            logger.error(f"Chat stream error: {str(e)}")
+            err_payload = {"type": "error", "message": f"Failed to process message: {str(e)}"}
+            yield f"data: {json.dumps(err_payload)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 @router.post("/chat/confirm", response_model=ChatResponse)
@@ -95,6 +220,7 @@ async def confirm_action(
         response = await orchestrator.confirm_preview(
             tenant_id=current_user.tenant_id,
             user_id=current_user.id,
+            current_user=current_user,
             conversation_id=request.conversation_id,
             action_id=request.action_id,
             confirmed=request.confirmed
@@ -388,6 +514,132 @@ async def get_uploaded_files(
         )
 
 
+@router.post("/export")
+async def export_report(
+    request: ExportReportRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Export CLU-BOT analytics response payload as CSV, XLSX, or PDF summary.
+    """
+    try:
+        export_format = request.format.lower()
+        report_data = request.report_data or {}
+        rows = _flatten_export_rows(report_data)
+        report_name = request.report_name or report_data.get("report_type") or "crm_analytics_report"
+        period = report_data.get("period", "")
+        summary = report_data.get("summary", "")
+
+        if export_format == "csv":
+            csv_buffer = io.StringIO()
+            headers: List[str] = []
+            for row in rows:
+                for key in row.keys():
+                    if key not in headers:
+                        headers.append(key)
+            writer = csv.DictWriter(csv_buffer, fieldnames=headers or ["value"])
+            writer.writeheader()
+            for row in rows:
+                writer.writerow(row)
+            payload = io.BytesIO(csv_buffer.getvalue().encode("utf-8"))
+            filename = _normalize_filename(report_name, "csv")
+            return StreamingResponse(
+                payload,
+                media_type="text/csv",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+
+        if export_format == "xlsx":
+            from openpyxl import Workbook
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Report"
+
+            headers: List[str] = []
+            for row in rows:
+                for key in row.keys():
+                    if key not in headers:
+                        headers.append(key)
+            ws.append(headers or ["value"])
+            for row in rows:
+                ws.append([row.get(h, "") for h in (headers or ["value"])])
+
+            xlsx_buffer = io.BytesIO()
+            wb.save(xlsx_buffer)
+            xlsx_buffer.seek(0)
+            filename = _normalize_filename(report_name, "xlsx")
+            return StreamingResponse(
+                xlsx_buffer,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+
+        if export_format == "pdf":
+            from reportlab.lib.pagesizes import letter
+            from reportlab.pdfgen import canvas
+            pdf_buffer = io.BytesIO()
+            c = canvas.Canvas(pdf_buffer, pagesize=letter)
+            width, height = letter
+            y = height - 50
+
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(40, y, "CLU-BOT CRM Analytics Summary")
+            y -= 22
+            c.setFont("Helvetica", 10)
+            c.drawString(40, y, f"Report: {report_data.get('report_type', 'report')}")
+            y -= 16
+            if period:
+                c.drawString(40, y, f"Period: {period}")
+                y -= 16
+
+            if summary:
+                c.setFont("Helvetica-Bold", 11)
+                c.drawString(40, y, "Summary")
+                y -= 16
+                c.setFont("Helvetica", 10)
+                for line in str(summary).splitlines():
+                    if y < 60:
+                        c.showPage()
+                        y = height - 50
+                        c.setFont("Helvetica", 10)
+                    c.drawString(40, y, line[:120])
+                    y -= 14
+
+            y -= 6
+            c.setFont("Helvetica-Bold", 11)
+            c.drawString(40, y, "Data")
+            y -= 16
+            c.setFont("Helvetica", 9)
+            for row in rows[:120]:
+                if y < 60:
+                    c.showPage()
+                    y = height - 50
+                    c.setFont("Helvetica", 9)
+                line = json.dumps(row, default=str)[:140]
+                c.drawString(40, y, line)
+                y -= 12
+
+            c.save()
+            pdf_buffer.seek(0)
+            filename = _normalize_filename(report_name, "pdf")
+            return StreamingResponse(
+                pdf_buffer,
+                media_type="application/pdf",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+            )
+
+        raise HTTPException(status_code=400, detail="Unsupported export format. Use csv, xlsx, or pdf.")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Export report error: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to export report: {str(e)}"
+        )
+
+
 # =============================================================================
 # Health & Status Endpoints
 # =============================================================================
@@ -429,7 +681,7 @@ async def get_status(
             # Phase 2A
             "update_record": {
                 "enabled": True,
-                "objects": ["contact", "account", "opportunity"],
+                "objects": ["lead", "contact", "account", "opportunity", "task", "event"],
                 "requires_preview": True,
                 "risk_level": "high"
             },
@@ -439,16 +691,21 @@ async def get_status(
                 "requires_preview": True,
                 "filter_operators": ["equals", "not_equals", "contains", "starts_with", "greater_than", "less_than", "is_empty", "is_not_empty"]
             },
+            "update_list_view": {
+                "enabled": True,
+                "requires_preview": True,
+                "editable_fields": ["name", "filters", "columns", "sort_field", "sort_order", "visibility", "is_default"]
+            },
             # Phase 2B
             "generate_report": {
                 "enabled": True,
-                "report_types": ["revenue", "pipeline", "leads", "opportunities", "activities", "conversion"],
+                "report_types": ["revenue", "pipeline", "leads", "opportunities", "activities", "conversion", "kpi", "sentiment"],
                 "periods": ["day", "week", "month", "quarter", "year", "custom"],
                 "risk_level": "low"
             },
             "compare_metrics": {
                 "enabled": True,
-                "metric_types": ["revenue", "pipeline_value", "lead_count", "opportunity_count", "conversion_rate", "win_rate"],
+                "metric_types": ["revenue", "pipeline_value", "lead_count", "opportunity_count", "account_count", "activity_count", "won_deals", "conversion_rate", "win_rate"],
                 "periods": ["this_month", "last_month", "this_quarter", "last_quarter", "this_year", "last_year"],
                 "risk_level": "low"
             },
@@ -466,7 +723,7 @@ async def get_status(
             },
             "trend_analysis": {
                 "enabled": True,
-                "metrics": ["revenue", "leads", "opportunities", "pipeline_value", "activities", "conversion_rate", "win_rate"],
+                "metrics": ["revenue", "leads", "opportunities", "accounts", "pipeline_value", "activities", "won_deals", "conversion_rate", "win_rate"],
                 "period_types": ["day", "week", "month", "quarter"],
                 "risk_level": "low"
             },
@@ -490,9 +747,37 @@ async def get_status(
             "analyze_with_context": {
                 "enabled": True,
                 "risk_level": "low"
+            },
+            "bulk_update_records": {
+                "enabled": True,
+                "objects": ["lead", "contact", "account", "opportunity", "task", "event"],
+                "requires_preview": True,
+                "risk_level": "high"
+            },
+            "bulk_create_tasks": {
+                "enabled": True,
+                "target_objects": ["lead", "contact", "account", "opportunity"],
+                "requires_preview": True,
+                "risk_level": "high"
+            },
+            "bulk_create_records": {
+                "enabled": True,
+                "objects": ["lead", "contact", "account", "opportunity", "task", "event"],
+                "requires_preview": True,
+                "risk_level": "high"
+            },
+            "send_email": {
+                "enabled": True,
+                "requires_preview": True,
+                "risk_level": "high"
+            },
+            "draft_email": {
+                "enabled": True,
+                "requires_preview": False,
+                "risk_level": "low"
             }
         },
         "model": "gemini-2.5-flash",
-        "preview_required": ["create_lead", "add_note", "create_task", "update_record", "create_list_view", "create_dashboard", "fetch_url"],
-        "undo_supported": ["create_lead", "add_note", "create_task", "update_record", "create_list_view", "create_dashboard"]
+        "preview_required": ["create_lead", "add_note", "create_task", "update_record", "create_list_view", "update_list_view", "create_dashboard", "fetch_url", "bulk_update_records", "bulk_create_tasks", "bulk_create_records", "send_email"],
+        "undo_supported": ["create_lead", "add_note", "create_task", "update_record", "create_list_view", "update_list_view", "create_dashboard", "bulk_update_records", "bulk_create_tasks", "bulk_create_records", "draft_email"]
     }

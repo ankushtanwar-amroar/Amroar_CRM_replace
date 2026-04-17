@@ -4,6 +4,7 @@ Handles analytics queries: reports, comparisons, and CRM insights.
 Implements read-only analytics via deterministic execution.
 """
 import logging
+import re
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone, timedelta
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -91,11 +92,19 @@ class AnalyticsMCPService:
                 return await self._generate_conversion_report(
                     tenant_id, start_date, end_date
                 )
+            elif report_type == "kpi":
+                return await self._generate_kpi_report(
+                    tenant_id, start_date, end_date
+                )
+            elif report_type == "sentiment":
+                return await self._generate_sentiment_report(
+                    tenant_id, start_date, end_date, payload.group_by
+                )
             else:
                 return {
                     "success": False,
                     "error": f"Unknown report type: {report_type}",
-                    "message": f"Report type '{report_type}' is not supported. Try: revenue, pipeline, leads, opportunities, activities, conversion."
+                    "message": f"Report type '{report_type}' is not supported. Try: revenue, pipeline, leads, opportunities, activities, conversion, kpi, sentiment."
                 }
                 
         except Exception as e:
@@ -197,29 +206,47 @@ class AnalyticsMCPService:
                 "$match": {
                     "tenant_id": tenant_id,
                     "object_name": "opportunity",
-                    "is_deleted": {"$ne": True}
+                    "is_deleted": {"$ne": True},
+                    "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
                 }
-            },
-            {
-                "$group": {
-                    "_id": {"$ifNull": ["$data.stage", "Unknown"]},
-                    "total_value": {"$sum": {"$toDouble": {"$ifNull": ["$data.amount", 0]}}},
-                    "count": {"$sum": 1}
-                }
-            },
-            {"$sort": {"total_value": -1}}
+            }
         ]
+
+        if group_by == "owner":
+            pipeline.extend([
+                {
+                    "$group": {
+                        "_id": {"$ifNull": ["$owner_id", "Unassigned"]},
+                        "total_value": {"$sum": {"$toDouble": {"$ifNull": ["$data.amount", 0]}}},
+                        "count": {"$sum": 1}
+                    }
+                },
+                {"$sort": {"total_value": -1}}
+            ])
+        else:
+            pipeline.extend([
+                {
+                    "$group": {
+                        "_id": {"$ifNull": ["$data.stage", "Unknown"]},
+                        "total_value": {"$sum": {"$toDouble": {"$ifNull": ["$data.amount", 0]}}},
+                        "count": {"$sum": 1}
+                    }
+                },
+                {"$sort": {"total_value": -1}}
+            ])
         
         results = await self.db.object_records.aggregate(pipeline).to_list(100)
         
         total_pipeline = sum(r.get("total_value", 0) for r in results)
         total_opps = sum(r.get("count", 0) for r in results)
         
-        # Format stages
+        # Format groups
         stages = []
         for r in results:
             stages.append({
-                "stage": r["_id"],
+                "stage": r["_id"] if group_by != "owner" else None,
+                "owner_id": r["_id"] if group_by == "owner" else None,
+                "label": r["_id"],
                 "value": r["total_value"],
                 "count": r["count"],
                 "percentage": (r["total_value"] / total_pipeline * 100) if total_pipeline > 0 else 0
@@ -233,7 +260,9 @@ class AnalyticsMCPService:
             "totals": {
                 "total_pipeline_value": total_pipeline,
                 "opportunity_count": total_opps
-            }
+            },
+            "group_by": group_by or "stage",
+            "exports": self._build_export_options("pipeline")
         }
     
     async def _generate_leads_report(
@@ -245,27 +274,42 @@ class AnalyticsMCPService:
     ) -> Dict[str, Any]:
         """Generate leads report"""
         
-        # Count leads by status
-        pipeline = [
-            {
-                "$match": {
-                    "tenant_id": tenant_id,
-                    "object_name": "lead",
-                    "is_deleted": {"$ne": True},
-                    "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
-                }
-            },
-            {
-                "$group": {
-                    "_id": {"$ifNull": ["$data.status", "Unknown"]},
-                    "count": {"$sum": 1}
-                }
-            },
+        base_match = {
+            "tenant_id": tenant_id,
+            "object_name": "lead",
+            "is_deleted": {"$ne": True},
+            "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
+        }
+
+        if group_by == "month":
+            monthly_pipeline = [
+                {"$match": base_match},
+                {"$group": {"_id": {"$substr": ["$created_at", 0, 7]}, "count": {"$sum": 1}}},
+                {"$sort": {"_id": 1}}
+            ]
+            monthly = await self.db.object_records.aggregate(monthly_pipeline).to_list(100)
+            total_leads = sum(r.get("count", 0) for r in monthly)
+            jump = self._compute_biggest_jump_drop(monthly, "count")
+            return {
+                "success": True,
+                "report_type": "leads",
+                "period": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+                "summary": f"Lead creation month-by-month: {total_leads} leads across {len(monthly)} months",
+                "trend_statement": self._build_trend_statement(monthly, "count", "lead creation"),
+                "biggest_jump": jump.get("jump"),
+                "biggest_drop": jump.get("drop"),
+                "data": monthly,
+                "totals": {"total_leads": total_leads},
+                "group_by": "month",
+                "exports": self._build_export_options("leads_monthly")
+            }
+
+        status_pipeline = [
+            {"$match": base_match},
+            {"$group": {"_id": {"$ifNull": ["$data.status", "Unknown"]}, "count": {"$sum": 1}}},
             {"$sort": {"count": -1}}
         ]
-        
-        results = await self.db.object_records.aggregate(pipeline).to_list(100)
-        
+        results = await self.db.object_records.aggregate(status_pipeline).to_list(100)
         total_leads = sum(r.get("count", 0) for r in results)
         
         # By source if requested
@@ -301,7 +345,8 @@ class AnalyticsMCPService:
             },
             "totals": {
                 "total_leads": total_leads
-            }
+            },
+            "exports": self._build_export_options("leads")
         }
     
     async def _generate_opportunities_report(
@@ -313,14 +358,46 @@ class AnalyticsMCPService:
     ) -> Dict[str, Any]:
         """Generate opportunities report"""
         
+        base_match = {
+            "tenant_id": tenant_id,
+            "object_name": "opportunity",
+            "is_deleted": {"$ne": True},
+            "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
+        }
+
+        if group_by == "month":
+            pipeline = [
+                {"$match": base_match},
+                {
+                    "$group": {
+                        "_id": {"$substr": ["$created_at", 0, 7]},
+                        "count": {"$sum": 1},
+                        "total_value": {"$sum": {"$toDouble": {"$ifNull": ["$data.amount", 0]}}}
+                    }
+                },
+                {"$sort": {"_id": 1}}
+            ]
+            monthly = await self.db.object_records.aggregate(pipeline).to_list(100)
+            total_count = sum(r.get("count", 0) for r in monthly)
+            total_value = sum(r.get("total_value", 0) for r in monthly)
+            jump = self._compute_biggest_jump_drop(monthly, "count")
+            return {
+                "success": True,
+                "report_type": "opportunities",
+                "period": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+                "summary": f"Opportunity creation month-by-month: {total_count} opportunities worth ${total_value:,.2f}",
+                "trend_statement": self._build_trend_statement(monthly, "count", "opportunity creation"),
+                "biggest_jump": jump.get("jump"),
+                "biggest_drop": jump.get("drop"),
+                "data": monthly,
+                "totals": {"count": total_count, "total_value": total_value},
+                "group_by": "month",
+                "exports": self._build_export_options("opportunities_monthly")
+            }
+
         pipeline = [
             {
-                "$match": {
-                    "tenant_id": tenant_id,
-                    "object_name": "opportunity",
-                    "is_deleted": {"$ne": True},
-                    "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
-                }
+                "$match": base_match
             },
             {
                 "$group": {
@@ -341,7 +418,8 @@ class AnalyticsMCPService:
             "period": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
             "summary": f"Created {totals['count']} opportunities worth ${totals['total_value']:,.2f}",
             "data": totals,
-            "totals": totals
+            "totals": totals,
+            "exports": self._build_export_options("opportunities")
         }
     
     async def _generate_activities_report(
@@ -390,7 +468,8 @@ class AnalyticsMCPService:
             },
             "totals": {
                 "total_activities": total_activities
-            }
+            },
+            "exports": self._build_export_options("activities")
         }
     
     async def _generate_conversion_report(
@@ -461,7 +540,111 @@ class AnalyticsMCPService:
                     "won_opportunities": won_opps,
                     "win_rate": win_rate
                 }
+            },
+            "exports": self._build_export_options("conversion")
+        }
+
+    async def _generate_kpi_report(
+        self,
+        tenant_id: str,
+        start_date: datetime,
+        end_date: datetime
+    ) -> Dict[str, Any]:
+        """Generate KPI snapshot report for core CRM performance."""
+        conversion = await self._generate_conversion_report(tenant_id, start_date, end_date)
+        revenue = await self._get_metric_value(tenant_id, "revenue", start_date, end_date)
+        pipeline = await self._get_metric_value(tenant_id, "pipeline_value", start_date, end_date)
+        leads = await self._get_metric_value(tenant_id, "lead_count", start_date, end_date)
+        opps = await self._get_metric_value(tenant_id, "opportunity_count", start_date, end_date)
+
+        return {
+            "success": True,
+            "report_type": "kpi",
+            "period": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+            "summary": (
+                f"KPI Snapshot: Revenue ${revenue:,.2f}, Pipeline ${pipeline:,.2f}, "
+                f"Leads {int(leads):,}, Opportunities {int(opps):,}, "
+                f"Lead Conversion {conversion['data']['lead_conversion']['conversion_rate']:.1f}%, "
+                f"Win Rate {conversion['data']['opportunity_win']['win_rate']:.1f}%"
+            ),
+            "data": {
+                "revenue": revenue,
+                "pipeline_value": pipeline,
+                "lead_count": int(leads),
+                "opportunity_count": int(opps),
+                "lead_conversion_rate": conversion["data"]["lead_conversion"]["conversion_rate"],
+                "win_rate": conversion["data"]["opportunity_win"]["win_rate"]
+            },
+            "exports": self._build_export_options("kpi")
+        }
+
+    async def _generate_sentiment_report(
+        self,
+        tenant_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        group_by: Optional[str]
+    ) -> Dict[str, Any]:
+        """Estimate sentiment from notes and task/event text using a lightweight lexicon."""
+        date_filter = {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
+        notes = await self.db.notes.find(
+            {"tenant_id": tenant_id, "is_deleted": {"$ne": True}, "created_at": date_filter},
+            {"_id": 0, "body_text": 1, "title": 1, "created_at": 1}
+        ).to_list(1000)
+        records = await self.db.object_records.find(
+            {"tenant_id": tenant_id, "is_deleted": {"$ne": True}, "created_at": date_filter, "object_name": {"$in": ["task", "event"]}},
+            {"_id": 0, "data.subject": 1, "data.description": 1, "created_at": 1}
+        ).to_list(1000)
+
+        rows: List[Dict[str, Any]] = []
+        for n in notes:
+            text = f"{n.get('title', '')} {n.get('body_text', '')}".strip()
+            rows.append({"created_at": n.get("created_at", ""), "sentiment": self._score_sentiment(text)})
+        for r in records:
+            data = r.get("data", {})
+            text = f"{data.get('subject', '')} {data.get('description', '')}".strip()
+            rows.append({"created_at": r.get("created_at", ""), "sentiment": self._score_sentiment(text)})
+
+        if not rows:
+            return {
+                "success": True,
+                "report_type": "sentiment",
+                "period": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+                "summary": "No activity text found for sentiment analysis in this period.",
+                "data": [],
+                "totals": {"positive": 0, "neutral": 0, "negative": 0},
+                "exports": self._build_export_options("sentiment")
             }
+
+        if group_by == "month":
+            buckets: Dict[str, Dict[str, int]] = {}
+            for row in rows:
+                month = (row.get("created_at") or "")[:7] or "Unknown"
+                if month not in buckets:
+                    buckets[month] = {"positive": 0, "neutral": 0, "negative": 0}
+                buckets[month][row["sentiment"]] += 1
+            data = [{"_id": m, **vals} for m, vals in sorted(buckets.items(), key=lambda x: x[0])]
+        else:
+            totals = {"positive": 0, "neutral": 0, "negative": 0}
+            for row in rows:
+                totals[row["sentiment"]] += 1
+            data = [{"_id": "overall", **totals}]
+
+        total_pos = sum(d.get("positive", 0) for d in data)
+        total_neu = sum(d.get("neutral", 0) for d in data)
+        total_neg = sum(d.get("negative", 0) for d in data)
+        total = max(total_pos + total_neu + total_neg, 1)
+        dominant = max([("positive", total_pos), ("neutral", total_neu), ("negative", total_neg)], key=lambda x: x[1])[0]
+
+        return {
+            "success": True,
+            "report_type": "sentiment",
+            "period": f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}",
+            "summary": f"Sentiment is mostly {dominant} ({(max(total_pos, total_neu, total_neg) / total) * 100:.1f}%).",
+            "data": data,
+            "group_by": group_by or "overall",
+            "totals": {"positive": total_pos, "neutral": total_neu, "negative": total_neg},
+            "exports": self._build_export_options("sentiment")
         }
     
     # =========================================================================
@@ -549,6 +732,16 @@ class AnalyticsMCPService:
     ) -> float:
         """Get a specific metric value for a period"""
         
+        metric_type = (metric_type or "").lower()
+        alias_map = {
+            "leads": "lead_count",
+            "opportunities": "opportunity_count",
+            "accounts": "account_count",
+            "activities": "activity_count",
+            "won_deals": "won_deal_count",
+        }
+        metric_type = alias_map.get(metric_type, metric_type)
+
         if metric_type == "revenue":
             pipeline = [
                 {
@@ -607,6 +800,44 @@ class AnalyticsMCPService:
                 "object_name": "opportunity",
                 "is_deleted": {"$ne": True},
                 "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
+            })
+        elif metric_type == "account_count":
+            return await self.db.object_records.count_documents({
+                "tenant_id": tenant_id,
+                "object_name": "account",
+                "is_deleted": {"$ne": True},
+                "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
+            })
+        elif metric_type == "activity_count":
+            tasks = await self.db.object_records.count_documents({
+                "tenant_id": tenant_id,
+                "object_name": "task",
+                "is_deleted": {"$ne": True},
+                "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
+            })
+            events = await self.db.object_records.count_documents({
+                "tenant_id": tenant_id,
+                "object_name": "event",
+                "is_deleted": {"$ne": True},
+                "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
+            })
+            notes = await self.db.notes.count_documents({
+                "tenant_id": tenant_id,
+                "is_deleted": {"$ne": True},
+                "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()}
+            })
+            return tasks + events + notes
+        elif metric_type == "won_deal_count":
+            return await self.db.object_records.count_documents({
+                "tenant_id": tenant_id,
+                "object_name": "opportunity",
+                "is_deleted": {"$ne": True},
+                "created_at": {"$gte": start_date.isoformat(), "$lte": end_date.isoformat()},
+                "$or": [
+                    {"data.stage": {"$regex": "closed.*won", "$options": "i"}},
+                    {"data.status": {"$regex": "closed.*won", "$options": "i"}},
+                    {"data.is_won": True}
+                ]
             })
         
         elif metric_type in ["conversion_rate", "win_rate"]:
@@ -1705,6 +1936,54 @@ class AnalyticsMCPService:
             return f"{value:.1f}%"
         else:
             return f"{int(value):,}"
+
+    def _compute_biggest_jump_drop(self, items: List[Dict[str, Any]], field: str) -> Dict[str, Any]:
+        jump = None
+        drop = None
+        for idx in range(1, len(items)):
+            prev = float(items[idx - 1].get(field, 0) or 0)
+            curr = float(items[idx].get(field, 0) or 0)
+            delta = curr - prev
+            pair = {"from": items[idx - 1].get("_id"), "to": items[idx].get("_id"), "change": delta}
+            if jump is None or delta > jump["change"]:
+                jump = pair
+            if drop is None or delta < drop["change"]:
+                drop = pair
+        return {"jump": jump, "drop": drop}
+
+    def _build_trend_statement(self, items: List[Dict[str, Any]], field: str, label: str) -> str:
+        if len(items) < 2:
+            return f"Insufficient data to determine {label} trend."
+        first = float(items[0].get(field, 0) or 0)
+        last = float(items[-1].get(field, 0) or 0)
+        if first == 0 and last == 0:
+            return f"{label.title()} is flat across the selected range."
+        if first == 0:
+            return f"{label.title()} increased from 0 to {int(last)}."
+        change_pct = ((last - first) / first) * 100
+        direction = "up" if change_pct > 0 else "down" if change_pct < 0 else "flat"
+        return f"{label.title()} is {direction} overall ({change_pct:+.1f}%)."
+
+    def _score_sentiment(self, text: str) -> str:
+        if not text:
+            return "neutral"
+        positive_terms = {"won", "closed won", "great", "excellent", "happy", "success", "positive", "approved", "promising", "good"}
+        negative_terms = {"lost", "closed lost", "issue", "delay", "risk", "blocked", "negative", "angry", "bad", "escalation", "complaint"}
+        tokens = set(re.findall(r"[a-zA-Z]+", text.lower()))
+        pos = len(tokens.intersection(positive_terms))
+        neg = len(tokens.intersection(negative_terms))
+        if pos > neg:
+            return "positive"
+        if neg > pos:
+            return "negative"
+        return "neutral"
+
+    def _build_export_options(self, report_key: str) -> List[Dict[str, str]]:
+        return [
+            {"format": "csv", "label": "Download CSV", "report_key": report_key},
+            {"format": "xlsx", "label": "Download XLSX", "report_key": report_key},
+            {"format": "pdf", "label": "Download PDF Summary", "report_key": report_key},
+        ]
 
 
 # Factory function

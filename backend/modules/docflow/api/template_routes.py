@@ -21,6 +21,7 @@ from shared.auth import get_current_user
 from ..models.template_model import Template, TemplateCreate, TemplateUpdate
 from ..services.template_service import TemplateService
 from ..services.ai_template_service import AITemplateService
+from ..services.cluebot_lifecycle_service import ClueBotLifecycleService
 from ..services.file_parser_service import FileParserService
 from ..services.system_email_service import SystemEmailService
 from ..services.email_history_service import EmailHistoryService
@@ -76,6 +77,7 @@ class VisualAssistantRequest(BaseModel):
 # Services
 template_service = TemplateService(db)
 ai_service = AITemplateService()
+lifecycle_ai_service = ClueBotLifecycleService(db)
 file_parser = FileParserService()
 email_service = SystemEmailService()
 email_history_service = EmailHistoryService(db)
@@ -408,7 +410,9 @@ async def ai_generate_template(
         "selected_doc_type": selected_doc_type,
         "base_prompt": base_prompt
     }
+    # Old method (kept for fallback/reference):
     result = await ai_service.generate_template(prompt, context)
+    # result = await lifecycle_ai_service.generate_template_parallel(prompt, context)
 
     if not result["success"]:
         error_type = result.get("error_type", "generation_failed")

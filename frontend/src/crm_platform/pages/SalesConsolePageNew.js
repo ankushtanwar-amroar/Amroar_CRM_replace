@@ -1551,8 +1551,7 @@ const SalesConsolePageNew = () => {
                   variant="ghost"
                   size="sm"
                   onClick={() => openAppPageTab(page.id, page.name)}
-                  className={`h-7 px-2 text-xs font-medium text-slate-700 hover:bg-slate-100 ${
-                    page.is_default ? 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100' : ''
+                  className={`h-7 px-2 text-xs font-medium text-slate-700 hover:bg-slate-100 ${page.is_default ? 'bg-indigo-50 text-indigo-700 hover:bg-indigo-100' : ''
                   }`}
                   title={page.is_default ? `${page.name} (Default)` : page.name}
                 >
@@ -1586,8 +1585,7 @@ const SalesConsolePageNew = () => {
             {primaryTabs.map(tab => (
               <div
                 key={tab.id}
-                className={`flex items-center px-3 py-1.5 cursor-pointer border-r border-slate-300 whitespace-nowrap ${
-                  activePrimaryTabId === tab.id ? 'bg-white' : 'hover:bg-slate-200'
+                className={`flex items-center px-3 py-1.5 cursor-pointer border-r border-slate-300 whitespace-nowrap ${activePrimaryTabId === tab.id ? 'bg-white' : 'hover:bg-slate-200'
                 }`}
                 onClick={() => handleTabClick(tab)}
               >
@@ -1907,8 +1905,7 @@ const SalesConsolePageNew = () => {
                   return (
                     <div
                       key={obj.object_name}
-                      className={`flex items-center gap-3 p-3 border rounded-lg transition-colors ${
-                        isVisible ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100'
+                      className={`flex items-center gap-3 p-3 border rounded-lg transition-colors ${isVisible ? 'bg-white border-gray-200' : 'bg-gray-50 border-gray-100'
                       }`}
                     >
                       <Icon className={`w-5 h-5 ${isVisible ? 'text-gray-600' : 'text-gray-400'}`} />
@@ -2137,6 +2134,7 @@ const SalesConsolePageNew = () => {
 
       {/* CLU-BOT AI Assistant */}
       <CluBotButton 
+        onOpenRecord={openRelatedRecordInTab}
         context={{
           current_object: activePrimaryTabId?.split('-')[0] || null,
           current_record: activePrimaryTabId?.includes('-') ? {

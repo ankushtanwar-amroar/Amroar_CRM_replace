@@ -17,11 +17,13 @@ class ActionType(str, Enum):
     CREATE_LEAD = "create_lead"
     ADD_NOTE = "add_note"
     CREATE_TASK = "create_task"
+    CREATE_RECORD = "create_record"
     CLARIFICATION = "clarification"
     NO_ACTION = "no_action"
     # Phase 2A
     UPDATE_RECORD = "update_record"
     CREATE_LIST_VIEW = "create_list_view"
+    UPDATE_LIST_VIEW = "update_list_view"
     # Phase 2B - Analytics
     GENERATE_REPORT = "generate_report"
     COMPARE_METRICS = "compare_metrics"
@@ -34,6 +36,12 @@ class ActionType(str, Enum):
     READ_FILE = "read_file"
     FETCH_URL = "fetch_url"
     ANALYZE_WITH_CONTEXT = "analyze_with_context"
+    # Phase 5 - Bulk Operations
+    BULK_UPDATE_RECORDS = "bulk_update_records"
+    BULK_CREATE_TASKS = "bulk_create_tasks"
+    BULK_CREATE_RECORDS = "bulk_create_records"
+    SEND_EMAIL = "send_email"
+    DRAFT_EMAIL = "draft_email"
 
 
 class RiskLevel(str, Enum):
@@ -70,12 +78,17 @@ class RecordSummaryPayload(BaseModel):
     """Payload for getting a record summary"""
     object_type: str = Field(..., description="Object type")
     record_id: str = Field(..., description="Record ID or series_id")
+    user_query: Optional[str] = Field(default=None, description="The user's specific question about the record")
+    include_all: bool = Field(default=False, description="Whether to include all related records (deep summary)")
+    skip_discovery: bool = Field(default=False, description="Whether to skip the proactive discovery question and just give the standard summary")
 
 
 class CreateLeadPayload(BaseModel):
     """Payload for creating a lead"""
-    first_name: str = Field(..., min_length=1)
-    last_name: str = Field(..., min_length=1)
+    model_config = {"extra": "allow"}
+    # Optional during multi-turn; orchestrator enforces metadata-required fields before execute.
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     company: Optional[str] = None
@@ -86,6 +99,7 @@ class CreateLeadPayload(BaseModel):
 
 class AddNotePayload(BaseModel):
     """Payload for adding a note to a record"""
+    model_config = {"extra": "allow"}
     title: str = Field(..., min_length=1)
     body: Optional[str] = None
     linked_entity_type: str = Field(..., description="Object type to link: lead, contact, account, opportunity")
@@ -94,7 +108,8 @@ class AddNotePayload(BaseModel):
 
 class CreateTaskPayload(BaseModel):
     """Payload for creating a task"""
-    subject: str = Field(..., min_length=1)
+    model_config = {"extra": "allow"}
+    subject: Optional[str] = None
     description: Optional[str] = None
     due_date: Optional[str] = None
     priority: str = Field(default="Normal")
@@ -102,6 +117,16 @@ class CreateTaskPayload(BaseModel):
     related_to: Optional[str] = Field(default=None, description="Record ID to relate task to")
     related_type: Optional[str] = Field(default=None, description="Object type of related record")
     assigned_to: Optional[str] = Field(default=None, description="User ID to assign task to")
+
+
+class CreateRecordPayload(BaseModel):
+    """Payload for creating a generic record (contact, account, opportunity, event)"""
+    model_config = {"extra": "allow"}
+    object_type: str = Field(..., description="Object type: contact, account, opportunity, event")
+    fields: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Field-value pairs for the new record",
+    )
 
 
 class ClarificationPayload(BaseModel):
@@ -115,10 +140,80 @@ class ClarificationPayload(BaseModel):
 # =============================================================================
 
 class UpdateRecordPayload(BaseModel):
-    """Payload for updating a record (contact, account, opportunity)"""
-    object_type: str = Field(..., description="Object type: contact, account, opportunity")
-    record_id: str = Field(..., description="Record ID or series_id to update")
-    updates: Dict[str, Any] = Field(..., description="Field-value pairs to update")
+    """Payload for updating a CRM record via the same path as PUT /api/objects/.../records/..."""
+    object_type: str = Field(
+        ...,
+        description="Object API name: lead, contact, account, opportunity, task, event",
+    )
+    record_id: str = Field(..., description="Record ID, series_id, or resolvable name")
+    updates: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="data.* fields to merge into the record",
+    )
+    owner_id: Optional[str] = Field(
+        default=None,
+        description="New record owner user id (top-level owner, not task assignee)",
+    )
+    owner_name: Optional[str] = Field(
+        default=None,
+        description="New owner name to resolve to a user in the tenant",
+    )
+
+class BulkUpdateRecordsPayload(BaseModel):
+    """Payload for bulk updating matching records"""
+    object_type: str = Field(..., description="Object API name: lead, contact, account, opportunity, task, event")
+    filters: Dict[str, Any] = Field(default_factory=dict, description="Search filters used to select target records")
+    updates: Dict[str, Any] = Field(default_factory=dict, description="Field updates to apply to all matched records")
+    owner_id: Optional[str] = Field(default=None, description="Optional new owner user id")
+    owner_name: Optional[str] = Field(default=None, description="Optional owner name to resolve to a tenant user")
+    limit: int = Field(default=100, ge=1, le=500, description="Safety cap for number of records to update")
+
+
+class BulkCreateTasksPayload(BaseModel):
+    """Payload for creating tasks for a set of matched records"""
+    target_object_type: str = Field(..., description="Object to create tasks for: lead, contact, account, opportunity")
+    target_filters: Dict[str, Any] = Field(default_factory=dict, description="Filters to select target records")
+    subject_template: str = Field(default="Follow up: {name}", description="Task subject template; supports {name}")
+    description_template: Optional[str] = Field(default=None, description="Optional task description template")
+    due_date: Optional[str] = Field(default=None, description="YYYY-MM-DD")
+    priority: str = Field(default="Normal", description="High|Normal|Low")
+    status: str = Field(default="Not Started", description="Not Started|In Progress|Completed")
+    assigned_to: Optional[str] = Field(default=None, description="Optional user id to assign all tasks")
+    owner_name: Optional[str] = Field(default=None, description="Optional owner name to resolve if assigned_to is absent")
+    limit: int = Field(default=100, ge=1, le=500, description="Safety cap for number of tasks to create")
+
+
+class BulkCreateRecordsPayload(BaseModel):
+    """Payload for bulk creating CRM records"""
+    object_type: str = Field(..., description="Object API name: lead, contact, account, opportunity, task, event")
+    records: List[Dict[str, Any]] = Field(default_factory=list, description="List of field maps to create")
+    limit: int = Field(default=100, ge=1, le=500, description="Safety cap for number of records to create")
+
+
+class SendEmailPayload(BaseModel):
+    """Payload for sending email through CRM email module"""
+    to_emails: Optional[List[str]] = Field(default=None, description="Primary recipients")
+    cc_emails: Optional[List[str]] = Field(default=None, description="CC recipients")
+    bcc_emails: Optional[List[str]] = Field(default=None, description="BCC recipients")
+    subject: Optional[str] = Field(default=None, description="Email subject")
+    body: Optional[str] = Field(default=None, description="Email body (HTML/text)")
+    related_record_type: Optional[str] = Field(default=None, description="Related record object type")
+    related_record_id: Optional[str] = Field(default=None, description="Related record id/name/series id")
+    send_to_owner: bool = Field(default=False, description="Send to related record owner email")
+    email_all_open_opportunity_owners: bool = Field(default=False, description="Send to all owners of open opportunities")
+    include_next_steps: bool = Field(default=False, description="Include opportunity next-step summary in body")
+
+
+class DraftEmailPayload(BaseModel):
+    """Payload for drafting email through CRM email module"""
+    to_emails: Optional[List[str]] = Field(default=None, description="Primary recipients")
+    cc_emails: Optional[List[str]] = Field(default=None, description="CC recipients")
+    bcc_emails: Optional[List[str]] = Field(default=None, description="BCC recipients")
+    subject: Optional[str] = Field(default=None, description="Email subject")
+    body: Optional[str] = Field(default=None, description="Email body")
+    related_record_type: Optional[str] = Field(default=None, description="Related record object type")
+    related_record_id: Optional[str] = Field(default=None, description="Related record id/name/series id")
+    send_to_owner: bool = Field(default=False, description="Draft for record owner recipient")
 
 
 class ListViewFilterCondition(BaseModel):
@@ -138,6 +233,24 @@ class CreateListViewPayload(BaseModel):
     columns: Optional[List[str]] = Field(default=None, description="Columns to display")
     sort_field: Optional[str] = Field(default=None, description="Field to sort by")
     sort_order: str = Field(default="desc", description="Sort order: asc, desc")
+    visibility: str = Field(default="private", description="Visibility: private, shared, team")
+    is_default: bool = Field(default=False, description="Whether this should be the default list view")
+
+
+class UpdateListViewPayload(BaseModel):
+    """Payload for updating an existing user list view"""
+    list_view_id: Optional[str] = Field(default=None, description="List view ID")
+    object_type: Optional[str] = Field(default=None, description="Object type context for name lookup")
+    current_name: Optional[str] = Field(default=None, description="Existing list view name to locate")
+    name: Optional[str] = Field(default=None, description="New list view name")
+    description: Optional[str] = Field(default=None, description="Description")
+    filters: Optional[List[ListViewFilterCondition]] = Field(default=None, description="Replace filter conditions")
+    filter_logic: Optional[str] = Field(default=None, description="AND or OR")
+    columns: Optional[List[str]] = Field(default=None, description="Replace selected columns")
+    sort_field: Optional[str] = Field(default=None, description="Sort field")
+    sort_order: Optional[str] = Field(default=None, description="asc or desc")
+    visibility: Optional[str] = Field(default=None, description="private, shared, team")
+    is_default: Optional[bool] = Field(default=None, description="Set/unset as default view")
 
 
 # =============================================================================
@@ -146,7 +259,7 @@ class CreateListViewPayload(BaseModel):
 
 class GenerateReportPayload(BaseModel):
     """Payload for generating analytics reports"""
-    report_type: str = Field(..., description="Type: revenue, pipeline, leads, opportunities, activities, conversion")
+    report_type: str = Field(..., description="Type: revenue, pipeline, leads, opportunities, activities, conversion, kpi, sentiment")
     period: str = Field(default="month", description="Period: day, week, month, quarter, year, custom")
     start_date: Optional[str] = Field(default=None, description="Start date for custom period (YYYY-MM-DD)")
     end_date: Optional[str] = Field(default=None, description="End date for custom period (YYYY-MM-DD)")
@@ -157,7 +270,7 @@ class GenerateReportPayload(BaseModel):
 
 class CompareMetricsPayload(BaseModel):
     """Payload for comparing metrics between periods"""
-    metric_type: str = Field(..., description="Metric: revenue, pipeline_value, lead_count, opportunity_count, conversion_rate, win_rate")
+    metric_type: str = Field(..., description="Metric: revenue, pipeline_value, lead_count, opportunity_count, account_count, activity_count, won_deals, conversion_rate, win_rate")
     period_1: str = Field(..., description="First period: this_month, last_month, this_quarter, last_quarter, this_year, last_year")
     period_2: str = Field(..., description="Second period to compare against")
     object_type: Optional[str] = Field(default=None, description="Object type for the comparison")
@@ -208,7 +321,7 @@ class CreateDashboardPayload(BaseModel):
 
 class TrendAnalysisPayload(BaseModel):
     """Payload for time-series trend analysis"""
-    metric: str = Field(..., description="Metric: revenue, leads, opportunities, pipeline_value, activities, conversion_rate, win_rate")
+    metric: str = Field(..., description="Metric: revenue, leads, opportunities, accounts, pipeline_value, activities, won_deals, conversion_rate, win_rate")
     period_count: int = Field(default=6, ge=2, le=24, description="Number of periods to analyze")
     period_type: str = Field(default="month", description="Period granularity: day, week, month, quarter")
     object_type: Optional[str] = Field(default=None, description="Object type filter")
@@ -357,6 +470,13 @@ class ChatResponse(BaseModel):
     preview_data: Optional[Dict[str, Any]] = None
     result_data: Optional[Dict[str, Any]] = None
     suggestions: Optional[List[str]] = None
+
+
+class ExportReportRequest(BaseModel):
+    """Request payload for exporting analytics result data."""
+    format: Literal["csv", "xlsx", "pdf"] = Field(..., description="Export file format")
+    report_data: Dict[str, Any] = Field(..., description="Analytics response payload to export")
+    report_name: Optional[str] = Field(default="crm_analytics_report", description="Optional report filename prefix")
 
 
 class ConversationListResponse(BaseModel):

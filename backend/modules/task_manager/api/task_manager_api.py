@@ -522,6 +522,7 @@ async def list_tasks(
     
     # Check blocked status based on dependencies
     for task in tasks:
+        task["task_type"] = _normalize_task_type(task.get("task_type"))
         if task.get("blocked_by"):
             # Check if any blocking task is not done
             blocking_tasks = await db.tm_tasks.find({
@@ -3723,11 +3724,50 @@ async def get_project_time_summary(
 # PHASE 5: AI ASSISTANT
 # ============================================================================
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
+
+
+async def _call_task_manager_ai(prompt: str, system_message: str) -> str:
+    """Call Gemini for Task Manager AI features."""
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AI service not configured")
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(
+        model_name="gemini-2.5-flash",
+        system_instruction=system_message,
+    )
+    response = await model.generate_content_async(
+        prompt,
+        generation_config={
+            "temperature": 0.3,
+            "max_output_tokens": 2048,
+        },
+    )
+    return (response.text or "").strip()
+
+
+def _normalize_task_type(task_type: Optional[str]) -> str:
+    """Normalize arbitrary labels to valid TaskType enum values."""
+    value = (task_type or "").strip().lower()
+    mapping = {
+        "bug": "bug",
+        "feature": "feature",
+        "support": "support",
+        "sales": "sales",
+        "other": "other",
+        # legacy/AI aliases
+        "task": "other",
+        "improvement": "other",
+        "enhancement": "other",
+        "chore": "other",
+    }
+    return mapping.get(value, "other")
 
 
 class AIAssistantAction(str, Enum):
@@ -3745,6 +3785,15 @@ class AIRequest(PydanticBaseModel):
 
 class NotesToTasksRequest(PydanticBaseModel):
     notes: str
+    project_id: str
+
+
+class SuggestPriorityRequest(PydanticBaseModel):
+    task_ids: List[str]
+
+
+class ConfirmNotesToTasksRequest(PydanticBaseModel):
+    tasks: List[Dict[str, Any]]
     project_id: str
 
 
@@ -3830,19 +3879,10 @@ Please provide an improved description with the following sections:
 Keep the response concise but complete. Do not add unnecessary fluff."""
 
     try:
-        api_key = os.environ.get("EMERGENT_LLM_KEY")
-        if not api_key:
-            raise HTTPException(status_code=500, detail="AI service not configured")
-        
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"task-improve-{task_id}-{uuid.uuid4()}",
+        response = await _call_task_manager_ai(
+            prompt=prompt,
             system_message="You are a helpful task management assistant that helps improve task descriptions."
         )
-        chat.with_model("openai", "gpt-5.2")
-        
-        user_message = UserMessage(text=prompt)
-        response = await chat.send_message(user_message)
         
         # Log AI usage
         await db.tm_ai_logs.insert_one({
@@ -3869,10 +3909,12 @@ Keep the response concise but complete. Do not add unnecessary fluff."""
 
 @task_manager_router.post("/ai/suggest-priority")
 async def ai_suggest_priority(
-    task_ids: List[str],
+    request: SuggestPriorityRequest,
     current_user: User = Depends(get_current_user)
 ):
     """AI suggests priority based on due date, dependencies, overdue state"""
+    task_ids = request.task_ids
+
     # Check if AI is enabled
     if not await check_ai_enabled(current_user.tenant_id):
         raise HTTPException(status_code=403, detail="AI features are disabled")
@@ -3939,19 +3981,10 @@ Respond with a JSON array of objects with this structure:
 Keep reasoning brief (1-2 sentences). Only return the JSON array, nothing else."""
 
     try:
-        api_key = os.environ.get("EMERGENT_LLM_KEY")
-        if not api_key:
-            raise HTTPException(status_code=500, detail="AI service not configured")
-        
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"task-priority-{uuid.uuid4()}",
+        response = await _call_task_manager_ai(
+            prompt=prompt,
             system_message="You are a task prioritization assistant. You respond only with valid JSON."
         )
-        chat.with_model("openai", "gpt-5.2")
-        
-        user_message = UserMessage(text=prompt)
-        response = await chat.send_message(user_message)
         
         # Parse the response
         try:
@@ -4017,33 +4050,24 @@ Extract individual tasks from these notes. For each task, provide:
 1. A clear, actionable title (imperative form, e.g., "Implement user login")
 2. A brief description if details are available
 3. Suggested priority (low, medium, high, urgent)
-4. Suggested task type (feature, bug, task, improvement)
+4. Suggested task type (feature, bug, support, sales, other)
 
 Respond with a JSON array of task objects:
-[{{"title": "...", "description": "...", "priority": "medium", "task_type": "task"}}]
+[{{"title": "...", "description": "...", "priority": "medium", "task_type": "other"}}]
 
 Rules:
 - Each task should be independently actionable
 - Titles should be concise but clear
 - If the notes mention bugs or issues, mark them as type "bug"
-- Default to "task" type if unclear
+- Default to "other" type if unclear
 - Limit to maximum 10 tasks
 - Only return the JSON array, nothing else."""
 
     try:
-        api_key = os.environ.get("EMERGENT_LLM_KEY")
-        if not api_key:
-            raise HTTPException(status_code=500, detail="AI service not configured")
-        
-        chat = LlmChat(
-            api_key=api_key,
-            session_id=f"notes-to-tasks-{uuid.uuid4()}",
+        response = await _call_task_manager_ai(
+            prompt=prompt,
             system_message="You are a task extraction assistant. You respond only with valid JSON."
         )
-        chat.with_model("openai", "gpt-5.2")
-        
-        user_message = UserMessage(text=prompt)
-        response = await chat.send_message(user_message)
         
         # Parse the response
         try:
@@ -4058,7 +4082,7 @@ Rules:
         
         # Validate and clean up suggestions
         valid_priorities = ["low", "medium", "high", "urgent"]
-        valid_types = ["feature", "bug", "task", "improvement"]
+        valid_types = ["feature", "bug", "support", "sales", "other"]
         
         cleaned_tasks = []
         for task in suggested_tasks[:10]:  # Limit to 10
@@ -4066,7 +4090,7 @@ Rules:
                 "title": task.get("title", "Untitled Task")[:200],
                 "description": task.get("description", "")[:1000],
                 "priority": task.get("priority", "medium") if task.get("priority") in valid_priorities else "medium",
-                "task_type": task.get("task_type", "task") if task.get("task_type") in valid_types else "task"
+                "task_type": _normalize_task_type(task.get("task_type")) if task.get("task_type") in valid_types else "other"
             })
         
         # Log AI usage
@@ -4096,11 +4120,13 @@ Rules:
 
 @task_manager_router.post("/ai/notes-to-tasks/confirm")
 async def ai_confirm_notes_to_tasks(
-    tasks: List[Dict[str, Any]],
-    project_id: str,
+    request: ConfirmNotesToTasksRequest,
     current_user: User = Depends(get_current_user)
 ):
     """Confirm and create tasks from AI suggestions"""
+    tasks = request.tasks
+    project_id = request.project_id
+
     # Verify project exists
     project = await db.tm_projects.find_one(
         {"id": project_id, "tenant_id": current_user.tenant_id, "is_active": True}
@@ -4122,7 +4148,7 @@ async def ai_confirm_notes_to_tasks(
             "description": task_data.get("description", ""),
             "status": "todo",
             "priority": task_data.get("priority", "medium"),
-            "task_type": task_data.get("task_type", "task"),
+            "task_type": _normalize_task_type(task_data.get("task_type", "other")),
             "created_by": current_user.id,
             "created_at": now,
             "updated_at": now,

@@ -160,6 +160,8 @@ import {
 // Import SetupPage from its own file
 import SetupPage from '../pages/Setup/SetupPage';
 
+// Import Connections Page
+// import ConnectionsPage from '../pages/Setup/connections/ConnectionsPage'; 
 // Import Billing Page
 import BillingPage from '../pages/Setup/BillingPage';
 

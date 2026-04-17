@@ -7,7 +7,7 @@ import CluBotChat from './CluBotChat';
  * Floating CLU-BOT Button that can be added to any page
  * Opens the CLU-BOT chat panel when clicked
  */
-const CluBotButton = ({ context = null }) => {
+const CluBotButton = ({ context = null, onOpenRecord = null }) => {
   const [isOpen, setIsOpen] = useState(false);
 
   return (
@@ -28,6 +28,7 @@ const CluBotButton = ({ context = null }) => {
         isOpen={isOpen}
         onClose={() => setIsOpen(false)}
         context={context}
+        onOpenRecord={onOpenRecord}
       />
     </>
   );
