@@ -23,6 +23,30 @@ document_service = EnhancedDocumentService(db)
 activity_log_service = ActivityLogService(db)
 
 
+async def _resolve_sender_info(user_id: Optional[str]) -> Optional[dict]:
+    """Phase 74: Resolve `created_by` user id → {name, email} for public
+    signing-view header. Returns None when user_id is missing or the user
+    record cannot be found (caller must treat as optional)."""
+    if not user_id:
+        return None
+    try:
+        user = await db.users.find_one({"id": user_id}, {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1})
+        if not user:
+            return None
+        name = (
+            user.get("full_name")
+            or user.get("name")
+            or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
+            or (user.get("email") or "").split("@")[0]
+        )
+        email = user.get("email") or ""
+        if not name and not email:
+            return None
+        return {"name": name, "email": email}
+    except Exception:
+        return None
+
+
 @router.post("/documents/generate", response_model=Document, status_code=status.HTTP_201_CREATED)
 @require_module_license(ModuleKey.DOCFLOW)
 async def generate_document(
@@ -148,6 +172,12 @@ async def get_document_public(token: str):
                 break
         
         document["active_recipient"] = active_recipient or {}
+
+        # Phase 74: Enrich with sender info (from document.created_by) for the
+        # signing-view header. Falls back silently if user record is missing.
+        sender_info = await _resolve_sender_info(document.get("created_by"))
+        if sender_info:
+            document["sender"] = sender_info
 
         # Log view event
         try:

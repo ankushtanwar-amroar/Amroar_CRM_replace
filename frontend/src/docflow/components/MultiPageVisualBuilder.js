@@ -15,9 +15,9 @@ const FIELD_TYPES = [
   { id: 'signature', label: 'Signature', icon: Edit3, color: '#3B82F6', bgColor: '#DBEAFE', borderColor: '#3B82F6', width: 200, height: 80 },
   { id: 'initials', label: 'Initials', icon: FileText, color: '#6366F1', bgColor: '#E0E7FF', borderColor: '#6366F1', width: 80, height: 40 },
   { id: 'text', label: 'Text Input', icon: Type, color: '#10B981', bgColor: '#D1FAE5', borderColor: '#10B981', width: 150, height: 40 },
-  { id: 'date', label: 'Date', icon: Calendar, color: '#8B5CF6', bgColor: '#EDE9FE', borderColor: '#8B5CF6', width: 120, height: 40 },
-  { id: 'checkbox', label: 'Checkbox + Label', icon: CheckSquare, color: '#F59E0B', bgColor: '#FEF3C7', borderColor: '#F59E0B', width: 160, height: 30, hasLabel: true },
-  { id: 'radio', label: 'Radio Group', icon: CircleDot, color: '#EC4899', bgColor: '#FCE7F3', borderColor: '#EC4899', width: 160, height: 80, hasOptions: true },
+  { id: 'date', label: 'Date Signed', icon: Calendar, color: '#8B5CF6', bgColor: '#EDE9FE', borderColor: '#8B5CF6', width: 120, height: 40 },
+  { id: 'checkbox', label: 'Checkbox', icon: CheckSquare, color: '#F59E0B', bgColor: '#FEF3C7', borderColor: '#F59E0B', width: 30, height: 20, hasLabel: true },
+  { id: 'radio', label: 'Radio Group', icon: CircleDot, color: '#EC4899', bgColor: '#FCE7F3', borderColor: '#EC4899', width: 30, height: 20, hasOptions: true },
   { id: 'merge', label: 'Merge Field', icon: BracesIcon, color: '#F97316', bgColor: '#FFEDD5', borderColor: '#F97316', width: 150, height: 40 },
   { id: 'label', label: 'Label (Static)', icon: AlignLeft, color: '#6B7280', bgColor: '#F3F4F6', borderColor: '#6B7280', width: 200, height: 30 }
 ];
@@ -44,7 +44,22 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   const [currentPage, setCurrentPage] = useState(1);
   const [zoom, setZoom] = useState(1.0);
   const [draggingFromPalette, setDraggingFromPalette] = useState(null);
-  const [droppedFields, setDroppedFields] = useState(fields || []);
+  // Ensure every field has a unique fieldKey at runtime.
+  // Backward-compat: legacy templates (pre-Phase-48) don't have fieldKey in storage.
+  // We generate a unique key per field so they remain INDEPENDENT. Fields that
+  // already have a fieldKey are preserved unchanged (so duplicates stay linked).
+  const _ensureFieldKeys = useCallback((arr) => {
+    if (!Array.isArray(arr)) return [];
+    return arr.map(f => {
+      if (!f) return f;
+      if (f.fieldKey) return f;
+      return {
+        ...f,
+        fieldKey: `fk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}_${f.id || ''}`,
+      };
+    });
+  }, []);
+  const [droppedFields, setDroppedFields] = useState(() => _ensureFieldKeys(fields || []));
   const [selectedFieldId, setSelectedFieldId] = useState(null);
   const [showGrid, setShowGrid] = useState(true);
   const [editingLabelId, setEditingLabelId] = useState(null);
@@ -71,12 +86,15 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   const showPdf = hasPdf && (!editableMode || !hasBlocks);
   const isHtmlMode = hasBlocks && (!hasPdf || editableMode);
 
-  // Auto-fit zoom to container width on mount and significant resize only
+  // Auto-fit zoom to container width on mount and significant resize only.
+  // Phase 74: allow canvas to scale UP to 1.2x on wide screens so the Visual
+  // Builder fills available space instead of leaving empty side margins.
   useEffect(() => {
     const el = scrollContainerRef.current;
     if (!el) return;
 
     const PAGE_W = 800;
+    const MAX_AUTO_ZOOM = 1.2; // cap upscaling so small PDFs don't look blurry
 
     const computeFit = () => {
       if (isManualZoom.current) return;
@@ -84,14 +102,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       // To avoid oscillation, always assume scrollbar may be present by using a conservative width.
       const scrollbarWidth = el.offsetWidth - el.clientWidth;
       const conservativeWidth = el.offsetWidth - Math.max(scrollbarWidth, 17) - 48;
-      if (conservativeWidth <= 0 || conservativeWidth >= PAGE_W) return;
+      if (conservativeWidth <= 0) return;
 
       // Only re-fit if the container size changed significantly (> 30px)
       if (Math.abs(conservativeWidth - lastAutoFitWidth.current) < 30 && lastAutoFitWidth.current > 0) return;
       lastAutoFitWidth.current = conservativeWidth;
 
-      // Use floor to avoid rounding up into a value that triggers scrollbar
-      const newZoom = Math.floor((conservativeWidth / PAGE_W) * 100) / 100;
+      // Use floor to avoid rounding up into a value that triggers scrollbar.
+      // Clamp to [0.3, MAX_AUTO_ZOOM] so very wide screens get up to 1.2x
+      // while small screens still shrink to fit.
+      const rawZoom = Math.floor((conservativeWidth / PAGE_W) * 100) / 100;
+      const newZoom = Math.max(0.3, Math.min(MAX_AUTO_ZOOM, rawZoom));
       setZoom(newZoom);
     };
 
@@ -209,7 +230,57 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   // Dynamic CRM fields caching
   const [dynamicFields, setDynamicFields] = useState({});
   const [loadingDynamicFields, setLoadingDynamicFields] = useState(false);
-  const [viewMode, setViewMode] = useState('pagination'); // 'pagination' | 'continuous'
+  const [viewMode, setViewMode] = useState('continuous'); // 'pagination' | 'continuous' — Phase 72 default = continuous (Scroll) per product spec
+
+  // ─── Phase 59: Reconcile stale `page` values on mode switch ───
+  // Some fields carry a cumulative Y (from scroll-mode placement) but a stale
+  // `page: 1`. Whenever viewMode changes (or page geometry becomes known), walk
+  // every field and recompute `page` from its current Y coordinate using the
+  // PDF page offsets. Edge case: a field overlapping two pages is assigned by
+  // its TOP (y) position, per the spec. No-op when geometry not yet available.
+  const reconcileFieldPages = useCallback(() => {
+    const pageCount = pdfPageOffsets?.length || 0;
+    if (!pageCount) return;  // Offsets not computed yet
+    setDroppedFields(prev => {
+      let changed = false;
+      const next = prev.map(f => {
+        if (!f) return f;
+        const y = Number(f.y) || 0;
+        // Derive page index from cumulative Y. Fields already in page-relative
+        // coordinates (y < first page height) stay on `f.page` if valid.
+        const firstPageH = pdfPageHeights[0] || 1035;
+        const isPageRelative = y >= 0 && y <= firstPageH && (f.page || 1) >= 1;
+        if (isPageRelative && f.page) return f;
+        // Cumulative-Y → (page, pageRelativeY) lookup
+        let computedPage = 1;
+        let newY = y;
+        for (let i = 0; i < pageCount; i++) {
+          const nextOffset = i + 1 < pageCount ? pdfPageOffsets[i + 1] : Infinity;
+          if (y >= pdfPageOffsets[i] && y < nextOffset) {
+            computedPage = i + 1;
+            newY = y - pdfPageOffsets[i];
+            break;
+          }
+        }
+        if (computedPage !== f.page || newY !== f.y) {
+          changed = true;
+          return { ...f, page: computedPage, y: newY };
+        }
+        return f;
+      });
+      if (changed && onFieldsChange) {
+        // Propagate to parent so backend payload stays in sync.
+        onFieldsChange(next);
+      }
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line
+  }, [pdfPageOffsets, pdfPageHeights]);
+
+  // Run reconciliation whenever viewMode changes OR offsets first become known.
+  useEffect(() => {
+    reconcileFieldPages();
+  }, [viewMode, pdfPageOffsets, reconcileFieldPages]);
 
   useEffect(() => {
     const selectedField = droppedFields.find(f => f.id === selectedFieldId);
@@ -260,8 +331,9 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       
       if (hasNewFields || hasRemovedFields || countChanged) {
         console.log('[VisualBuilder] Syncing fields - new:', hasNewFields, 'removed:', hasRemovedFields, 'count:', countChanged);
-        setDroppedFields(fields);
-        droppedFieldsRef.current = fields;
+        const normalized = _ensureFieldKeys(fields);
+        setDroppedFields(normalized);
+        droppedFieldsRef.current = normalized;
       }
     }
   }, [fields]);
@@ -286,47 +358,93 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     e.dataTransfer.dropEffect = 'copy';
   };
 
+  // ─── Phase 60: DOM-driven page resolution for drag/drop ───
+  // Goal: fields dropped on Page N must ALWAYS be assigned page=N, regardless
+  // of view mode or stale measurement refs. This function inspects the actual
+  // rendered DOM at drop time (not cached offsets, which may lag React state).
+  //
+  // Returns { page, pageRelativeY } where pageRelativeY is measured from the
+  // TOP of the resolved page (0-based pixel, pre-zoom). Falls back gracefully
+  // for HTML mode (no per-page DOM markers) using the measured offsets array.
+  //
+  // Phase 67 option: `strict=true` returns `null` when the pointer is outside
+  // every page's bounds (used by reposition-drag in continuous mode so the
+  // field stays put rather than snapping to page 1 when the cursor leaves
+  // the visible area).
+  const resolvePageFromPoint = useCallback((clientX, clientY, strict = false) => {
+    if (!pdfCanvasRef.current) return strict ? null : { page: 1, pageRelativeY: 0 };
+    const canvasRect = pdfCanvasRef.current.getBoundingClientRect();
+
+    // Pagination mode — only the active page is rendered, so drop coord is
+    // already relative to that page's top.
+    if (viewMode === 'pagination') {
+      return {
+        page: currentPage,
+        pageRelativeY: (clientY - canvasRect.top) / zoom,
+      };
+    }
+
+    // Continuous mode with PDF pages → query DOM page wrappers directly.
+    // Each wrapper has data-pdf-page={n}. This bypasses any ref-cache timing
+    // issues (heights still being measured, etc.).
+    const pageNodes = pdfCanvasRef.current.querySelectorAll('[data-pdf-page]');
+    if (pageNodes.length > 0) {
+      for (let i = 0; i < pageNodes.length; i++) {
+        const r = pageNodes[i].getBoundingClientRect();
+        if (clientY >= r.top && clientY <= r.bottom) {
+          const pageNum = parseInt(pageNodes[i].getAttribute('data-pdf-page'), 10) || (i + 1);
+          return {
+            page: pageNum,
+            pageRelativeY: Math.max(0, (clientY - r.top) / zoom),
+          };
+        }
+      }
+      // Phase 67: strict mode — let caller keep the current page instead of
+      // snapping to page 1/last (fixes "drag jumps to top of Page 1" bug
+      // during cross-page repositioning).
+      if (strict) return null;
+      // Non-strict (palette drop): fall back to clamping for a sensible drop.
+      const firstR = pageNodes[0].getBoundingClientRect();
+      if (clientY < firstR.top) return { page: 1, pageRelativeY: 0 };
+      const lastIdx = pageNodes.length - 1;
+      const lastR = pageNodes[lastIdx].getBoundingClientRect();
+      const lastNum = parseInt(pageNodes[lastIdx].getAttribute('data-pdf-page'), 10) || (lastIdx + 1);
+      return {
+        page: lastNum,
+        pageRelativeY: Math.max(0, (lastR.bottom - lastR.top) / zoom),
+      };
+    }
+
+    // Continuous HTML mode — no per-page DOM; use measured content offsets.
+    const y = (clientY - canvasRect.top) / zoom;
+    const offsets = (pageOffsetsRef.current && pageOffsetsRef.current.length) ? pageOffsetsRef.current : [0];
+    let page = 1;
+    let relY = y;
+    for (let i = offsets.length - 1; i >= 0; i--) {
+      if (y >= offsets[i]) {
+        page = i + 1;
+        relY = y - offsets[i];
+        break;
+      }
+    }
+    return { page, pageRelativeY: Math.max(0, relY) };
+  }, [viewMode, currentPage, zoom]);
+
   const handlePaletteDrop = (e) => {
     e.preventDefault();
     if (!draggingFromPalette || !pdfCanvasRef.current) return;
 
     const rect = pdfCanvasRef.current.getBoundingClientRect();
     let x = (e.clientX - rect.left) / zoom;
-    let y = (e.clientY - rect.top) / zoom;
+
+    // Resolve target page + page-relative Y via DOM (reliable across modes)
+    const resolved = resolvePageFromPoint(e.clientX, e.clientY);
+    let fieldPage = resolved.page;
+    let fieldY = resolved.pageRelativeY;
 
     if (showGrid) {
       x = snapToGrid(x);
-      y = snapToGrid(y);
-    }
-
-    // In Scroll (continuous) mode, calculate the correct page from Y position
-    // using actual measured page content offsets (not fixed 1100px intervals)
-    let fieldPage = currentPage;
-    let fieldY = y;
-    if (viewMode === 'continuous' && isHtmlMode) {
-      const offsets = pageOffsetsRef.current;
-      // Find which page this Y position falls into
-      let foundPage = 1;
-      for (let i = offsets.length - 1; i >= 0; i--) {
-        if (y >= offsets[i]) {
-          foundPage = i + 1;
-          fieldY = y - offsets[i];
-          break;
-        }
-      }
-      fieldPage = foundPage;
-    } else if (viewMode === 'continuous') {
-      // PDF mode — use measured page offsets
-      const offsets = pdfPageOffsetsRef.current;
-      let foundPage = 1;
-      for (let i = offsets.length - 1; i >= 0; i--) {
-        if (y >= offsets[i]) {
-          foundPage = i + 1;
-          fieldY = y - offsets[i];
-          break;
-        }
-      }
-      fieldPage = foundPage;
+      fieldY = snapToGrid(fieldY);
     }
 
     let nextNumber = 1;
@@ -338,6 +456,10 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
     const newField = {
       id: `${draggingFromPalette.id}_${Date.now()}`,
+      // fieldKey: internal binding key. Fields sharing the same key auto-sync values
+      // at signing time (DocuSign-style). Each new field gets a UNIQUE key so it's
+      // independent by default. Duplicate/copy preserves the key → linked.
+      fieldKey: `fk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       type: draggingFromPalette.id,
       label: generatedLabel,
       name: `${draggingFromPalette.id}_${Date.now()}`,
@@ -363,12 +485,25 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
         isStatic: true
       }),
       ...(draggingFromPalette.id === 'signature' && { signatureSize: 'medium' }),
+      ...(draggingFromPalette.id === 'date' && {
+        dateMode: 'auto',
+        dateFormat: 'MM/DD/YYYY',
+        // Friendlier default label per Phase 53 — surfaces as tooltip / a11y name
+        label: 'Date Signed',
+      }),
       ...(draggingFromPalette.id === 'text' && { fieldSubType: 'single-line', defaultValue: '', characterLimit: 100 }),
       ...(draggingFromPalette.id === 'checkbox' && { checkboxLabel: 'Check to agree', checked: false }),
       ...(draggingFromPalette.id === 'radio' && {
-        radioOptions: ['Option 1', 'Option 2', 'Option 3'],
-        selectedOption: '',
-        radioLayout: 'vertical'
+        // New single-option-per-field model. Multiple radio fields sharing
+        // the same `groupName` behave as a single-select group. Users drag
+        // multiple radio fields onto the canvas and place them anywhere.
+        groupName: `group_${Date.now()}`,
+        optionLabel: 'Option 1',
+        optionValue: 'option_1',
+        // Phase 64: Compact default size for radio buttons — matches checkbox
+        // for consistent DocuSign-like UX (no manual resize needed).
+        width: 30,
+        height: 20
       })
     };
 
@@ -395,9 +530,37 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     dragFieldIdRef.current = field.id;
     setSelectedFieldId(field.id);
 
+    // Phase 68: offset.y must be computed in the SAME coordinate system
+    // that handleMouseMove uses. In continuous scroll mode, `field.y` is
+    // page-relative (e.g., 100px from top of Page 2), whereas `yInCanvas`
+    // was canvas-wide (thousands of px from canvas top). Subtracting the
+    // two produced a huge stale offset that caused fields dragged from
+    // Page N to Page 1 to snap to Page 1 top and appear "locked" (the
+    // computed relY stayed negative for all subsequent mouse positions).
+    //
+    // Fix: when in continuous mode, derive offset.y from the cursor's
+    // distance to the top of the field's CURRENT page (same math as the
+    // move handler's `relY`). Falls back to the canvas-relative computation
+    // for pagination mode where field.y is already measured from the
+    // visible page's top.
+    let offsetY = yInCanvas - field.y;
+    if (viewMode === 'continuous' && pdfCanvasRef.current) {
+      const pageNode = pdfCanvasRef.current.querySelector(`[data-pdf-page="${field.page}"]`);
+      if (pageNode) {
+        const pageRect = pageNode.getBoundingClientRect();
+        const cursorPageRelY = (e.clientY - pageRect.top) / zoom;
+        offsetY = cursorPageRelY - field.y;
+      } else {
+        // HTML continuous — use measured page offsets
+        const offsets = (pageOffsetsRef.current && pageOffsetsRef.current.length) ? pageOffsetsRef.current : [0];
+        const pageOff = offsets[(field.page || 1) - 1] || 0;
+        offsetY = yInCanvas - pageOff - field.y;
+      }
+    }
+
     const offset = {
       x: xInCanvas - field.x,
-      y: yInCanvas - field.y
+      y: offsetY,
     };
     setDragOffset(offset);
     dragOffsetRef.current = offset;
@@ -418,43 +581,62 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
       const field = droppedFieldsRef.current.find(f => f.id === dragFieldIdRef.current);
       if (field) {
+        // Phase 67: only clamp X (horizontal) and — in pagination mode — Y.
+        // In continuous scroll mode the effective Y range is the scroll height
+        // of the whole document, so clamping to visible rect height caused
+        // fields to "stick" at page boundaries when dragging toward a page
+        // currently out of view.
         const maxX = rect.width / zoom - field.width;
-        const maxY = rect.height / zoom - field.height;
         newX = Math.max(0, Math.min(newX, maxX));
-        newY = Math.max(0, Math.min(newY, maxY));
+        if (viewMode !== 'continuous') {
+          const maxY = rect.height / zoom - field.height;
+          newY = Math.max(0, Math.min(newY, maxY));
+        }
+      }
+
+      // Phase 67: Auto-scroll the outer container when the cursor hovers
+      // near its top/bottom edges — lets users drag fields from Page N to
+      // Page N-1 (or N+1) without releasing the mouse to manually scroll.
+      if (viewMode === 'continuous' && scrollContainerRef.current) {
+        const sc = scrollContainerRef.current;
+        const scRect = sc.getBoundingClientRect();
+        const EDGE = 60;     // trigger zone (px)
+        const SPEED = 22;    // scroll step per move event
+        if (e.clientY < scRect.top + EDGE) {
+          sc.scrollTop = Math.max(0, sc.scrollTop - SPEED);
+        } else if (e.clientY > scRect.bottom - EDGE) {
+          sc.scrollTop = Math.min(sc.scrollHeight, sc.scrollTop + SPEED);
+        }
       }
 
       setDroppedFields(prev => {
         const newFields = prev.map(f => {
           if (f.id !== dragFieldIdRef.current) return f;
-          // In continuous mode, convert Y to page-relative coordinates
-          if (viewMode === 'continuous' && isHtmlMode) {
-            const offsets = pageOffsetsRef.current;
-            let newPage = 1;
-            let relativeY = newY;
-            for (let i = offsets.length - 1; i >= 0; i--) {
-              if (newY >= offsets[i]) {
-                newPage = i + 1;
-                relativeY = newY - offsets[i];
-                break;
-              }
+          if (viewMode === 'continuous') {
+            // Resolve target page from DOM (strict). If cursor is outside
+            // any page's rect (e.g., in the gutter between pages or beyond
+            // scroll bounds), KEEP the field's current page/y so it doesn't
+            // jump to page 1 top — DocuSign-style smooth drag.
+            const resolved = resolvePageFromPoint(e.clientX, e.clientY, true);
+            if (!resolved) {
+              // Out-of-bounds — don't move the field this frame.
+              return f;
             }
-            return { ...f, x: newX, y: Math.max(0, relativeY), page: newPage };
-          } else if (viewMode === 'continuous') {
-            // PDF mode — use measured page offsets
-            const offsets = pdfPageOffsetsRef.current;
-            let newPage = 1;
-            let relativeY = newY;
-            for (let i = offsets.length - 1; i >= 0; i--) {
-              if (newY >= offsets[i]) {
-                newPage = i + 1;
-                relativeY = newY - offsets[i];
-                break;
-              }
+            const pageNode = pdfCanvasRef.current.querySelector(`[data-pdf-page="${resolved.page}"]`);
+            let pageTopClientY;
+            if (pageNode) {
+              pageTopClientY = pageNode.getBoundingClientRect().top;
+            } else {
+              const canvasRect = pdfCanvasRef.current.getBoundingClientRect();
+              const offsets = (pageOffsetsRef.current && pageOffsetsRef.current.length) ? pageOffsetsRef.current : [0];
+              const off = offsets[resolved.page - 1] || 0;
+              pageTopClientY = canvasRect.top + off * zoom;
             }
-            return { ...f, x: newX, y: Math.max(0, relativeY), page: newPage };
+            const relY = (e.clientY - pageTopClientY) / zoom - dragOffsetRef.current.y;
+            return { ...f, x: newX, y: relY, page: resolved.page };
           }
-          return { ...f, x: newX, y: newY };
+          // Pagination (page) mode: pin to currently viewed page.
+          return { ...f, x: newX, y: newY, page: currentPage };
         });
         droppedFieldsRef.current = newFields;
         return newFields;
@@ -483,17 +665,23 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
         return newFields;
       });
     }
-  }, [zoom, showGrid]);
+    // eslint-disable-next-line
+  }, [zoom, showGrid, viewMode, currentPage, resolvePageFromPoint]);
 
   const handleMouseUp = useCallback(() => {
     if (isDraggingRef.current || isResizingRef.current) {
       syncToParent(droppedFieldsRef.current);
     }
 
+    // Phase 68: hard reset all drag/resize state so no stale offset or
+    // field id can leak into the next drag. Addresses the "can't move
+    // field after drop" symptom by guaranteeing a clean slate.
     setIsDragging(false);
     isDraggingRef.current = false;
     setDragFieldId(null);
     dragFieldIdRef.current = null;
+    setDragOffset({ x: 0, y: 0 });
+    dragOffsetRef.current = { x: 0, y: 0 };
     setIsResizing(false);
     isResizingRef.current = false;
     setResizeFieldId(null);
@@ -914,7 +1102,12 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 >
                   {viewMode === 'continuous' ? (
                     Array.from({ length: numPages || 1 }, (_, i) => (
-                      <div key={i + 1} className={i > 0 ? 'mt-4 border-t border-gray-200 pt-4' : ''}>
+                      <div
+                        key={i + 1}
+                        data-pdf-page={i + 1}
+                        data-testid={`pdf-page-wrapper-${i + 1}`}
+                        className={i > 0 ? 'mt-4 border-t border-gray-200 pt-4' : ''}
+                      >
                         <Page
                           pageNumber={i + 1}
                           width={800}
@@ -1015,28 +1208,70 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         onMouseDown={(e) => e.stopPropagation()}
                       />
                     ) : field.type === 'checkbox' ? (
-                      <div className="flex items-center gap-1.5 w-full px-1">
-                        <input type="checkbox" checked={field.checked || false} readOnly className="w-3.5 h-3.5 rounded pointer-events-none flex-shrink-0" />
-                        <span className="truncate text-xs" style={{ color: config.color }}>{field.checkboxLabel || 'Checkbox'}</span>
+                      // Phase 62: DocuSign-style — render ONLY the checkbox
+                      // square on the Builder canvas. The label text stays in
+                      // the properties panel (field.checkboxLabel) and is
+                      // exposed via tooltip for reference, but never drawn on
+                      // the canvas, signing page, or final PDF.
+                      <div
+                        className="flex items-center justify-center w-full h-full"
+                        title={field.checkboxLabel || ''}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={field.checked || false}
+                          readOnly
+                          className="w-3.5 h-3.5 rounded pointer-events-none flex-shrink-0"
+                        />
                       </div>
                     ) : field.type === 'radio' ? (
-                      <div className={`w-full px-1 ${(field.radioLayout || 'vertical') === 'vertical' ? 'space-y-0.5' : 'flex gap-2 flex-wrap items-center'}`}>
-                        {(field.radioOptions || ['Option 1', 'Option 2']).map((opt, i) => (
-                          <div key={i} className="flex items-center gap-1">
-                            <div className="w-2.5 h-2.5 rounded-full border-2 flex items-center justify-center flex-shrink-0" style={{ borderColor: config.color }}>
-                              {field.selectedOption === opt && <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: config.color }} />}
+                      // Support both: NEW single-option model + LEGACY radioOptions array
+                      Array.isArray(field.radioOptions) && !field.optionValue && !field.option_value ? (
+                        <div className={`w-full px-1 ${(field.radioLayout || 'vertical') === 'vertical' ? 'space-y-0.5' : 'flex gap-2 flex-wrap items-center'}`}>
+                          {(field.radioOptions || ['Option 1', 'Option 2']).map((opt, i) => (
+                            <div key={i} className="flex items-center gap-1">
+                              <div className="w-2.5 h-2.5 rounded-full border-2 flex items-center justify-center flex-shrink-0" style={{ borderColor: config.color }}>
+                                {field.selectedOption === opt && <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: config.color }} />}
+                              </div>
+                              <span className="text-[10px] truncate" style={{ color: config.color }}>{opt}</span>
                             </div>
-                            <span className="text-[10px] truncate" style={{ color: config.color }}>{opt}</span>
+                          ))}
+                        </div>
+                      ) : (
+                        // Phase 57 + 71: clean radio circle only — no visible
+                        // label on the Builder canvas. Tooltip shows the option
+                        // value. When `defaultChecked` is true, render the
+                        // filled dot so authors can see the default state
+                        // immediately (matches the signing-page behavior).
+                        <div
+                          className="flex items-center justify-center w-full h-full"
+                          title={field.optionLabel || field.option_label || 'Option'}
+                        >
+                          <div
+                            className="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center flex-shrink-0"
+                            style={{ borderColor: config.color }}
+                          >
+                            {field.defaultChecked && (
+                              <div
+                                className="w-2 h-2 rounded-full"
+                                style={{ backgroundColor: config.color }}
+                              />
+                            )}
                           </div>
-                        ))}
-                      </div>
+                        </div>
+                      )
                     ) : (
                       <div
                         className="truncate text-xs font-medium w-full px-1"
                         style={{
                           color: field.style?.color || config.color,
-                          textAlign: (['label', 'text', 'merge'].includes(field.type) && field.style?.textAlign) ? field.style.textAlign : 'center',
-                          ...((['label', 'text', 'merge'].includes(field.type) && field.style) ? {
+                          // Phase 71: apply alignment + font styling to ALL
+                          // typographic fields (label, text, merge, date,
+                          // signature, initials). Previously only the first 3
+                          // honoured it, which is why changing font/align on a
+                          // Text Input looked like "styling not working".
+                          textAlign: field.style?.textAlign || 'center',
+                          ...(field.style ? {
                             fontFamily: field.style.fontFamily || undefined,
                             fontSize: field.style.fontSize ? `${field.style.fontSize}px` : undefined,
                             fontWeight: field.style.fontWeight || undefined,
@@ -1123,6 +1358,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   onClick={() => handleDuplicateField(selectedField.id)}
                   className="p-1 rounded hover:bg-gray-200 text-gray-600 transition-colors"
                   title="Duplicate Field"
+                  data-testid="duplicate-field-btn"
                 >
                   <Copy className="h-4 w-4" />
                 </button>
@@ -1154,17 +1390,31 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 />
               </div>
 
-              {/* Required */}
-              {selectedField.type !== 'label' && (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    id="field-required"
-                    checked={selectedField.required || false}
-                    onChange={(e) => updateFieldProperty(selectedField.id, 'required', e.target.checked)}
-                    className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
-                  />
-                  <label htmlFor="field-required" className="text-sm font-medium text-gray-700">Required</label>
+              {/* Required + Read Only (side-by-side) */}
+              {selectedField.type !== 'label' && selectedField.type !== 'merge' && (
+                <div className="flex items-center gap-5 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="field-required"
+                      checked={selectedField.required || false}
+                      onChange={(e) => updateFieldProperty(selectedField.id, 'required', e.target.checked)}
+                      className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                      data-testid="field-required-checkbox"
+                    />
+                    <label htmlFor="field-required" className="text-sm font-medium text-gray-700">Required</label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      id="field-readonly"
+                      checked={selectedField.readOnly || false}
+                      onChange={(e) => updateFieldProperty(selectedField.id, 'readOnly', e.target.checked)}
+                      className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                      data-testid="field-readonly-checkbox"
+                    />
+                    <label htmlFor="field-readonly" className="text-sm font-medium text-gray-700">Read Only</label>
+                  </div>
                 </div>
               )}
 
@@ -1206,8 +1456,8 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 </div>
               )}
 
-              {/* Text Styling Controls — for Label, Text Input, and Merge Field */}
-              {['label', 'text', 'merge'].includes(selectedField.type) && (
+              {/* Text Styling Controls — for Label, Text Input, Date, Merge Field, Signature and Initials */}
+              {['label', 'text', 'merge', 'date', 'signature', 'initials'].includes(selectedField.type) && (
                 <div className="border-t border-gray-100 pt-3 mt-1 space-y-3" data-testid="text-styling-section">
                   <label className="block text-xs font-semibold text-gray-800 flex items-center gap-1.5">
                     <svg className="h-3.5 w-3.5 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
@@ -1461,12 +1711,12 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 </>
               )}
 
-              {/* Default Value */}
-              {['text', 'date'].includes(selectedField.type) && (
+              {/* Default Value — only for text (date is auto-filled) */}
+              {selectedField.type === 'text' && (
                 <div>
                   <label className="block text-xs font-medium text-gray-700 mb-1">Default Value</label>
                   <input
-                    type={selectedField.type === 'date' ? 'date' : 'text'}
+                    type="text"
                     value={selectedField.defaultValue || ''}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'defaultValue', e.target.value)}
                     className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
@@ -1474,97 +1724,261 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 </div>
               )}
 
-              {/* Checkbox with Label Config */}
+              {/* Date mode dropdown (alignment + styling now comes from Text Styling section below) */}
+              {selectedField.type === 'date' && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Date Mode</label>
+                    <select
+                      data-testid="date-mode-select"
+                      value={selectedField.dateMode || 'auto'}
+                      onChange={(e) => updateFieldProperty(selectedField.id, 'dateMode', e.target.value)}
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    >
+                      <option value="auto">Auto-fill with today's date</option>
+                      <option value="manual">Allow manual selection</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Date Format</label>
+                    <select
+                      data-testid="date-format-select"
+                      value={selectedField.dateFormat || 'MM/DD/YYYY'}
+                      onChange={(e) => updateFieldProperty(selectedField.id, 'dateFormat', e.target.value)}
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    >
+                      <option value="MM/DD/YYYY">MM/DD/YYYY (e.g. 12/31/2026)</option>
+                      <option value="DD/MM/YYYY">DD/MM/YYYY (e.g. 31/12/2026)</option>
+                      <option value="YYYY-MM-DD">YYYY-MM-DD (e.g. 2026-12-31)</option>
+                      <option value="MMM DD, YYYY">MMM DD, YYYY (e.g. Dec 31, 2026)</option>
+                    </select>
+                    <p className="mt-1 text-[10px] text-gray-500 leading-snug">
+                      Applies everywhere this field appears: signing page, completed document, and the final PDF.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">Field Label (tooltip)</label>
+                    <input
+                      data-testid="date-label-input"
+                      type="text"
+                      value={selectedField.label || 'Date Signed'}
+                      onChange={(e) => updateFieldProperty(selectedField.id, 'label', e.target.value)}
+                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                      placeholder="Date Signed"
+                    />
+                    <p className="mt-1 text-[10px] text-gray-500 leading-snug">
+                      Shown as a tooltip/hover label — defaults to "Date Signed".
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Checkbox Config — Phase 71: label UI removed per product spec.
+                  `checkboxLabel` still persists silently on the field (existing
+                  templates retain their values and render back-compat). Only
+                  the "Default checked" toggle is author-editable now. */}
               {selectedField.type === 'checkbox' && (
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Checkbox Label</label>
-                  <input
-                    data-testid="checkbox-label-input"
-                    type="text"
-                    value={selectedField.checkboxLabel || ''}
-                    onChange={(e) => updateFieldProperty(selectedField.id, 'checkboxLabel', e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
-                    placeholder="Enter checkbox label..."
-                  />
-                  <div className="flex items-center gap-2 mt-2">
+                  <div className="flex items-center gap-2">
                     <input
+                      data-testid="checkbox-default-checked"
                       type="checkbox"
                       checked={selectedField.checked || false}
                       onChange={(e) => updateFieldProperty(selectedField.id, 'checked', e.target.checked)}
                       className="w-3.5 h-3.5 text-indigo-600 rounded"
                     />
-                    <span className="text-xs text-gray-500">Default checked</span>
+                    <span className="text-xs text-gray-700">Default checked</span>
                   </div>
                 </div>
               )}
 
               {/* Radio Group Config */}
               {selectedField.type === 'radio' && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Radio Options</label>
-                  <div className="space-y-1.5">
-                    {(selectedField.radioOptions || ['Option 1', 'Option 2']).map((opt, idx) => (
-                      <div key={idx} className="flex items-center gap-1.5">
-                        <input
-                          type="radio"
-                          name={`radio-preview-${selectedField.id}`}
-                          checked={selectedField.selectedOption === opt}
-                          onChange={() => updateFieldProperty(selectedField.id, 'selectedOption', opt)}
-                          className="w-3 h-3 text-indigo-600"
-                        />
-                        <input
-                          type="text"
-                          value={opt}
-                          onChange={(e) => {
-                            const newOptions = [...(selectedField.radioOptions || [])];
-                            newOptions[idx] = e.target.value;
-                            updateFieldProperty(selectedField.id, 'radioOptions', newOptions);
-                          }}
-                          className="flex-1 px-2 py-1 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-indigo-500"
-                        />
-                        {(selectedField.radioOptions || []).length > 2 && (
-                          <button
-                            onClick={() => {
-                              const newOptions = (selectedField.radioOptions || []).filter((_, i) => i !== idx);
+                Array.isArray(selectedField.radioOptions) && !selectedField.optionValue && !selectedField.option_value ? (
+                  // ═══ Legacy multi-option radio (backward-compat editor) ═══
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-medium text-gray-700">Radio Options (legacy)</label>
+                      <button
+                        onClick={() => {
+                          // Convert legacy → NEW groupName model. Creates one field per option.
+                          const group = `group_${Date.now()}`;
+                          updateFieldProperty(selectedField.id, 'radioOptions', undefined);
+                          updateFieldProperty(selectedField.id, 'selectedOption', undefined);
+                          updateFieldProperty(selectedField.id, 'radioLayout', undefined);
+                          updateFieldProperty(selectedField.id, 'groupName', group);
+                          updateFieldProperty(selectedField.id, 'optionLabel', (selectedField.radioOptions || ['Option 1'])[0]);
+                          updateFieldProperty(selectedField.id, 'optionValue', (selectedField.radioOptions || ['option_1'])[0].toLowerCase().replace(/\s+/g, '_'));
+                        }}
+                        className="text-[10px] text-indigo-600 hover:text-indigo-700 font-medium"
+                      >
+                        Simplify to group model
+                      </button>
+                    </div>
+                    <div className="space-y-1.5">
+                      {(selectedField.radioOptions || ['Option 1', 'Option 2']).map((opt, idx) => (
+                        <div key={idx} className="flex items-center gap-1.5">
+                          <input
+                            type="radio"
+                            name={`radio-preview-${selectedField.id}`}
+                            checked={selectedField.selectedOption === opt}
+                            onChange={() => updateFieldProperty(selectedField.id, 'selectedOption', opt)}
+                            className="w-3 h-3 text-indigo-600"
+                          />
+                          <input
+                            type="text"
+                            value={opt}
+                            onChange={(e) => {
+                              const newOptions = [...(selectedField.radioOptions || [])];
+                              newOptions[idx] = e.target.value;
                               updateFieldProperty(selectedField.id, 'radioOptions', newOptions);
                             }}
-                            className="text-gray-400 hover:text-red-500 p-0.5"
-                          >
-                            <X className="h-3 w-3" />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                  <button
-                    data-testid="add-radio-option-btn"
-                    onClick={() => {
-                      const newOptions = [...(selectedField.radioOptions || []), `Option ${(selectedField.radioOptions || []).length + 1}`];
-                      updateFieldProperty(selectedField.id, 'radioOptions', newOptions);
-                    }}
-                    className="mt-2 text-xs text-indigo-600 hover:text-indigo-700 font-medium"
-                  >
-                    + Add Option
-                  </button>
-                  <div className="mt-2">
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Layout</label>
-                    <div className="flex gap-1">
-                      {['vertical', 'horizontal'].map(layout => (
-                        <button
-                          key={layout}
-                          onClick={() => updateFieldProperty(selectedField.id, 'radioLayout', layout)}
-                          className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors capitalize ${
-                            (selectedField.radioLayout || 'vertical') === layout
-                              ? 'bg-indigo-600 text-white'
-                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                          }`}
-                        >
-                          {layout}
-                        </button>
+                            className="flex-1 px-2 py-1 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-indigo-500"
+                          />
+                          {(selectedField.radioOptions || []).length > 2 && (
+                            <button
+                              onClick={() => {
+                                const newOptions = (selectedField.radioOptions || []).filter((_, i) => i !== idx);
+                                updateFieldProperty(selectedField.id, 'radioOptions', newOptions);
+                              }}
+                              className="text-gray-400 hover:text-red-500 p-0.5"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          )}
+                        </div>
                       ))}
                     </div>
+                    <button
+                      data-testid="add-radio-option-btn"
+                      onClick={() => {
+                        const newOptions = [...(selectedField.radioOptions || []), `Option ${(selectedField.radioOptions || []).length + 1}`];
+                        updateFieldProperty(selectedField.id, 'radioOptions', newOptions);
+                      }}
+                      className="mt-2 text-xs text-indigo-600 hover:text-indigo-700 font-medium"
+                    >
+                      + Add Option
+                    </button>
+                    <div className="mt-2">
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Layout</label>
+                      <div className="flex gap-1">
+                        {['vertical', 'horizontal'].map(layout => (
+                          <button
+                            key={layout}
+                            onClick={() => updateFieldProperty(selectedField.id, 'radioLayout', layout)}
+                            className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors capitalize ${
+                              (selectedField.radioLayout || 'vertical') === layout
+                                ? 'bg-indigo-600 text-white'
+                                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                            }`}
+                          >
+                            {layout}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  // ═══ NEW groupName model (one option per field, linked via groupName) ═══
+                  <div className="space-y-2.5">
+                    <div className="p-2.5 bg-pink-50 border border-pink-200 rounded-md text-[11px] text-pink-800 leading-snug">
+                      <strong>Radio Group</strong> — all radio fields sharing the same <em>Group Name</em> behave as a single-select group. Drop another <em>Radio Group</em> field and set the same Group Name to add another option.
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700 mb-1">Group Name</label>
+                      <input
+                        type="text"
+                        data-testid="radio-group-name-input"
+                        value={selectedField.groupName || ''}
+                        onChange={(e) => updateFieldProperty(selectedField.id, 'groupName', e.target.value)}
+                        placeholder="e.g. preferred_contact"
+                        className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-indigo-500"
+                      />
+                      <p className="mt-0.5 text-[10px] text-gray-500">All radios with this group name will be single-select.</p>
+                    </div>
+                    {/* Phase 71: Option Label + Option Value inputs removed from
+                        UI per product spec. Values are auto-managed internally
+                        (see handleSelectedFieldRadio: any missing optionLabel/
+                        optionValue is seeded from the option index in the
+                        group). Existing templates keep their current values
+                        verbatim — no data loss. */}
+                    {/* Default selection — enforces single default per group */}
+                    <div className="pt-2 border-t border-gray-100 space-y-2">
+                      <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer" data-testid="radio-default-checked-wrap">
+                        <input
+                          type="checkbox"
+                          data-testid="radio-default-checked"
+                          checked={!!selectedField.defaultChecked}
+                          onChange={(e) => {
+                            const next = e.target.checked;
+                            // Phase 71: only ONE default per group (native radio UX).
+                            // When we set this option as default, clear the flag on
+                            // every sibling in the same groupName.
+                            const group = selectedField.groupName;
+                            setDroppedFields(prev => {
+                              const updated = prev.map(f => {
+                                if (f.id === selectedField.id) return { ...f, defaultChecked: next };
+                                if (next && group && f.type === 'radio' && f.groupName === group) {
+                                  return { ...f, defaultChecked: false };
+                                }
+                                return f;
+                              });
+                              droppedFieldsRef.current = updated;
+                              syncToParent(updated);
+                              return updated;
+                            });
+                          }}
+                          className="w-3.5 h-3.5 text-indigo-600 rounded"
+                        />
+                        Default-selected option
+                        <span className="text-[10px] text-gray-400">(signer can change)</span>
+                      </label>
+                      <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer" data-testid="radio-hide-label-wrap">
+                        <input
+                          type="checkbox"
+                          data-testid="radio-hide-label"
+                          checked={!!selectedField.hideLabelOnFinal}
+                          onChange={(e) => updateFieldProperty(selectedField.id, 'hideLabelOnFinal', e.target.checked)}
+                          className="w-3.5 h-3.5 text-indigo-600 rounded"
+                        />
+                        Hide option label on completed document
+                      </label>
+                    </div>
+                    <button
+                      data-testid="duplicate-radio-option-btn"
+                      onClick={() => {
+                        // Quick action: duplicate this field as a new option in the same group
+                        const sourceGroup = selectedField.groupName || `group_${Date.now()}`;
+                        const existingCount = (droppedFields || []).filter(f => f.type === 'radio' && f.groupName === sourceGroup).length;
+                        const newIdx = existingCount + 1;
+                        const newField = {
+                          ...selectedField,
+                          id: `radio_${Date.now()}`,
+                          name: `radio_${Date.now()}`,
+                          // This is a DIFFERENT option within the same group — give it a fresh
+                          // fieldKey so selections don't cross-sync via the value-linking system.
+                          fieldKey: `fk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+                          x: (selectedField.x || 0) + 0,
+                          y: (selectedField.y || 0) + (selectedField.height || 30) + 8,
+                          groupName: sourceGroup,
+                          optionLabel: `Option ${newIdx}`,
+                          optionValue: `option_${newIdx}`,
+                          // Phase 71: never inherit the source option's default
+                          // flag — ensures single-default invariant holds when
+                          // duplicating.
+                          defaultChecked: false,
+                        };
+                        const updated = [...droppedFields, newField];
+                        setDroppedFields(updated);
+                        setSelectedFieldId(newField.id);
+                        syncToParent(updated);
+                      }}
+                      className="w-full text-xs text-indigo-600 hover:text-indigo-700 font-medium py-1.5 border border-indigo-200 rounded hover:bg-indigo-50"
+                    >
+                      + Duplicate as another option in this group
+                    </button>
+                  </div>
+                )
               )}
 
               {/* Placeholder */}
@@ -1629,6 +2043,39 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 </div>
               )}
 
+              {/* Field Link — show when this field's fieldKey is shared by another field */}
+              {selectedField.type === 'text' && selectedField.fieldKey && (() => {
+                const linkedFields = (droppedFields || []).filter(
+                  f => f.id !== selectedField.id
+                    && f.type === 'text'
+                    && f.fieldKey
+                    && f.fieldKey === selectedField.fieldKey
+                );
+                if (linkedFields.length === 0) return null;
+                return (
+                  <div className="p-2.5 bg-indigo-50 border border-indigo-200 rounded-md" data-testid="field-link-panel">
+                    <div className="flex items-center gap-1.5 mb-1.5">
+                      <svg className="h-3.5 w-3.5 text-indigo-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                        <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                      </svg>
+                      <span className="text-xs font-semibold text-indigo-900">Linked field</span>
+                    </div>
+                    <p className="text-[11px] text-indigo-800 leading-snug mb-2">
+                      Typing in this field will auto-fill <strong>{linkedFields.length}</strong> other field{linkedFields.length === 1 ? '' : 's'} sharing the same binding key.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => updateFieldProperty(selectedField.id, 'fieldKey', `fk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)}
+                      className="w-full text-xs font-medium text-indigo-700 hover:text-indigo-800 bg-white border border-indigo-200 rounded py-1.5 hover:bg-indigo-50 transition-colors"
+                      data-testid="field-unlink-btn"
+                    >
+                      Unlink this field
+                    </button>
+                  </div>
+                );
+              })()}
+
               {/* Conditional Logic — for all field types */}
               {['checkbox', 'radio', 'text', 'date', 'signature', 'initials'].includes(selectedField.type) && (
                 <div className="border-t border-gray-100 pt-3 mt-2" data-testid="conditional-logic-section">
@@ -1675,20 +2122,26 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         </select>
                       )}
                       {selectedField.type === 'radio' && (
-                        <select
-                          value={rule.triggerValue || ''}
-                          onChange={(e) => {
-                            const newRules = [...(selectedField.conditionalRules || [])];
-                            newRules[rIdx] = { ...rule, triggerValue: e.target.value };
-                            updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
-                          }}
-                          className="w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5"
-                        >
-                          <option value="">Select option...</option>
-                          {(selectedField.radioOptions || []).map((opt, i) => (
-                            <option key={i} value={opt}>{opt}</option>
-                          ))}
-                        </select>
+                        Array.isArray(selectedField.radioOptions) && !selectedField.optionValue ? (
+                          <select
+                            value={rule.triggerValue || ''}
+                            onChange={(e) => {
+                              const newRules = [...(selectedField.conditionalRules || [])];
+                              newRules[rIdx] = { ...rule, triggerValue: e.target.value };
+                              updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
+                            }}
+                            className="w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5"
+                          >
+                            <option value="">Select option...</option>
+                            {(selectedField.radioOptions || []).map((opt, i) => (
+                              <option key={i} value={opt}>{opt}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          <div className="mb-1.5 px-2 py-1 text-[10px] bg-pink-50 border border-pink-200 rounded text-pink-800">
+                            When this option (<strong>{selectedField.optionLabel || '—'}</strong> = <code>{selectedField.optionValue || '—'}</code>) is selected
+                          </div>
+                        )
                       )}
                       {selectedField.type === 'text' && (
                         <div className="space-y-1.5 mb-1.5">
@@ -1782,8 +2235,15 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   <button
                     data-testid="add-condition-btn"
                     onClick={() => {
+                      const isNewRadio = selectedField.type === 'radio' && (selectedField.groupName || selectedField.optionValue) && !Array.isArray(selectedField.radioOptions);
                       const newRule = {
-                        triggerValue: selectedField.type === 'checkbox' ? true : ['signature', 'initials'].includes(selectedField.type) ? 'filled' : '',
+                        triggerValue: selectedField.type === 'checkbox'
+                          ? true
+                          : ['signature', 'initials'].includes(selectedField.type)
+                            ? 'filled'
+                            : isNewRadio
+                              ? (selectedField.optionValue || '')
+                              : '',
                         triggerCondition: ['text', 'date'].includes(selectedField.type) ? 'filled' : undefined,
                         action: 'show',
                         targetFieldId: '',

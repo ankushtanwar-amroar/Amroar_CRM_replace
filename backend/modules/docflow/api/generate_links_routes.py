@@ -201,6 +201,68 @@ def error_response(msg: str, errors: List[str] = None, code: int = 400):
     )
 
 
+def _auto_assign_unclaimed_fields(
+    recipients: List[Any],
+    template_field_ids: set,
+    log_prefix: str = "generate-links",
+    get_assigned=lambda r: r.assigned_components or [],
+    set_assigned=None,
+) -> None:
+    """
+    Auto-assignment rule: if a recipient's `assigned_components` list is empty/null,
+    assign ALL template field IDs not already claimed by another recipient.
+
+    Behaviour:
+    - First collect claimed IDs from recipients WITH non-empty assigned_components.
+    - Then for every recipient with empty assignments (processed in routing_order),
+      fill in the remaining (unclaimed) field IDs and mark them as claimed so
+      subsequent empty recipients don't duplicate.
+    - Signable types only (signature/initials/date/text/checkbox/radio/dropdown) —
+      merge and label fields are document-level and don't need per-recipient routing.
+    """
+    if not template_field_ids:
+        return
+
+    claimed = set()
+    for r in recipients:
+        existing = list(get_assigned(r) or [])
+        if existing:
+            claimed.update(existing)
+
+    # Sort by routing_order so the earliest wave gets the unclaimed pool first.
+    def _ro(r):
+        return getattr(r, "routing_order", None) or (r.get("routing_order", 1) if isinstance(r, dict) else 1)
+
+    sorted_recipients = sorted(recipients, key=_ro)
+    for r in sorted_recipients:
+        existing = list(get_assigned(r) or [])
+        if existing:
+            continue
+        unclaimed = [fid for fid in template_field_ids if fid not in claimed]
+        if not unclaimed:
+            # Nothing left to auto-fill — email still sends, signer sees read-only/hidden
+            # as per Phase 50 rules.
+            logger.info(
+                f"[{log_prefix}] auto-assign: recipient '{getattr(r, 'name', None) or (r.get('name') if isinstance(r, dict) else '')}' "
+                f"had empty assigned_components but no unclaimed fields remain"
+            )
+            continue
+        if set_assigned:
+            set_assigned(r, unclaimed)
+        else:
+            # Default writer for RecipientInput (pydantic): set attribute directly.
+            try:
+                r.assigned_components = unclaimed
+            except Exception:
+                if isinstance(r, dict):
+                    r["assigned_components"] = unclaimed
+        claimed.update(unclaimed)
+        logger.info(
+            f"[{log_prefix}] auto-assign: recipient '{getattr(r, 'name', None) or (r.get('name') if isinstance(r, dict) else '')}' "
+            f"had empty assigned_components → auto-assigned {len(unclaimed)} field(s)"
+        )
+
+
 @router.post("/generate-links")
 async def generate_links(
     req: GenerateLinksRequest,
@@ -253,6 +315,22 @@ async def generate_links(
                     errors.append(f"Recipient {i+1} ({r.name}): email is required for email delivery.")
 
         # ── 3. Validate assigned_components ──
+        # Auto-assign: if a recipient has no components selected, treat it as
+        # "all fields assigned to this recipient". This matches DocuSign default
+        # behaviour and guarantees email + signing UX never silently fail.
+        if req.recipients:
+            # Only fields that are signable (exclude merge/label — document-level)
+            NON_ASSIGNABLE_TYPES = {"merge", "label"}
+            assignable_ids = {
+                fp.get("id") for fp in (template.get("field_placements") or [])
+                if fp.get("id") and (fp.get("type") or "").lower() not in NON_ASSIGNABLE_TYPES
+            }
+            _auto_assign_unclaimed_fields(
+                recipients=req.recipients,
+                template_field_ids=assignable_ids,
+                log_prefix="generate-links",
+            )
+
         assigned_registry: Dict[str, str] = {}
         for i, r in enumerate(req.recipients or []):
             for comp_id in (r.assigned_components or []):
@@ -292,6 +370,15 @@ async def generate_links(
                 "assigned_field_ids": r.assigned_components or [],
                 "email_template_id": r.email_template_id,
             })
+
+        # Structured log: final recipient plan (post auto-assign)
+        for rd in recipients_data:
+            logger.info(
+                f"[generate-links] plan: recipient name='{rd['name']}' email='{rd['email']}' "
+                f"role={rd['role']} order={rd['routing_order']} "
+                f"assigned_fields={len(rd['assigned_field_ids'])} "
+                f"email_trigger={'yes' if (needs_email and rd['email']) else 'no'}"
+            )
 
         # For public_link only with no recipients, create a placeholder
         if not recipients_data and needs_public_link:
@@ -468,6 +555,40 @@ async def _handle_package_mode(
         if errors:
             return error_response("Package validation failed.", errors)
 
+        # Auto-assign: for each document, recipients with no entry in
+        # assigned_components_map get ALL that document's signable fields
+        # assigned to them (rule: empty ⇒ all). Prevents silent UX issues.
+        if req.documents and req.recipients:
+            # Build template_id → assignable field IDs map
+            doc_field_map: Dict[str, set] = {}
+            for doc in req.documents:
+                tpl = await db.docflow_templates.find_one(
+                    {"id": doc.template_id, "tenant_id": current_user.tenant_id},
+                    {"_id": 0, "field_placements": 1}
+                )
+                fps = (tpl or {}).get("field_placements") or []
+                NON_ASSIGNABLE_TYPES = {"merge", "label"}
+                doc_field_map[doc.template_id] = {
+                    fp.get("id") for fp in fps
+                    if fp.get("id") and (fp.get("type") or "").lower() not in NON_ASSIGNABLE_TYPES
+                }
+
+            # For each document, run auto-assign across recipients whose map
+            # entry for this template_id is empty/null.
+            for tid, field_ids in doc_field_map.items():
+                if not field_ids:
+                    continue
+                _auto_assign_unclaimed_fields(
+                    recipients=req.recipients,
+                    template_field_ids=field_ids,
+                    log_prefix=f"generate-links/package doc={tid}",
+                    get_assigned=lambda r, _t=tid: (r.assigned_components_map or {}).get(_t, []),
+                    set_assigned=lambda r, ids, _t=tid: (
+                        setattr(r, "assigned_components_map",
+                                {**(r.assigned_components_map or {}), _t: ids})
+                    ),
+                )
+
         # Parse expiry
         parsed_expires_at = None
         if req.expires_at:
@@ -486,6 +607,16 @@ async def _handle_package_mode(
                 "routing_order": r.routing_order,
                 "assigned_components": r.assigned_components_map or {},
             })
+
+        # Structured log: final package recipient plan (post auto-assign)
+        for pr in pkg_recipients:
+            fld_total = sum(len(v or []) for v in (pr.get("assigned_components") or {}).values())
+            logger.info(
+                f"[generate-links/package] plan: recipient name='{pr['name']}' email='{pr['email']}' "
+                f"role_type={pr['role_type']} order={pr['routing_order']} "
+                f"assigned_fields_total={fld_total} "
+                f"email_trigger={'yes' if (needs_email and pr['email']) else 'no'}"
+            )
 
         # Build document data
         pkg_documents = []

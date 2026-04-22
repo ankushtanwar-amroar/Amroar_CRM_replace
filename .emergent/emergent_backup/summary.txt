@@ -1,0 +1,130 @@
+<analysis>**original_problem_statement**: Implement DocFlow UX improvements, build a Public API for active template listing, fix critical routing/token mismatch bugs in the SIGN flow, and add Field-Level Assignment for Signers in the Template Editor. 
+PRODUCT REQUIREMENTS: DocFlow package feature must be functionally complete, stable, production-ready, allowing multi-signer workflows where each signer interacts only with assigned fields, and package status accurately advances through the routing engine.
+
+**User's preferred language**: English (INSTRUCT next agent to respond in English only)
+
+**what currently exists?**: The DocFlow Package feature is fully functional, stable, and demo-ready. It supports multi-document workflows with distinct roles (SIGN, VIEW_ONLY, APPROVE_REJECT), sequential/parallel/mixed wave routing, OTP session management, combined PDF outputs, and robust dual-write audit trails. The UI has been polished to replace raw IDs with human-readable names and indicate exact recipient statuses. Signers only see and interact with fields specifically assigned to them via the newly implemented field-level assignment system.
+
+**Last working item**: 
+    - Last item agent was working: Field-Level Assignment for Signers. Implemented UI in  to assign fields to specific recipients and enforced visibility/validation in  and  based on the  property.
+    - Status: COMPLETED
+    - Agent Testing Done: Y
+    - Which testing method agent to use? NA (Testing already done)
+    - User Testing Done: N
+
+**All Pending/In progress Issue list**: 
+None. All P0 and P1 issues identified in the recent system gap analysis have been successfully resolved and verified.
+
+**In progress Task List**:
+None.
+
+**Upcoming and Future Tasks**:
+    Upcoming Tasks:
+    - Secure the  endpoint (P1)
+    - Implement a background worker for the  queue (P1)
+    
+    Future Tasks:
+    - Email reminders for pending recipients (follow-up notifications) (P2)
+    - OTP caching / rate limiting (P2)
+    - Consolidate  vs  (P3)
+    - Redis caching, rich-text toolbar, Stripe Customer Portal integration (P3)
+
+**Completed work in this session**:
+- Email Template Rendering & OTP Sending Fixes (DONE)
+- Final UX Improvements in  (progress metrics, wait callouts, etc.) (DONE)
+- Replaced IDs with Template/Document Names in Documents Tab (DONE)
+- Public API:  for Active Templates (DONE)
+- Bridged  to  via a new  endpoint (DONE)
+- Fixed Token Mismatch in Open to Sign UI link (DONE)
+- Field-Level Assignment UI for Signers & Backend Validation (DONE)
+
+**Earlier issues found/mentioned but not fixed**:
+None
+
+**Known issue recurrence from previous fork**:
+None
+
+**Code Architecture**:
+Tree structure of the entire codebase (Focusing on touched modules):
+- Frontend:
+  - : Admin package details view.
+  - : Public OTP gate & workflow action viewer.
+  - : Dedicated document signing page.
+  - : Drag-and-drop template editor canvas.
+  - : Renders fields dynamically on PDF.
+- Backend:
+  - : Manages routing waves/status transitions.
+  - : Advanced signing validations & file generation.
+  - : Public OTP, verify, void, and action routes (including ).
+  - : Publicly exposed active template routes.
+
+**Key Technical Concepts**:
+React, FastAPI, MongoDB, PyPDF2/ReportLab, Sliding Expiry Session Management, Wave-based routing engine, Field-Level Placement & Assignment logic.
+
+**key DB schema**:
+  - : {status, routing_config, recipients (with ), documents}
+  - : {status, unsigned_pdf_url, signed_file_url, recipients}
+  - : {field_placements (now supports ), version, is_latest, status}
+  - : {package_id, document_id, event, timestamp, recipient_id}
+
+**changes in tech stack**:
+None
+
+**All files of reference**:
+-  (Updated to add  dropdown in property panel and color badges on canvas)
+-  (Updated to handle  disabled state logic)
+-  (Updated action buttons, removed broken link, handles complete state)
+-  (Updated to filter fields by  assignment)
+-  (Added  endpoint to notify routing engine)
+-  (Created for active templates listing)
+-  (Enforced signing logic strictly for assigned fields)
+-  (Ensured RECEIVE_COPY notification is triggered on completion)
+
+**Areas that need refactoring**:
+-  vs  (P3 technical debt - duplicate and overlapping responsibilities).
+
+**key api endpoints**:
+- 
+- 
+- 
+
+**Critical Info for New Agent**:
+- The  endpoint () is now the correct bridge that tells the package's  to advance the wave after a document is signed.
+- Package recipient tokens () and Document recipient tokens are strictly separate. The UI logic correctly relies on the package tokens for the overarching session, routing, and audit flow.
+- Field-level assignments rely on the  property in the  array. If a field is unassigned (None), it falls back to being visible/actionable by all for backward compatibility.
+
+**documents and test reports created in this job**:
+-  (Continuously updated)
+- 
+- 
+- 
+
+**Last 10 User Messages and any pending HUMAN messages**:
+- *User*: Confirmed plan to proceed with P0 task (verify email/OTP fix) -> P1 (UX polish).
+- *User*: Requested UI improvement to replace IDs with meaningful names in the Documents Tab.
+- *User*: Requested Public API for Active Template Listing ().
+- *User*: Asked for a Final Review & Gap Analysis of the DocFlow implementation to check for stability.
+- *User*: Ordered the fix of the two critical issues found during gap analysis (SIGN routing bug & Token mismatch).
+- *User*: Submitted a Critical Feature Gap request to implement Field-Level Assignment for Signers in the template builder.
+*(All requests successfully completed; no pending human messages).*
+
+**Project Health Check**:
+Healthy. All completed systems exhibit clean states, error-free API responses, and accurate UI feedback loops.
+
+**3rd Party Integrations**:
+- OpenAI GPT-4o — uses Emergent LLM Key
+- Stripe (Payments) — requires User API Key
+- Salesforce (OAuth/CRM Sync) — requires User API Key & Custom Domain config
+- SMTP (Email via SendGrid / Gmail Fallback) — pre-configured in .env
+
+**Testing status**:
+- Testing agent used after significant changes: YES (, ,  validated frontend and backend rigorously)
+- Troubleshoot agent used after agent stuck in loop: NO
+- Test files created: None
+- Known regressions: None
+
+**Credentials to test flow**:
+Check 
+
+**What agent forgot to execute**:
+Nothing. All tasks, features, and debugging checklists provided by the user were fully executed and tested.</analysis>

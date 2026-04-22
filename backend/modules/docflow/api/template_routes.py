@@ -778,9 +778,32 @@ async def validate_template(
     template_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    """Run comprehensive validation on a template"""
+    """Run comprehensive validation on a saved template (by ID)."""
     result = await validation_service.validate_template(
         template_id=template_id,
+        tenant_id=current_user.tenant_id
+    )
+    return result
+
+
+@router.post("/templates/validate-object")
+async def validate_template_object(
+    template_body: dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Run comprehensive validation on an in-memory template payload (unsaved or
+    pre-save). The frontend sends the current form state + field_placements.
+    This ensures the validation panel always mirrors backend logic as the
+    single source of truth for score + checks.
+    """
+    # Normalize: allow front-end to send field_placements separately
+    template_payload = dict(template_body or {})
+    if "field_placements" not in template_payload and "fieldPlacements" in template_payload:
+        template_payload["field_placements"] = template_payload.pop("fieldPlacements")
+
+    result = await validation_service.validate_template_obj(
+        template=template_payload,
         tenant_id=current_user.tenant_id
     )
     return result

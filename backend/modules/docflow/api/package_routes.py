@@ -170,6 +170,61 @@ async def send_package(
             "email_template_id": r.email_template_id,
         })
 
+    # Auto-assign: if a recipient has no assigned_components for a given document,
+    # default to ALL of that document's signable fields (minus any already claimed
+    # by other recipients). This matches DocuSign's "empty ⇒ all fields" behaviour
+    # and guarantees email + signing UX never silently fail.
+    import logging as _pkg_log
+    _pkg_logger = _pkg_log.getLogger(__name__)
+    try:
+        for pkg_doc in (package.get("documents") or []):
+            tid = pkg_doc.get("template_id")
+            if not tid:
+                continue
+            tpl = await db.docflow_templates.find_one(
+                {"id": tid, "tenant_id": current_user.tenant_id},
+                {"_id": 0, "field_placements": 1}
+            )
+            fps = (tpl or {}).get("field_placements") or []
+            assignable_ids = [
+                fp.get("id") for fp in fps
+                if fp.get("id") and (fp.get("type") or "").lower() not in ("merge", "label")
+            ]
+            if not assignable_ids:
+                continue
+            claimed = set()
+            for pr in pkg_recipients:
+                existing = (pr.get("assigned_components") or {}).get(tid) or []
+                if existing:
+                    claimed.update(existing)
+            # Fill empties in routing_order
+            for pr in sorted(pkg_recipients, key=lambda x: x.get("routing_order") or 1):
+                amap = pr.get("assigned_components") or {}
+                if amap.get(tid):
+                    continue
+                unclaimed = [fid for fid in assignable_ids if fid not in claimed]
+                if not unclaimed:
+                    continue
+                amap[tid] = unclaimed
+                pr["assigned_components"] = amap
+                claimed.update(unclaimed)
+                _pkg_logger.info(
+                    f"[package-send] auto-assign: recipient='{pr.get('name')}' "
+                    f"doc={tid} empty → auto-assigned {len(unclaimed)} field(s)"
+                )
+    except Exception as _auto_err:
+        _pkg_logger.warning(f"[package-send] auto-assign skipped due to error: {_auto_err}")
+
+    # Structured log: recipient plan
+    for pr in pkg_recipients:
+        fld_total = sum(len(v or []) for v in (pr.get("assigned_components") or {}).values())
+        _pkg_logger.info(
+            f"[package-send] plan: recipient='{pr['name']}' email='{pr['email']}' "
+            f"role_type={pr['role_type']} order={pr['routing_order']} "
+            f"assigned_fields_total={fld_total} "
+            f"email_trigger={'yes' if (needs_email and pr['email']) else 'no'}"
+        )
+
     routing_config = {"mode": "sequential", "on_reject": "void"}
     if req.routing_config:
         routing_config = {"mode": req.routing_config.mode, "on_reject": req.routing_config.on_reject}
@@ -318,9 +373,15 @@ async def get_package_run(
 
     # Enrich with documents
     doc_cursor = db.docflow_documents.find(
-        {"package_id": run_id}, {"_id": 0, "id": 1, "status": 1, "template_id": 1, "unsigned_pdf_url": 1, "signed_file_url": 1, "package_order": 1}
+        {"package_id": run_id}, {"_id": 0, "id": 1, "status": 1, "template_id": 1, "unsigned_pdf_url": 1, "signed_file_url": 1, "package_order": 1, "template_name": 1, "document_name": 1}
     ).sort("package_order", 1)
-    run["generated_documents"] = await doc_cursor.to_list(length=50)
+    gen_docs = await doc_cursor.to_list(length=50)
+    for doc in gen_docs:
+        if not doc.get("template_name") and doc.get("template_id"):
+            tmpl = await db.docflow_templates.find_one({"id": doc["template_id"]}, {"_id": 0, "name": 1})
+            if tmpl:
+                doc["template_name"] = tmpl.get("name")
+    run["generated_documents"] = gen_docs
 
     # Enrich with audit events
     audit_events = await audit_service.get_package_events(
@@ -538,6 +599,24 @@ async def void_blueprint_package(
             "voided_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }}
+    )
+
+    # Also void ALL active runs of this package
+    now_iso = datetime.now(timezone.utc).isoformat()
+    void_run_data = {
+        "status": "voided",
+        "void_reason": req.reason,
+        "voided_by": current_user.id,
+        "voided_at": now_iso,
+        "updated_at": now_iso,
+    }
+    await db.docflow_packages.update_many(
+        {"package_id": package_id, "_type": "run", "status": {"$nin": ["completed", "voided"]}},
+        {"$set": void_run_data}
+    )
+    await db.docflow_package_runs.update_many(
+        {"package_id": package_id, "status": {"$nin": ["completed", "voided"]}},
+        {"$set": void_run_data}
     )
 
     await audit_service.log_event(

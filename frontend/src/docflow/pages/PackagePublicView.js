@@ -9,6 +9,10 @@ import {
 import { toast } from 'react-hot-toast';
 import InteractiveDocumentViewer from '../components/InteractiveDocumentViewer';
 import SignatureModal from '../components/SignatureModal';
+import SignatureReusePrompt from '../components/SignatureReusePrompt';
+import ConsentScreen, { hasAcceptedConsent } from '../components/ConsentScreen';
+import ConfirmSubmitDialog from '../components/ConfirmSubmitDialog';
+import useSessionSignature from '../hooks/useSessionSignature';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || '';
 
@@ -60,6 +64,30 @@ const PackagePublicView = () => {
   const [currentSignFieldId, setCurrentSignFieldId] = useState(null);
   const [currentSignDocId, setCurrentSignDocId] = useState(null);
   const [isInitialsField, setIsInitialsField] = useState(false);
+  const [isPackageVoided, setIsPackageVoided] = useState(false);
+  const [packageVoidedMsg, setPackageVoidedMsg] = useState('');
+  // Reuse prompt state (shown when a cached signature exists for this session)
+  const [reusePrompt, setReusePrompt] = useState({ open: false, docId: null, fieldId: null, isInitials: false });
+  const pollingRef = useRef(null);
+
+  // Confirm-submit dialog state (replaces the legacy "I have reviewed…" checkbox).
+  // `action` encodes the pending action so we know whether the Confirm button
+  // should sign / approve / mark reviewed.
+  const [confirmDialog, setConfirmDialog] = useState({ open: false, action: null });
+
+  // Consent screen acceptance — declared at the top of the component (before any
+  // early returns) to satisfy the Rules of Hooks. The key that drives the effect
+  // below is derived later from the loaded package; until `pkg` arrives the key
+  // is null and the effect is a no-op.
+  const [pkgConsentAccepted, setPkgConsentAccepted] = useState(false);
+  const _pkgConsentKeyForEffect = (pkg?.active_recipient?.email || pkg?.active_recipient?.id)
+    ? `pkg-${token}::${(pkg.active_recipient.email || pkg.active_recipient.id).toLowerCase()}`
+    : null;
+  useEffect(() => {
+    if (_pkgConsentKeyForEffect) {
+      setPkgConsentAccepted(hasAcceptedConsent(_pkgConsentKeyForEffect));
+    }
+  }, [_pkgConsentKeyForEffect]);
 
   // Restore session from sessionStorage on mount
   useEffect(() => {
@@ -68,6 +96,27 @@ const PackagePublicView = () => {
   }, [token]);
 
   useEffect(() => { loadPackage(); }, [token, sessionToken]);
+
+  // Real-time status polling — detect void/delete
+  useEffect(() => {
+    if (!token || isPackageVoided) return;
+    const checkStatus = async () => {
+      try {
+        const resp = await fetch(`${API_URL}/api/docflow/packages/public/${token}/status`);
+        if (!resp.ok) {
+          if (resp.status === 404) { setIsPackageVoided(true); setPackageVoidedMsg('This package has been deleted and is no longer available.'); }
+          return;
+        }
+        const data = await resp.json();
+        if (data.status === 'voided' || data.status === 'not_found') {
+          setIsPackageVoided(true);
+          setPackageVoidedMsg(data.void_reason || 'This package has been voided and is no longer available.');
+        }
+      } catch { /* network error, will retry */ }
+    };
+    pollingRef.current = setInterval(checkStatus, 5000);
+    return () => { if (pollingRef.current) clearInterval(pollingRef.current); };
+  }, [token, isPackageVoided]);
 
   // Session expiry check
   useEffect(() => {
@@ -115,6 +164,19 @@ const PackagePublicView = () => {
       if (sessionToken) headers['X-Session-Token'] = sessionToken;
       const res = await fetch(`${API_URL}/api/docflow/packages/public/${token}`, { headers });
       if (res.status === 401) { handleSessionExpired(); return; }
+      if (res.status === 410) {
+        const err = await res.json().catch(() => ({}));
+        setIsPackageVoided(true);
+        setPackageVoidedMsg(err.detail || 'This package has been voided and is no longer available.');
+        setLoading(false);
+        return;
+      }
+      if (res.status === 404) {
+        setIsPackageVoided(true);
+        setPackageVoidedMsg('This package has been deleted and is no longer available.');
+        setLoading(false);
+        return;
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.detail || `Error ${res.status}`);
@@ -159,6 +221,9 @@ const PackagePublicView = () => {
   };
 
   // Load field placements for all documents' templates
+  // IMPORTANT: We annotate fields with `__isAssigned` metadata instead of filtering.
+  // The actual hide/read-only decision happens at render time based on live values,
+  // so pre-filled values from prior signers/system can still be shown read-only.
   const loadFieldPlacements = async (pkgData) => {
     setLoadingFields(true);
     const newMap = {};
@@ -173,26 +238,26 @@ const PackagePublicView = () => {
           const data = await res.json();
           let fields = data.field_placements || [];
 
-          // STRICT field filtering by assigned_components for this recipient
           const assignedFieldIds = assignedComponents[templateId] || [];
-          if (assignedFieldIds.length > 0) {
-            // Strict mode: show fields assigned to this recipient
-            // PLUS always show non-assignable fields (merge, checkbox, radio) — they're document-level, not signer-specific
-            const NON_ASSIGNABLE = ['merge', 'checkbox', 'radio', 'label'];
-            fields = fields.filter(f =>
-              assignedFieldIds.includes(f.id) || NON_ASSIGNABLE.includes(f.type)
-            );
-          } else {
-            // No assignment map exists for this template — check template-level assigned_to
-            // If ANY field has assigned_to set, filter strictly by recipient
-            const hasAnyAssignment = fields.some(f => f.assigned_to || f.recipient_id);
-            if (hasAnyAssignment) {
-              // Template has field-level assignments but this recipient has no assigned_components
-              // Only show fields that are unassigned (no assigned_to)
-              fields = fields.filter(f => !f.assigned_to && !f.recipient_id);
+          // Non-assignable types are always considered "assigned" (document-level elements)
+          const NON_ASSIGNABLE = ['merge', 'checkbox', 'radio', 'label'];
+          const hasAnyAssignment = fields.some(f => f.assigned_to || f.recipient_id);
+
+          fields = fields.map(f => {
+            let isAssigned;
+            if (assignedFieldIds.length > 0) {
+              // Explicit assigned_components map for this recipient+template
+              isAssigned = assignedFieldIds.includes(f.id) || NON_ASSIGNABLE.includes(f.type);
+            } else if (hasAnyAssignment) {
+              // Template has field-level assignments but no explicit map for this recipient
+              // → only fields without any assignment are considered "assigned to everyone"
+              isAssigned = (!f.assigned_to && !f.recipient_id) || NON_ASSIGNABLE.includes(f.type);
+            } else {
+              // Backward compat: no assignment data at all → all fields assigned to all
+              isAssigned = true;
             }
-            // If no fields have assigned_to at all, show everything (backward compat)
-          }
+            return { ...f, __isAssigned: isAssigned };
+          });
 
           newMap[templateId] = fields;
         }
@@ -205,10 +270,24 @@ const PackagePublicView = () => {
     setLoadingFields(false);
   };
 
-  // Get filtered fields for a specific document (mapped to its template)
+  // Get filtered fields for a specific document (mapped to its template).
+  // Applies per-recipient visibility based on assignment + current values:
+  //   - Assigned                → interactive
+  //   - Unassigned + has value  → read-only (visible, non-editable)
+  //   - Unassigned + no value   → hidden (skipped by viewer)
   const getFieldsForDoc = useCallback((doc) => {
-    return templateFieldsMap[doc.template_id] || [];
-  }, [templateFieldsMap]);
+    const baseFields = templateFieldsMap[doc.template_id] || [];
+    const values = docFieldValues[doc.document_id] || {};
+    return baseFields.map(f => {
+      if (f.__isAssigned) return f;
+      const hasValue = values[f.id] !== undefined && values[f.id] !== null && values[f.id] !== '';
+      if (hasValue) {
+        // Preserve any pre-existing readOnly/field_disabled semantics
+        return { ...f, readOnly: true, field_disabled: false, field_hidden: false };
+      }
+      return { ...f, field_hidden: true };
+    });
+  }, [templateFieldsMap, docFieldValues]);
 
   // Handle field value changes for a specific document
   const handleDocFieldsChange = useCallback((docId, values) => {
@@ -219,20 +298,70 @@ const PackagePublicView = () => {
   }, []);
 
   // Signature modal management
-  const openSignatureModal = useCallback((docId, fieldId, isInitials = false) => {
+  // Session signature cache — keyed per signer to prevent cross-user leakage.
+  const _sigSessionKey = (pkg?.active_recipient?.email || pkg?.active_recipient?.id)
+    ? `${token}::${(pkg.active_recipient.email || pkg.active_recipient.id).toLowerCase()}`
+    : null;
+  const { getSignature: getSessionSig, setSignature: setSessionSig, clearAll: clearSessionSig } = useSessionSignature(_sigSessionKey);
+
+  const openSignatureModalDirect = useCallback((docId, fieldId, isInitials = false) => {
     setCurrentSignDocId(docId);
     setCurrentSignFieldId(fieldId);
     setIsInitialsField(isInitials);
     setSignatureModalOpen(true);
   }, []);
 
-  const handleSignatureSave = useCallback((fieldId, sigData) => {
+  const openSignatureModal = useCallback((docId, fieldId, isInitials = false) => {
+    // If the field already has a value or no cached signature exists, open the full modal.
+    const existing = (docFieldValues[docId] || {})[fieldId];
+    if (existing) {
+      openSignatureModalDirect(docId, fieldId, isInitials);
+      return;
+    }
+    const cached = getSessionSig(isInitials ? 'initials' : 'signature');
+    if (cached) {
+      setReusePrompt({ open: true, docId, fieldId, isInitials });
+      return;
+    }
+    openSignatureModalDirect(docId, fieldId, isInitials);
+  }, [docFieldValues, getSessionSig, openSignatureModalDirect]);
+
+  const handleReuseAccept = useCallback(() => {
+    const { docId, fieldId, isInitials } = reusePrompt;
+    const cached = getSessionSig(isInitials ? 'initials' : 'signature');
+    if (cached && docId && fieldId) {
+      setDocFieldValues(prev => ({
+        ...prev,
+        [docId]: { ...(prev[docId] || {}), [fieldId]: cached },
+      }));
+    }
+    setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false });
+  }, [reusePrompt, getSessionSig]);
+
+  const handleReuseDrawNew = useCallback(() => {
+    const { docId, fieldId, isInitials } = reusePrompt;
+    setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false });
+    openSignatureModalDirect(docId, fieldId, isInitials);
+  }, [reusePrompt, openSignatureModalDirect]);
+
+  const handleSignatureSave = useCallback((fieldId, sigData, applyToFieldIds) => {
     if (!currentSignDocId) return;
-    setDocFieldValues(prev => ({
-      ...prev,
-      [currentSignDocId]: { ...(prev[currentSignDocId] || {}), [fieldId]: sigData },
-    }));
-  }, [currentSignDocId]);
+    // Cache the most recent signature/initials for reuse on subsequent fields.
+    setSessionSig(isInitialsField ? 'initials' : 'signature', sigData);
+
+    if (applyToFieldIds && applyToFieldIds.length > 1) {
+      setDocFieldValues(prev => {
+        const docVals = { ...(prev[currentSignDocId] || {}) };
+        applyToFieldIds.forEach(fid => { docVals[fid] = sigData; });
+        return { ...prev, [currentSignDocId]: docVals };
+      });
+    } else {
+      setDocFieldValues(prev => ({
+        ...prev,
+        [currentSignDocId]: { ...(prev[currentSignDocId] || {}), [fieldId]: sigData },
+      }));
+    }
+  }, [currentSignDocId, isInitialsField, setSessionSig]);
 
   // Check if all required signing fields are completed
   const allRequiredFieldsComplete = useMemo(() => {
@@ -246,6 +375,9 @@ const PackagePublicView = () => {
       const docValues = docFieldValues[doc.document_id] || {};
 
       for (const field of fields) {
+        // Skip fields not assigned to the current recipient — they're either
+        // hidden or shown read-only and should not block completion.
+        if (field.__isAssigned === false) continue;
         // Only validate required signing fields (fields are already strictly filtered)
         if (signingTypes.has(field.type) && field.required !== false) {
           const val = docValues[field.id];
@@ -257,7 +389,10 @@ const PackagePublicView = () => {
   }, [pkg, templateFieldsMap, docFieldValues]);
 
   const hasAnyFields = useMemo(() => {
-    return Object.values(templateFieldsMap).some(fields => fields.length > 0);
+    // True if the current recipient has ANY assigned (interactive) field across documents.
+    return Object.values(templateFieldsMap).some(fields =>
+      fields.some(f => f.__isAssigned !== false)
+    );
   }, [templateFieldsMap]);
 
   // ═══ OTP handlers ═══
@@ -369,6 +504,9 @@ const PackagePublicView = () => {
       setCompleted(true);
       setCompletedAction(data.action);
       toast.success(data.message || 'Package signed successfully');
+      // Session complete — clear cached signature so no other signer on the
+      // same device can accidentally reuse it.
+      clearSessionSig();
     } catch (e) {
       toast.error(e.message || 'Failed to sign package');
     } finally { setSubmitting(false); }
@@ -394,6 +532,21 @@ const PackagePublicView = () => {
   };
 
   // ── Loading ──
+  if (isPackageVoided) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4" data-testid="package-voided-overlay">
+        <div className="bg-white rounded-2xl shadow-lg max-w-md w-full p-8 text-center space-y-4">
+          <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center mx-auto">
+            <Ban className="h-8 w-8 text-red-600" />
+          </div>
+          <h2 className="text-xl font-bold text-gray-900">Package Unavailable</h2>
+          <p className="text-gray-600" data-testid="void-message-text">{packageVoidedMsg}</p>
+          <p className="text-sm text-gray-400">If you believe this is an error, please contact the sender.</p>
+        </div>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center" data-testid="package-public-loading">
@@ -567,27 +720,65 @@ const PackagePublicView = () => {
   // Whether to use the full signing experience (fields exist)
   const useFieldSigning = isSigner && hasAnyFields;
 
-  // Can sign = acknowledged + all required fields completed
+  // Can sign = all required fields completed (acknowledgement is now captured
+  // via the Confirm-Submit dialog at submission time, replacing the old checkbox).
   const canComplete = isSigner
-    ? (acknowledged && (useFieldSigning ? allRequiredFieldsComplete : true))
-    : acknowledged;
+    ? (useFieldSigning ? allRequiredFieldsComplete : true)
+    : true;
 
   // ── Main Package View ──
+  // Consent gate — required BEFORE interacting with the package documents.
+  // NOTE: `pkgConsentKey` is derived below from the active recipient, but the
+  // useState/useEffect for consent are declared near the top of the component
+  // (alongside other hooks) to satisfy React's Rules of Hooks — they MUST be
+  // called on every render regardless of the early-return loading/error gates.
+  const pkgConsentKey = (pkg?.active_recipient?.email || pkg?.active_recipient?.id)
+    ? `pkg-${token}::${(pkg.active_recipient.email || pkg.active_recipient.id).toLowerCase()}`
+    : null;
+  const pkgShouldShowConsent = !!pkgConsentKey && !pkgConsentAccepted && !isPackageVoided;
+
   return (
     <div className="min-h-screen bg-gray-50" data-testid="package-public-view">
+      <ConsentScreen
+        open={pkgShouldShowConsent}
+        sessionKey={pkgConsentKey}
+        documentName={package_name}
+        recipientName={pkg?.active_recipient?.name}
+        onContinue={() => setPkgConsentAccepted(true)}
+      />
       {/* Header */}
       <div className="bg-white border-b border-gray-200 px-4 py-5">
         <div className="max-w-3xl mx-auto">
-          <div className="flex items-center gap-3 mb-2">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100">
-              <Package className="h-5 w-5 text-indigo-600" />
+          <div className="flex items-start justify-between gap-3 mb-2">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 shrink-0">
+                <Package className="h-5 w-5 text-indigo-600" />
+              </div>
+              <div className="min-w-0">
+                <h1 className="text-lg font-bold text-gray-900 truncate" data-testid="public-package-name">{package_name}</h1>
+                <p className="text-xs text-gray-500">
+                  {documents.length} document{documents.length !== 1 ? 's' : ''} to {isViewOnly ? 'review' : isApprover ? 'approve' : 'sign'}
+                </p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-lg font-bold text-gray-900" data-testid="public-package-name">{package_name}</h1>
-              <p className="text-xs text-gray-500">
-                {documents.length} document{documents.length !== 1 ? 's' : ''} to {isViewOnly ? 'review' : isApprover ? 'approve' : 'sign'}
-              </p>
-            </div>
+            {/* Phase 74: Sender info chip — read-only header indicator */}
+            {pkg?.sender && (pkg.sender.name || pkg.sender.email) && (
+              <div
+                className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full text-xs text-slate-700 max-w-[280px] shrink-0"
+                data-testid="package-sender-chip"
+                title={`From: ${pkg.sender.name}${pkg.sender.email ? ` <${pkg.sender.email}>` : ''}`}
+              >
+                <span className="font-medium text-slate-500 uppercase tracking-wide">From</span>
+                <span className="truncate font-semibold text-slate-800" data-testid="sender-name">
+                  {pkg.sender.name || pkg.sender.email}
+                </span>
+                {pkg.sender.email && pkg.sender.name && (
+                  <span className="truncate text-slate-500 hidden sm:inline" data-testid="sender-email">
+                    ({pkg.sender.email})
+                  </span>
+                )}
+              </div>
+            )}
           </div>
           <div className="mt-3 p-3 bg-gray-50 rounded-lg">
             <div className="flex items-center justify-between">
@@ -653,7 +844,10 @@ const PackagePublicView = () => {
             const fields = getFieldsForDoc(doc);
             const isActive = activeDocIndex === i;
             const docValues = docFieldValues[doc.document_id] || {};
-            const activeFields = fields;
+            // Only fields interactive for the current recipient drive the progress UI.
+            // Hidden (unassigned + unfilled) and read-only (unassigned + filled) fields
+            // are excluded from the completion counter.
+            const activeFields = fields.filter(f => !f.field_hidden && !f.readOnly && f.__isAssigned !== false);
             const completedCount = activeFields.filter(f => {
               const v = docValues[f.id];
               return v !== undefined && v !== null && String(v).trim() !== '';
@@ -762,30 +956,22 @@ const PackagePublicView = () => {
           })}
         </div>
 
-        {/* VIEW_ONLY: Acknowledge + Mark Reviewed */}
+        {/* VIEW_ONLY: Mark Reviewed (confirmation via dialog) */}
         {isViewOnly && !recipientCompleted && (
           <div className="bg-white rounded-xl border border-gray-200 p-5" data-testid="review-action-section">
-            <h3 className="text-sm font-semibold text-gray-800 mb-4">Complete Your Review</h3>
+            <h3 className="text-sm font-semibold text-gray-800 mb-2">Complete Your Review</h3>
+            <p className="text-xs text-gray-500 mb-4">
+              When you're done reviewing {documents.length > 1 ? 'all documents in' : 'the document in'} this package, click below to confirm and submit your review.
+            </p>
             <button
-              onClick={() => setAcknowledged(!acknowledged)}
-              className="flex items-start gap-3 w-full text-left p-3 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors mb-4"
-              data-testid="acknowledge-checkbox"
-            >
-              {acknowledged ? <CheckSquare className="h-5 w-5 text-indigo-600 shrink-0 mt-0.5" /> : <Square className="h-5 w-5 text-gray-400 shrink-0 mt-0.5" />}
-              <div>
-                <p className="text-sm font-medium text-gray-800">I have reviewed {documents.length > 1 ? 'all documents in' : 'the document in'} this package</p>
-                <p className="text-xs text-gray-500 mt-0.5">By checking this box, you confirm that you have reviewed the contents.</p>
-              </div>
-            </button>
-            <button
-              onClick={() => handleAction('mark-reviewed', 'mark as reviewed')}
-              disabled={!acknowledged || submitting}
+              onClick={() => setConfirmDialog({ open: true, action: 'review' })}
+              disabled={submitting}
               className={`w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all ${
-                acknowledged && !submitting ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                !submitting ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}
               data-testid="mark-reviewed-btn"
             >
-              {submitting ? <><Loader2 className="h-4 w-4 animate-spin" /> Submitting...</> : <><CheckCircle2 className="h-4 w-4" /> Mark as Reviewed</>}
+              <CheckCircle2 className="h-4 w-4" /> Mark as Reviewed
             </button>
           </div>
         )}
@@ -838,29 +1024,14 @@ const PackagePublicView = () => {
             )}
 
             <button
-              onClick={() => setAcknowledged(!acknowledged)}
-              className="flex items-start gap-3 w-full text-left p-3 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors mb-4"
-              data-testid="sign-acknowledge-checkbox"
-            >
-              {acknowledged ? <CheckSquare className="h-5 w-5 text-indigo-600 shrink-0 mt-0.5" /> : <Square className="h-5 w-5 text-gray-400 shrink-0 mt-0.5" />}
-              <div>
-                <p className="text-sm font-medium text-gray-800">
-                  I have reviewed and agree to sign {documents.length > 1 ? 'all documents in' : 'the document in'} this package
-                </p>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  By checking this box, you confirm that you have read the contents and consent to signing electronically.
-                </p>
-              </div>
-            </button>
-            <button
-              onClick={useFieldSigning ? handleSignWithFields : () => handleAction('mark-signed', 'sign')}
+              onClick={() => setConfirmDialog({ open: true, action: 'sign' })}
               disabled={!canComplete || submitting}
               className={`w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all ${
                 canComplete && !submitting ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
               }`}
               data-testid="complete-signing-btn"
             >
-              {submitting ? <><Loader2 className="h-4 w-4 animate-spin" /> Signing...</> : <><FileText className="h-4 w-4" /> Complete Signing</>}
+              <FileText className="h-4 w-4" /> Complete Signing
             </button>
           </div>
         )}
@@ -878,38 +1049,27 @@ const PackagePublicView = () => {
               <>
                 <h3 className="text-sm font-semibold text-gray-800 mb-2">Your Decision</h3>
                 <p className="text-xs text-gray-500 mb-5">Review the signed documents above, then approve or reject this package.</p>
-                <button
-                  onClick={() => setAcknowledged(!acknowledged)}
-                  className="flex items-start gap-3 w-full text-left p-3 rounded-lg border border-gray-200 hover:bg-gray-50 transition-colors mb-5"
-                  data-testid="approve-acknowledge-checkbox"
-                >
-                  {acknowledged ? <CheckSquare className="h-5 w-5 text-indigo-600 shrink-0 mt-0.5" /> : <Square className="h-5 w-5 text-gray-400 shrink-0 mt-0.5" />}
-                  <div>
-                    <p className="text-sm font-medium text-gray-800">I have reviewed {documents.length > 1 ? 'all documents in' : 'the document in'} this package</p>
-                    <p className="text-xs text-gray-500 mt-0.5">You must review the documents before making a decision.</p>
-                  </div>
-                </button>
                 <div className="flex gap-3">
                   <button
                     onClick={() => setShowRejectDialog(true)}
-                    disabled={!acknowledged || submitting}
+                    disabled={submitting}
                     className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold border transition-all ${
-                      acknowledged && !submitting ? 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100' : 'border-gray-200 text-gray-400 cursor-not-allowed'
+                      !submitting ? 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100' : 'border-gray-200 text-gray-400 cursor-not-allowed'
                     }`}
                     data-testid="reject-btn"
                   >
                     <ThumbsDown className="h-4 w-4" /> Reject
                   </button>
                   <button
-                    onClick={() => handleAction('approve', 'approve')}
-                    disabled={!acknowledged || submitting}
+                    onClick={() => setConfirmDialog({ open: true, action: 'approve' })}
+                    disabled={submitting}
                     className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold transition-all ${
-                      acknowledged && !submitting ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      !submitting ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
                     }`}
                     data-testid="approve-btn"
                   >
-                    {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ThumbsUp className="h-4 w-4" />}
-                    {submitting ? 'Approving...' : 'Approve'}
+                    <ThumbsUp className="h-4 w-4" />
+                    Approve
                   </button>
                 </div>
               </>
@@ -936,6 +1096,84 @@ const PackagePublicView = () => {
         onSave={handleSignatureSave}
         fieldId={currentSignFieldId}
         isInitials={isInitialsField}
+        signerName={pkg?.active_recipient?.name || ''}
+        assignedSignatureFieldIds={(() => {
+          if (!currentSignDocId || !pkg) return [];
+          const fieldType = isInitialsField ? 'initials' : 'signature';
+          // Find the template_id for the current document
+          const doc = (pkg.documents || []).find(d => d.document_id === currentSignDocId);
+          const templateId = doc?.template_id;
+          // Try templateFieldsMap first, then fall back to all placements for matching template
+          let placements = [];
+          if (templateId && templateFieldsMap[templateId]) {
+            placements = templateFieldsMap[templateId];
+          } else {
+            // Fallback: search all templateFieldsMap entries
+            for (const [, fields] of Object.entries(templateFieldsMap)) {
+              const matchingField = fields.find(f => f.type === fieldType);
+              if (matchingField) { placements = fields; break; }
+            }
+          }
+          // Phase 64: strict recipient ownership — never fan out to disabled,
+          // hidden, or fields the active recipient doesn't own.
+          return placements
+            .filter(f => f.type === fieldType
+              && !f.field_disabled
+              && !f.field_hidden
+              && f.__isAssigned !== false)
+            .map(f => f.id);
+        })()}
+      />
+
+      {/* Signature reuse prompt — lightweight popover shown on subsequent signature fields */}
+      <SignatureReusePrompt
+        open={reusePrompt.open}
+        dataUrl={getSessionSig(reusePrompt.isInitials ? 'initials' : 'signature')}
+        type={reusePrompt.isInitials ? 'initials' : 'signature'}
+        onClose={() => setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false })}
+        onReuse={handleReuseAccept}
+        onDrawNew={handleReuseDrawNew}
+      />
+
+      {/* Final submit confirmation dialog — replaces the old acknowledgement checkbox */}
+      <ConfirmSubmitDialog
+        open={confirmDialog.open}
+        submitting={submitting}
+        title={
+          confirmDialog.action === 'sign'    ? 'Confirm signing' :
+          confirmDialog.action === 'approve' ? 'Confirm approval' :
+          confirmDialog.action === 'review'  ? 'Confirm review' :
+                                               'Are you sure?'
+        }
+        message={
+          confirmDialog.action === 'sign'
+            ? (useFieldSigning
+                ? 'You have completed all required fields. Are you sure you want to submit your signature?'
+                : `Are you sure you want to sign ${documents.length > 1 ? 'all documents in this package' : 'this document'}?`)
+            : confirmDialog.action === 'approve'
+              ? `Are you sure you want to approve ${documents.length > 1 ? 'this package' : 'this document'}? This action cannot be undone.`
+              : `Are you sure you have reviewed ${documents.length > 1 ? 'all documents in' : 'the document in'} this package and want to submit your review?`
+        }
+        confirmLabel={
+          confirmDialog.action === 'sign'    ? 'Confirm & Sign' :
+          confirmDialog.action === 'approve' ? 'Confirm & Approve' :
+                                               'Confirm & Submit'
+        }
+        confirmTone={confirmDialog.action === 'approve' ? 'emerald' : 'indigo'}
+        onCancel={() => setConfirmDialog({ open: false, action: null })}
+        onConfirm={async () => {
+          const action = confirmDialog.action;
+          // Close immediately so the spinner on the target button takes over.
+          setConfirmDialog({ open: false, action: null });
+          if (action === 'sign') {
+            if (useFieldSigning) await handleSignWithFields();
+            else await handleAction('mark-signed', 'sign');
+          } else if (action === 'approve') {
+            await handleAction('approve', 'approve');
+          } else if (action === 'review') {
+            await handleAction('mark-reviewed', 'mark as reviewed');
+          }
+        }}
       />
 
       {/* Reject Dialog */}

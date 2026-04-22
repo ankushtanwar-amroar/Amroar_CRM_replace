@@ -41,7 +41,10 @@ const TemplateEditor = () => {
   const [activeTab, setActiveTab] = useState('details');
   const [validationResult, setValidationResult] = useState(null);
   const [isValidated, setIsValidated] = useState(false);
+  // Non-zero value triggers ValidationPanel auto-run; zero = opened manually.
+  const [autoRunValidationToken, setAutoRunValidationToken] = useState(0);
   const [uploadedPdfFile, setUploadedPdfFile] = useState(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
   const [fieldPlacements, setFieldPlacements] = useState([]);
   const [crmObjects, setCrmObjects] = useState([]);
   const [crmFields, setCrmFields] = useState([]);
@@ -203,45 +206,46 @@ const TemplateEditor = () => {
   }, [templateId]);
 
   const loadTemplate = async () => {
+    // ── Session cache: hydrate instantly from prior visit (keyed by template id)
+    //    After hydrate we still refresh in background (see below) so data is never stale.
+    let hydratedFromCache = false;
     try {
-      setLoading(true);
+      const cacheRaw = sessionStorage.getItem(`docflow_tpl_cache:${templateId}`);
+      if (cacheRaw) {
+        const cached = JSON.parse(cacheRaw);
+        if (cached?.templateData) {
+          setTemplateData(cached.templateData);
+          if (cached.templateData.is_validated) setIsValidated(true);
+          if (Array.isArray(cached.fieldPlacements)) setFieldPlacements(cached.fieldPlacements);
+          if (Array.isArray(cached.contentBlocks)) setContentBlocks(cached.contentBlocks);
+          hydratedFromCache = true;
+          setLoading(false); // Paint shell immediately from cache
+        }
+      }
+    } catch (_cacheErr) { /* ignore cache errors */ }
+
+    try {
+      if (!hydratedFromCache) setLoading(true);
+
+      // ── Phase 1: critical path — template metadata only. Blocks shell render.
       const data = await docflowService.getTemplate(templateId);
       setTemplateData(data);
-      if (data.is_validated) {
-        setIsValidated(true);
-      }
+      if (data.is_validated) setIsValidated(true);
 
-      // Load version history
-      try {
-        const vData = await docflowService.getTemplateVersions(templateId);
-        setVersionHistory(vData.versions || []);
-      } catch (vErr) {
-        console.warn('Could not load version history:', vErr);
-      }
+      // Shell renders NOW. Everything below is background/non-blocking.
+      setLoading(false);
 
-      try {
-        const fieldData = await docflowService.getFieldPlacements(templateId);
-        if (fieldData.field_placements) {
-          setFieldPlacements(fieldData.field_placements);
-        }
-      } catch (fieldError) {
-        console.error('Error loading field placements:', fieldError);
-        if (data.field_placements) {
-          setFieldPlacements(data.field_placements);
-        }
-      }
-
-      if (data.file_url || data.s3_key || data.pdf_file_path || data.pdf_filename) {
+      // ── Phase 4 (start EARLY, runs in parallel with Phase 2): PDF blob.
+      //     Heaviest network operation; displays its own skeleton in the viewer area.
+      const pdfPromise = (async () => {
+        if (!(data.file_url || data.s3_key || data.pdf_file_path || data.pdf_filename)) return;
+        setPdfLoading(true);
         try {
-          let blob;
-          // For DOCX templates, check if there's a generated PDF version
           let pdfUrlToLoad = null;
           if (data.file_type === 'docx') {
-            // Try to get the generated PDF version
             if (data.uploaded_pdf_url) {
               pdfUrlToLoad = data.uploaded_pdf_url;
             } else {
-              // Generate PDF from DOCX if not yet converted
               try {
                 const genRes = await fetch(`${API_URL}/api/docflow/templates/${templateId}/generate-pdf`, {
                   method: 'POST',
@@ -256,67 +260,97 @@ const TemplateEditor = () => {
               }
             }
           }
-
-          // Load PDF file (original PDF or generated from DOCX)
           const urlToFetch = pdfUrlToLoad || data.file_url;
+          let blob;
           if (urlToFetch) {
-            const response = await fetch(urlToFetch, { method: "GET", mode: "cors" });
-            if (response.ok) {
-              blob = await response.blob();
-            }
+            const response = await fetch(urlToFetch, { method: 'GET', mode: 'cors' });
+            if (response.ok) blob = await response.blob();
           }
           if (!blob) {
             blob = await docflowService.getTemplatePDF(templateId);
           }
-          if (blob) {
-            // Set as PDF file for react-pdf rendering if it's a PDF or has a generated PDF
-            if (data.file_type === 'pdf' || pdfUrlToLoad) {
-              const file = new File([blob], data.original_filename || data.pdf_filename || 'template.pdf', {
-                type: 'application/pdf'
-              });
-              setUploadedPdfFile(file);
-            }
+          if (blob && (data.file_type === 'pdf' || pdfUrlToLoad)) {
+            const file = new File(
+              [blob],
+              data.original_filename || data.pdf_filename || 'template.pdf',
+              { type: 'application/pdf' }
+            );
+            setUploadedPdfFile(file);
           }
         } catch (pdfError) {
           console.error('Error loading template file:', pdfError);
-          toast.error('Failed to load template file from S3');
+          toast.error('Failed to load template file');
+        } finally {
+          setPdfLoading(false);
         }
-        await parseFields(templateId);
+      })();
+      // Fire but do NOT await — fails-safe via finally/catch inside.
+      void pdfPromise;
 
-        // Load CRM fields if object is connected
-        if (data.crm_connection?.object_name) {
-          loadCrmFields(data.crm_connection.object_name);
-        }
-      }
-
-      // Always try to load content blocks in edit mode — backend auto-converts from HTML/S3 if needed
-      try {
-        const blockData = await docflowService.getContentBlocks(templateId || data.id);
-        if (blockData.content_blocks?.length > 0) {
-          setContentBlocks(blockData.content_blocks);
-          // If html_content was cleared from DB (moved to S3), restore it for preview
-          if (!data.html_content && blockData.content_blocks.length > 0) {
-            const reconstructedHtml = blockData.content_blocks.map(b => {
-              if (b.type === 'heading') return `<h${b.level || 2}>${b.content || ''}</h${b.level || 2}>`;
-              if (b.type === 'paragraph') return `<p>${b.content || ''}</p>`;
-              if (b.type === 'list') {
-                const tag = b.ordered ? 'ol' : 'ul';
-                return `<${tag}>${(b.items || []).map(i => `<li>${i}</li>`).join('')}</${tag}>`;
+      // ── Phase 2: independent secondary data — run in parallel, don't await serially.
+      const [_versionsRes, fieldsRes, blocksRes] = await Promise.allSettled([
+        docflowService.getTemplateVersions(templateId)
+          .then(vData => { setVersionHistory(vData.versions || []); return vData; })
+          .catch(vErr => { console.warn('Could not load version history:', vErr); return null; }),
+        docflowService.getFieldPlacements(templateId)
+          .then(fieldData => {
+            const fps = fieldData?.field_placements || [];
+            if (fieldData?.field_placements) setFieldPlacements(fps);
+            return fps;
+          })
+          .catch(fieldError => {
+            console.warn('Field placements endpoint failed, using template payload:', fieldError);
+            const fps = data.field_placements || [];
+            if (fps.length) setFieldPlacements(fps);
+            return fps;
+          }),
+        docflowService.getContentBlocks(templateId || data.id)
+          .then(blockData => {
+            const blocks = blockData?.content_blocks || [];
+            if (blocks.length > 0) {
+              setContentBlocks(blocks);
+              if (!data.html_content) {
+                const reconstructedHtml = blocks.map(b => {
+                  if (b.type === 'heading') return `<h${b.level || 2}>${b.content || ''}</h${b.level || 2}>`;
+                  if (b.type === 'paragraph') return `<p>${b.content || ''}</p>`;
+                  if (b.type === 'list') {
+                    const tag = b.ordered ? 'ol' : 'ul';
+                    return `<${tag}>${(b.items || []).map(i => `<li>${i}</li>`).join('')}</${tag}>`;
+                  }
+                  if (b.type === 'table') return b.html || '';
+                  if (b.type === 'divider') return '<hr/>';
+                  return `<p>${b.content || ''}</p>`;
+                }).join('\n');
+                setTemplateData(prev => ({ ...prev, html_content: reconstructedHtml }));
               }
-              if (b.type === 'table') return b.html || '';
-              if (b.type === 'divider') return '<hr/>';
-              return `<p>${b.content || ''}</p>`;
-            }).join('\n');
-            setTemplateData(prev => ({ ...prev, html_content: reconstructedHtml }));
-          }
-        }
-      } catch (blockErr) {
-        console.warn('Content blocks not available:', blockErr);
+            }
+            return blocks;
+          })
+          .catch(blockErr => { console.warn('Content blocks not available:', blockErr); return []; }),
+        parseFields(templateId).catch(parseErr => { console.warn('parseFields failed:', parseErr); return null; }),
+      ]);
+
+      // ── Update session cache with freshly loaded data ─────────────────
+      try {
+        const cachedFieldPlacements = fieldsRes?.status === 'fulfilled' ? fieldsRes.value : [];
+        const cachedBlocks = blocksRes?.status === 'fulfilled' ? blocksRes.value : [];
+        sessionStorage.setItem(
+          `docflow_tpl_cache:${templateId}`,
+          JSON.stringify({
+            templateData: data,
+            fieldPlacements: cachedFieldPlacements,
+            contentBlocks: cachedBlocks,
+          })
+        );
+      } catch (_saveErr) { /* quota — ignore */ }
+
+      // ── Phase 3: CRM fields (depends on metadata) — also non-blocking.
+      if (data.crm_connection?.object_name) {
+        loadCrmFields(data.crm_connection.object_name).catch(() => {});
       }
     } catch (error) {
       console.error('Error loading template:', error);
       toast.error('Failed to load template');
-    } finally {
       setLoading(false);
     }
   };
@@ -531,6 +565,9 @@ const TemplateEditor = () => {
   const handleValidate = async () => {
     setValidating(true);
     setActiveTab('validation');
+    // Bump a token so the ValidationPanel knows to auto-run. Using a timestamp
+    // ensures every click fires a fresh run (vs opening the tab manually).
+    setAutoRunValidationToken(Date.now());
     setTimeout(() => setValidating(false), 500);
   };
 
@@ -848,6 +885,25 @@ const TemplateEditor = () => {
                 }
               } : undefined}
             />
+          ) : pdfLoading ? (
+            /* Skeleton shown while the PDF blob is still being downloaded in the background */
+            <div
+              className="bg-white rounded-lg border border-gray-200 p-6"
+              data-testid="visual-builder-skeleton"
+            >
+              <div className="flex items-center gap-3 text-indigo-600 mb-4">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span className="text-sm font-medium">Loading document…</span>
+              </div>
+              <div className="space-y-3">
+                <div className="h-[420px] w-full rounded-md bg-gradient-to-b from-gray-100 to-gray-50 border border-gray-200 animate-pulse" />
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="h-10 rounded-md bg-gray-100 animate-pulse" />
+                  <div className="h-10 rounded-md bg-gray-100 animate-pulse" />
+                  <div className="h-10 rounded-md bg-gray-100 animate-pulse" />
+                </div>
+              </div>
+            </div>
           ) : (
             <div className="bg-white rounded-lg border border-gray-200 p-12 text-center">
               <FileText className="h-16 w-16 text-gray-300 mx-auto mb-4" />
@@ -882,6 +938,7 @@ const TemplateEditor = () => {
             templateData={templateData}
             fieldPlacements={fieldPlacements}
             onValidationComplete={handleValidationComplete}
+            autoRunToken={autoRunValidationToken}
           />
         ) : activeTab === 'logs' && isEditMode ? (
           <TemplateLogsTab templateId={templateId} />

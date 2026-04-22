@@ -107,8 +107,7 @@ const DocFlowDashboard = () => {
       await loadTemplates(1);
 
       try {
-        const docData = await docflowService.getDocuments();
-        setDocuments(docData.documents || []);
+        await loadDocuments(1);
       } catch (e) { /* optional */ }
 
       try {
@@ -134,6 +133,23 @@ const DocFlowDashboard = () => {
       }));
     } catch (e) {
       console.error('Error loading emails:', e);
+    }
+  };
+
+  const loadDocuments = async (page = 1, status = docStatusFilter, search = searchQuery, sort = docSortOrder) => {
+    try {
+      const params = {
+        page,
+        limit: docPageSize,
+        status: status === 'all' ? undefined : status,
+        search: search || undefined,
+        sort_order: sort
+      };
+      const docData = await docflowService.getDocuments(params);
+      setDocuments(docData.documents || []);
+      setDocTotal(docData.total || 0);
+    } catch (e) {
+      console.error('Error loading documents:', e);
     }
   };
 
@@ -221,6 +237,23 @@ const DocFlowDashboard = () => {
     }
   }, [activeTab, templatePagination.page, searchQuery]);
 
+  useEffect(() => {
+    if (activeTab === 'documents') {
+      loadDocuments(docPage, docStatusFilter, searchQuery, docSortOrder);
+    }
+  }, [activeTab, docPage, docStatusFilter, searchQuery, docSortOrder]);
+
+  // Real-time status updates for Documents tab
+  useEffect(() => {
+    let interval = null;
+    if (activeTab === 'documents') {
+      interval = setInterval(() => {
+        loadDocuments(docPage, docStatusFilter, searchQuery, docSortOrder);
+      }, 10000); // Poll every 10 seconds
+    }
+    return () => { if (interval) clearInterval(interval); };
+  }, [activeTab, docPage, docStatusFilter, searchQuery, docSortOrder]);
+
   const handleDeleteTemplate = async (templateId) => {
     if (!window.confirm('Are you sure you want to delete this template?')) return;
     try {
@@ -268,36 +301,19 @@ const DocFlowDashboard = () => {
   }, [filteredTemplates, tplPage, tplPageSize]);
 
   const filteredDocuments = useMemo(() => {
-    let filtered = [...documents];
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      filtered = filtered.filter(d =>
-        (d.template_name || '').toLowerCase().includes(q) ||
-        (d.recipient_name || '').toLowerCase().includes(q) ||
-        (d.recipient_email || '').toLowerCase().includes(q)
-      );
-    }
-    // Status filter
-    if (docStatusFilter !== 'all') {
-      filtered = filtered.filter(d => d.status === docStatusFilter);
-    }
-    // Hide generator parents from doc listing (they are templates, not user-facing docs)
-    filtered = filtered.filter(d => !d.is_public_generator);
-    // Sort
-    if (docSortOrder === 'oldest') {
-      filtered.sort((a, b) => new Date(a.created_at || 0) - new Date(b.created_at || 0));
-    } else {
-      filtered.sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
-    }
-    return filtered;
-  }, [documents, searchQuery, docStatusFilter, docSortOrder]);
+    // With server-side filtering, we just return the documents
+    // But we might still want to filter out generator parents if the backend didn't
+    return documents.filter(d => !d.is_public_generator);
+  }, [documents]);
 
   const paginatedDocuments = useMemo(() => {
-    const start = (docPage - 1) * docPageSize;
-    return filteredDocuments.slice(start, start + docPageSize);
-  }, [filteredDocuments, docPage, docPageSize]);
+    // With server-side pagination, documents is already the current page
+    return filteredDocuments;
+  }, [filteredDocuments]);
 
-  const docTotalPages = Math.max(1, Math.ceil(filteredDocuments.length / docPageSize));
+  // Since we are doing server-side pagination, we need the total count from backend
+  const [docTotal, setDocTotal] = useState(0);
+  const docTotalPages = Math.max(1, Math.ceil(docTotal / docPageSize));
 
   // Package filtering + pagination
   const filteredPackages = useMemo(() => {
@@ -955,8 +971,8 @@ const DocFlowDashboard = () => {
         {activeTab === 'documents' && (
           <div>
             {/* Document Filters Bar */}
-            <div className="flex items-center justify-between mb-4 bg-white px-5 py-3 rounded-xl border border-gray-200" data-testid="doc-filters-bar">
-              <div className="flex items-center gap-2">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4 bg-white px-5 py-3 rounded-xl border border-gray-200" data-testid="doc-filters-bar">
+              <div className="flex flex-wrap items-center gap-2">
                 {['all', 'generated', 'sent', 'viewed', 'signed', 'completed'].map(status => (
                   <button
                     key={status}
@@ -973,6 +989,19 @@ const DocFlowDashboard = () => {
                 ))}
               </div>
               <div className="flex items-center gap-3">
+                {/* Documents Search */}
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => { setSearchQuery(e.target.value); setDocPage(1); }}
+                    placeholder="Search documents..."
+                    className="pl-9 pr-4 py-1.5 border border-gray-200 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none w-48 md:w-64"
+                    data-testid="doc-search-input"
+                  />
+                </div>
+
                 <button
                   onClick={() => setDocSortOrder(docSortOrder === 'newest' ? 'oldest' : 'newest')}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50"
@@ -1100,9 +1129,9 @@ const DocFlowDashboard = () => {
           {docTotalPages > 1 && (
             <div className="mt-4 flex items-center justify-between bg-white px-6 py-4 rounded-xl border border-gray-200" data-testid="doc-pagination">
               <div className="text-xs text-gray-500">
-                Showing <span className="font-semibold">{Math.min(filteredDocuments.length, (docPage - 1) * docPageSize + 1)}</span> to{' '}
-                <span className="font-semibold">{Math.min(docPage * docPageSize, filteredDocuments.length)}</span> of{' '}
-                <span className="font-semibold">{filteredDocuments.length}</span> documents
+                Showing <span className="font-semibold">{Math.min(docTotal, (docPage - 1) * docPageSize + 1)}</span> to{' '}
+                <span className="font-semibold">{Math.min(docPage * docPageSize, docTotal)}</span> of{' '}
+                <span className="font-semibold">{docTotal}</span> documents
               </div>
               <div className="flex gap-2">
                 <button

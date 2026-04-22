@@ -10,18 +10,18 @@ import { docflowService } from '../services/docflowService';
 import { Badge } from '../../components/ui/badge';
 
 const STATUS_CFG = {
-  draft:       { bg: 'bg-slate-100',   text: 'text-slate-700',   dot: 'bg-slate-400',   label: 'Draft' },
-  in_progress: { bg: 'bg-blue-100',    text: 'text-blue-700',    dot: 'bg-blue-500',    label: 'In Progress' },
-  completed:   { bg: 'bg-emerald-100', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Completed' },
-  voided:      { bg: 'bg-red-100',     text: 'text-red-700',     dot: 'bg-red-500',     label: 'Voided' },
-  expired:     { bg: 'bg-amber-100',   text: 'text-amber-700',   dot: 'bg-amber-500',   label: 'Expired' },
-  declined:    { bg: 'bg-red-100',     text: 'text-red-700',     dot: 'bg-red-500',     label: 'Declined' },
-  pending:     { bg: 'bg-amber-100',   text: 'text-amber-700',   dot: 'bg-amber-400',   label: 'Pending' },
-  signed:      { bg: 'bg-emerald-100', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Signed' },
+  draft: { bg: 'bg-slate-100', text: 'text-slate-700', dot: 'bg-slate-400', label: 'Draft' },
+  in_progress: { bg: 'bg-blue-100', text: 'text-blue-700', dot: 'bg-blue-500', label: 'In Progress' },
+  completed: { bg: 'bg-emerald-100', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Completed' },
+  voided: { bg: 'bg-red-100', text: 'text-red-700', dot: 'bg-red-500', label: 'Voided' },
+  expired: { bg: 'bg-amber-100', text: 'text-amber-700', dot: 'bg-amber-500', label: 'Expired' },
+  declined: { bg: 'bg-red-100', text: 'text-red-700', dot: 'bg-red-500', label: 'Declined' },
+  pending: { bg: 'bg-amber-100', text: 'text-amber-700', dot: 'bg-amber-400', label: 'Pending' },
+  signed: { bg: 'bg-emerald-100', text: 'text-emerald-700', dot: 'bg-emerald-500', label: 'Signed' },
   partially_signed: { bg: 'bg-yellow-100', text: 'text-yellow-700', dot: 'bg-yellow-500', label: 'Partially Signed' },
-  notified:    { bg: 'bg-blue-100',    text: 'text-blue-700',    dot: 'bg-blue-400',    label: 'Notified' },
-  viewed:      { bg: 'bg-indigo-100',  text: 'text-indigo-700',  dot: 'bg-indigo-400',  label: 'Viewed' },
-  failed:      { bg: 'bg-red-100',     text: 'text-red-700',     dot: 'bg-red-500',     label: 'Failed' },
+  notified: { bg: 'bg-blue-100', text: 'text-blue-700', dot: 'bg-blue-400', label: 'Notified' },
+  viewed: { bg: 'bg-indigo-100', text: 'text-indigo-700', dot: 'bg-indigo-400', label: 'Viewed' },
+  failed: { bg: 'bg-red-100', text: 'text-red-700', dot: 'bg-red-500', label: 'Failed' },
 };
 
 const fmt = (d) => d ? new Date(d).toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '—';
@@ -61,6 +61,8 @@ const RunDetailPage = () => {
   const [activeTab, setActiveTab] = useState('overview');
   const [refreshing, setRefreshing] = useState(false);
   const [downloadingCombined, setDownloadingCombined] = useState(false);
+  const [downloadingDoc, setDownloadingDoc] = useState(null);
+  const [templateNames, setTemplateNames] = useState({});
 
   useEffect(() => { loadRun(); }, [packageId, runId]);
 
@@ -78,6 +80,25 @@ const RunDetailPage = () => {
       setRefreshing(false);
     }
   };
+
+  useEffect(() => {
+    if (run && run.generated_documents) {
+      const missing = run.generated_documents.filter(d => !d.template_name && !d.document_name && d.template_id && !templateNames[d.template_id]);
+      if (missing.length > 0) {
+        missing.forEach(async (doc) => {
+          try {
+            const res = await docflowService.getTemplate(doc.template_id);
+            const tmpl = res.data || res;
+            if (tmpl && tmpl.name) {
+              setTemplateNames(prev => ({ ...prev, [doc.template_id]: tmpl.name }));
+            }
+          } catch (e) {
+            console.error('Failed to fetch template name', e);
+          }
+        });
+      }
+    }
+  }, [run]);
 
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
@@ -100,6 +121,24 @@ const RunDetailPage = () => {
       toast.error('Failed to download combined document');
     } finally {
       setDownloadingCombined(false);
+    }
+  };
+
+  const handleDownloadDoc = async (docId, version, docName) => {
+    try {
+      setDownloadingDoc(docId);
+      const resp = await docflowService.downloadDocument(docId, version);
+      const blob = new Blob([resp], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${docName}_${version}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error(`Failed to download ${version} document`);
+    } finally {
+      setDownloadingDoc(null);
     }
   };
 
@@ -135,6 +174,7 @@ const RunDetailPage = () => {
     { id: 'overview', label: 'Overview', icon: Eye },
     ...(isPublicLink ? [{ id: 'submissions', label: 'Submissions', icon: Users, count: run.submissions_total }] : []),
     ...((isEmail || isPublicRecipients) ? [{ id: 'recipients', label: 'Recipients', icon: Users, count: run.recipients_total }] : []),
+    { id: 'documents', label: 'Documents', icon: FileText, count: generatedDocs.length },
     { id: 'audit', label: 'Audit Trail', icon: Activity, count: auditEvents.length },
   ];
 
@@ -183,9 +223,8 @@ const RunDetailPage = () => {
           <nav className="flex gap-1 py-2">
             {TABS.map(t => (
               <button key={t.id} onClick={() => setActiveTab(t.id)}
-                className={`flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
-                  activeTab === t.id ? 'bg-indigo-50 text-indigo-700' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
-                }`} data-testid={`run-tab-${t.id}`}>
+                className={`flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-lg transition-colors ${activeTab === t.id ? 'bg-indigo-50 text-indigo-700' : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                  }`} data-testid={`run-tab-${t.id}`}>
                 <t.icon className="h-4 w-4" />{t.label}
                 {t.count > 0 && <span className="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded-full">{t.count}</span>}
               </button>
@@ -254,9 +293,8 @@ const RunDetailPage = () => {
                       return (
                         <div key={wave.order} data-testid={`wave-${wIdx}`}>
                           <div className="flex items-center justify-between mb-1">
-                            <span className={`flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
-                              total > 1 ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-600'
-                            }`}>
+                            <span className={`flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${total > 1 ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-600'
+                              }`}>
                               {total > 1 ? <Layers className="h-3 w-3" /> : <ArrowDownUp className="h-3 w-3" />}
                               Wave {wIdx + 1}{total > 1 && ` (${total} parallel)`}
                             </span>
@@ -370,9 +408,8 @@ const RunDetailPage = () => {
                 {waves.map((wave, wIdx) => (
                   <div key={wave.order} data-testid={`recipient-wave-${wIdx}`}>
                     <div className="flex items-center gap-2 mb-2">
-                      <span className={`flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${
-                        wave.members.length > 1 ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-600'
-                      }`}>
+                      <span className={`flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${wave.members.length > 1 ? 'bg-violet-100 text-violet-700' : 'bg-slate-100 text-slate-600'
+                        }`}>
                         {wave.members.length > 1 ? <Layers className="h-3 w-3" /> : <ArrowDownUp className="h-3 w-3" />}
                         Wave {wIdx + 1}
                         {wave.members.length > 1 && <span className="ml-1 opacity-70">({wave.members.length} parallel)</span>}
@@ -426,6 +463,72 @@ const RunDetailPage = () => {
                     )}
                   </div>
                 ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ Documents Tab ═══ */}
+        {activeTab === 'documents' && (
+          <div data-testid="run-documents">
+            <div className="mb-4">
+              <h2 className="text-lg font-bold text-gray-800">Package Documents</h2>
+              <p className="text-xs text-gray-500">{generatedDocs.length} total document{generatedDocs.length !== 1 ? 's' : ''}</p>
+            </div>
+
+            {generatedDocs.length === 0 ? (
+              <div className="bg-white rounded-xl border border-gray-200 p-12 text-center">
+                <FileText className="h-10 w-10 text-gray-300 mx-auto mb-3" />
+                <p className="text-sm font-medium text-gray-600">No documents found</p>
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl border border-gray-200 overflow-hidden" data-testid="documents-table">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-gray-100 bg-gray-50/80">
+                      <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Order</th>
+                      <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Document Name</th>
+                      <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Status</th>
+                      <th className="text-right px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {generatedDocs.map((doc, i) => {
+                      const isRunCompleted = run.status === 'completed';
+                      const docStatus = isRunCompleted || doc.status === 'completed' ? 'completed' : (doc.status || run.status || 'pending');
+                      const blueprintDoc = (run.documents || []).find(d => d.document_id === doc.id || d.template_id === doc.template_id);
+                      const docName = doc.template_name || doc.document_name || templateNames[doc.template_id] || blueprintDoc?.document_name || 'Untitled Document';
+                      const isDownloading = downloadingDoc === doc.id;
+
+                      return (
+                        <tr key={doc.id || i} className="border-b border-gray-50 hover:bg-gray-50/50" data-testid={`document-row-${i}`}>
+                          <td className="px-5 py-3.5 text-sm font-medium text-gray-800">#{doc.package_order || i + 1}</td>
+                          <td className="px-5 py-3.5">
+                            <span className="text-sm font-medium text-gray-800">{docName}</span>
+                            <p className="text-[10px] text-gray-400 font-mono mt-0.5">{doc.id}</p>
+                          </td>
+                          <td className="px-5 py-3.5"><StatusBadge status={docStatus} /></td>
+                          <td className="px-5 py-3.5 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              {doc.unsigned_pdf_url && (
+                                <a href={doc.unsigned_pdf_url} target="_blank" rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-700 bg-gray-100 font-medium rounded-lg hover:bg-gray-200 transition-colors" data-testid={`download-original-${i}`}>
+                                  <Download className="h-3 w-3" /> Original
+                                </a>
+                              )}
+                              {docStatus === 'completed' && (
+                                <button onClick={() => handleDownloadDoc(doc.id, 'signed', docName)} disabled={isDownloading}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 font-medium rounded-lg hover:bg-emerald-100 transition-colors disabled:opacity-50" data-testid={`download-signed-${i}`}>
+                                  {isDownloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />} Signed
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             )}
           </div>
@@ -495,9 +598,8 @@ const RunDetailPage = () => {
                         const actorEmail = meta.signer_email || meta.email || meta.reviewer_email;
                         return (
                           <div key={evt.id || i} className="relative flex gap-4 py-3" data-testid={`audit-evt-${i}`}>
-                            <div className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
-                              isGood ? 'bg-emerald-500' : isBad ? 'bg-red-500' : isSend ? 'bg-indigo-500' : 'bg-gray-300'
-                            } ${isLast ? 'ring-2 ring-offset-2 ring-indigo-200' : ''}`}>
+                            <div className={`relative z-10 flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${isGood ? 'bg-emerald-500' : isBad ? 'bg-red-500' : isSend ? 'bg-indigo-500' : 'bg-gray-300'
+                              } ${isLast ? 'ring-2 ring-offset-2 ring-indigo-200' : ''}`}>
                               <Activity className="h-3.5 w-3.5 text-white" />
                             </div>
                             <div className="flex-1 min-w-0">

@@ -349,25 +349,82 @@ async def submit_public_link(
                         if isinstance(field_value, str) and field_value.startswith("data:image"):
                             b64_data = field_value.split(",", 1)[1]
                             img_bytes = base64.b64decode(b64_data)
-                            img_rect = fitz.Rect(x, y, x + w, y + h)
-                            page.insert_image(img_rect, stream=img_bytes)
+                            # Aspect-fit + align inside the author's box (Phase 56).
+                            try:
+                                pm = fitz.Pixmap(img_bytes)
+                                img_w, img_h = pm.width, pm.height
+                                pm = None
+                            except Exception:
+                                img_w = img_h = 0
+                            align = (field.get("style") or {}).get("textAlign") or "center"
+                            if img_w > 0 and img_h > 0:
+                                aspect = img_w / img_h
+                                fit_w, fit_h = h * aspect, h
+                                if fit_w > w:
+                                    fit_w, fit_h = w, w / aspect
+                            else:
+                                fit_w, fit_h = w, h
+                            if align == "left":
+                                sub_x = x
+                            elif align == "right":
+                                sub_x = x + (w - fit_w)
+                            else:
+                                sub_x = x + (w - fit_w) / 2
+                            sub_y = y + (h - fit_h) / 2
+                            page.insert_image(fitz.Rect(sub_x, sub_y, sub_x + fit_w, sub_y + fit_h), stream=img_bytes)
                     except Exception as e:
                         logger.warning(f"Failed to embed {field_type} for field {field_id}: {e}")
 
                 elif field_type in ("text", "date") and field_value:
                     try:
-                        font_size = float(field.get("style", {}).get("fontSize", 10) or 10) * scale
-                        font_size = max(6, min(font_size, 24))
-                        text_point = fitz.Point(x + 2 * scale, y + h - 4 * scale)
-                        page.insert_text(text_point, str(field_value), fontsize=font_size, color=(0, 0, 0))
+                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
+                        font_size = base_fs * scale
+                        height_cap = max(6, (h - 4 * scale) * 0.70)
+                        width_cap  = max(6, w / 3)
+                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        text_str = str(field_value)
+                        align = (field.get("style") or {}).get("textAlign") or "left"
+                        try:
+                            text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
+                        except Exception:
+                            text_w = 0
+                        if align == "center":
+                            tx = x + max(0, (w - text_w) / 2)
+                        elif align == "right":
+                            tx = x + max(0, w - text_w - 2 * scale)
+                        else:
+                            tx = x + 2 * scale
+                        page.insert_text(fitz.Point(tx, y + h - 4 * scale), text_str, fontsize=font_size, color=(0, 0, 0))
                     except Exception as e:
                         logger.warning(f"Failed to embed text for field {field_id}: {e}")
+
+                elif field_type == "radio":
+                    try:
+                        group = field.get("groupName") or field.get("group_name")
+                        option_value = field.get("optionValue") or field.get("option_value") or field_id
+                        selected_val = field_data_for_doc.get(group) if group else None
+                        if selected_val is None:
+                            selected_val = field_data_for_doc.get(field_id)
+                        if selected_val != option_value:
+                            continue
+                        radius = min(7 * scale, (h / 2) - 2 * scale)
+                        # Phase 73: Center the radio circle horizontally
+                        # within the field bounding box (matches signing view).
+                        cx = x + w / 2
+                        cy = y + h / 2
+                        page.draw_circle(fitz.Point(cx, cy), radius, color=(0, 0, 0), width=1 * scale)
+                        page.draw_circle(fitz.Point(cx, cy), radius * 0.55, color=(0, 0, 0), fill=(0, 0, 0), width=0)
+                        # Phase 56: option labels never drawn in final PDF.
+                    except Exception as e:
+                        logger.warning(f"Failed to embed radio field {field_id}: {e}")
 
                 elif field_type == "checkbox":
                     try:
                         is_checked = field_value in (True, "true", "True")
                         box_size = min(14 * scale, h - 4 * scale)
-                        bx = x + 2 * scale
+                        # Phase 73: Center the checkbox horizontally within the
+                        # field bounding box (matches signing view's justify-center).
+                        bx = x + (w - box_size) / 2
                         by = y + (h - box_size) / 2
                         box_rect = fitz.Rect(bx, by, bx + box_size, by + box_size)
                         page.draw_rect(box_rect, color=(0, 0, 0), width=1)

@@ -124,15 +124,17 @@ class PDFOverlayService:
                 y_pdf = page_height - y_pixel - height
 
                 if field_type == 'signature':
-                    self._draw_signature_field(c, x, y_pdf, width, height, field_id, field_values)
+                    self._draw_signature_field(c, x, y_pdf, width, height, field_id, field_values, field)
                 elif field_type == 'text':
                     self._draw_text_field(c, x, y_pdf, width, height, field_id, field_values, field)
                 elif field_type == 'date':
-                    self._draw_date_field(c, x, y_pdf, width, height, field_id, field_values)
+                    self._draw_date_field(c, x, y_pdf, width, height, field_id, field_values, field)
                 elif field_type == 'checkbox':
-                    self._draw_checkbox_field(c, x, y_pdf, width, height, field_id, field_values)
+                    self._draw_checkbox_field(c, x, y_pdf, width, height, field_id, field_values, field)
+                elif field_type == 'radio':
+                    self._draw_radio_field(c, x, y_pdf, width, height, field, field_values)
                 elif field_type == 'initials':
-                    self._draw_initials_field(c, x, y_pdf, width, height, field_id, field_values)
+                    self._draw_initials_field(c, x, y_pdf, width, height, field_id, field_values, field)
                 elif field_type == 'merge':
                     self._draw_merge_field(c, x, y_pdf, width, height, field, field_values)
                 elif field_type == 'label':
@@ -147,26 +149,50 @@ class PDFOverlayService:
             return None
     
     def _draw_signature_field(self, c: canvas.Canvas, x: float, y: float, width: float,
-                            height: float, field_id: str, field_values: Dict[str, Any]):
-        """Draw signature image on PDF"""
+                            height: float, field_id: str, field_values: Dict[str, Any],
+                            field: Optional[Dict[str, Any]] = None):
+        """Draw signature image on PDF with aspect-fit + alignment (Phase 58)."""
         signature_data = field_values.get(field_id)
         if not signature_data:
             return
 
         if isinstance(signature_data, str) and 'data:image' in signature_data:
             try:
-                # Extract base64 data
                 base64_data = signature_data.split(',')[1] if ',' in signature_data else signature_data
                 img_data = base64.b64decode(base64_data)
-
-                # Create image reader
+                
+                # Phase 3: Remove white background for transparency
+                img_data = self._make_transparent(img_data)
+                
                 img_reader = ImageReader(io.BytesIO(img_data))
 
-                # Draw signature
-                c.drawImage(img_reader, x, y, width=width, height=height,
-                          preserveAspectRatio=True, mask='auto')
+                # Determine aspect ratio from the actual image so we can fit
+                # without distortion AND respect field.style.textAlign.
+                try:
+                    iw, ih = img_reader.getSize()
+                except Exception:
+                    iw, ih = 0, 0
 
-                logger.info(f"Drew signature at ({x}, {y})")
+                align = ((field or {}).get('style') or {}).get('textAlign') or 'center'
+                if iw > 0 and ih > 0:
+                    aspect = iw / ih
+                    fit_w, fit_h = height * aspect, height
+                    if fit_w > width:
+                        fit_w, fit_h = width, width / aspect
+                else:
+                    fit_w, fit_h = width, height
+
+                if align == 'left':
+                    sub_x = x
+                elif align == 'right':
+                    sub_x = x + (width - fit_w)
+                else:
+                    sub_x = x + (width - fit_w) / 2
+                sub_y = y + (height - fit_h) / 2
+
+                c.drawImage(img_reader, sub_x, sub_y, width=fit_w, height=fit_h, mask='auto')
+
+                logger.info(f"Drew signature at ({sub_x}, {sub_y}) size={fit_w}x{fit_h} align={align}")
             except Exception as e:
                 logger.error(f"Error drawing signature: {e}")
     
@@ -295,67 +321,158 @@ class PDFOverlayService:
             logger.error(f"Error drawing text field: {e}")
     
     def _draw_date_field(self, c: canvas.Canvas, x: float, y: float, width: float,
-                        height: float, field_id: str, field_values: Dict[str, Any]):
-        """Draw date field value on PDF"""
+                        height: float, field_id: str, field_values: Dict[str, Any],
+                        field: Optional[Dict[str, Any]] = None):
+        """Draw date field value on PDF — honors field.dateFormat + field.style.textAlign (Phase 58)."""
         if not field_values or field_id not in field_values:
             return
-        
+
         value = str(field_values[field_id])
         if not value:
             return
-        
+
         try:
-            # Format date if needed
             from datetime import datetime
-            try:
-                dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                value = dt.strftime('%Y-%m-%d')
-            except Exception:
-                pass
-            
-            # Set font
-            c.setFont("Helvetica", 10)
-            c.setFillColorRGB(0, 0, 0)
-            
-            # Draw date
-            text_y = y + (height / 2) - 3
-            c.drawString(x + 5, text_y, value)
-            
-            logger.info(f"Drew date field '{value}' at ({x}, {y})")
+
+            fld = field or {}
+            date_fmt = fld.get('dateFormat') or 'MM/DD/YYYY'
+            # Reformat the stored value to the field's chosen format.
+            parsed = None
+            for input_fmt in ("%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%b %d, %Y"):
+                try:
+                    parsed = datetime.strptime(value[:20].strip(), input_fmt)
+                    break
+                except Exception:
+                    continue
+            if parsed is None:
+                try:
+                    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                except Exception:
+                    parsed = None
+
+            if parsed is not None:
+                if date_fmt == 'DD/MM/YYYY':
+                    value = parsed.strftime('%d/%m/%Y')
+                elif date_fmt == 'YYYY-MM-DD':
+                    value = parsed.strftime('%Y-%m-%d')
+                elif date_fmt == 'MMM DD, YYYY':
+                    value = parsed.strftime('%b %d, %Y')
+                else:  # MM/DD/YYYY — default
+                    value = parsed.strftime('%m/%d/%Y')
+
+            # Use the shared styled-text renderer so alignment + font work.
+            if fld.get('style'):
+                self._draw_text_with_style(c, x, y, width, height, value, fld)
+            else:
+                c.setFont("Helvetica", 10)
+                c.setFillColorRGB(0, 0, 0)
+                c.drawString(x + 5, y + (height / 2) - 3, value)
+
+            logger.info(f"Drew date field '{value}' at ({x}, {y}) fmt={date_fmt}")
         except Exception as e:
             logger.error(f"Error drawing date field: {e}")
     
     def _draw_checkbox_field(self, c: canvas.Canvas, x: float, y: float, width: float,
-                            height: float, field_id: str, field_values: Dict[str, Any]):
-        """Draw checkbox on PDF"""
-        if not field_values or field_id not in field_values:
-            return
-        
-        is_checked = field_values[field_id] in [True, 'true', '1', 'yes', 'checked']
-        
-        if is_checked:
-            try:
-                # Draw checkbox border
-                c.setStrokeColorRGB(0, 0, 0)
-                c.setLineWidth(1)
-                box_size = min(width, height) - 4
-                box_x = x + 2
-                box_y = y + 2
-                c.rect(box_x, box_y, box_size, box_size)
-                
-                # Draw checkmark
+                            height: float, field_id: str, field_values: Dict[str, Any],
+                            field: Optional[Dict[str, Any]] = None):
+        """Draw checkbox — box always visible; check mark only when checked.
+
+        Phase 62 (DocuSign-style): the label text (field.checkboxLabel) is
+        NEVER drawn in the final PDF. It lives in the field definition for
+        backend/reference purposes only.
+        """
+        field = field or {}
+        is_checked = (field_values or {}).get(field_id) in [True, 'true', '1', 'yes', 'checked']
+
+        try:
+            box_size = min(height - 4, 14)
+            # Phase 73: Center the checkbox horizontally within the field
+            # bounding box (matches signing view's justify-center).
+            box_x = x + (width - box_size) / 2
+            box_y = y + (height - box_size) / 2
+
+            # Always draw the box outline (visibility)
+            c.setStrokeColorRGB(0, 0, 0)
+            c.setLineWidth(1.2)
+            c.rect(box_x, box_y, box_size, box_size)
+
+            if is_checked:
                 c.setStrokeColorRGB(0, 0, 0)
                 c.setLineWidth(2)
                 c.line(box_x + 3, box_y + box_size/2, box_x + box_size/2, box_y + 3)
                 c.line(box_x + box_size/2, box_y + 3, box_x + box_size - 3, box_y + box_size - 3)
-                
-                logger.info(f"Drew checkbox at ({x}, {y})")
-            except Exception as e:
-                logger.error(f"Error drawing checkbox: {e}")
+
+            logger.info(f"Drew checkbox (checked={is_checked}) at ({x}, {y})")
+        except Exception as e:
+            logger.error(f"Error drawing checkbox: {e}")
+
+    def _draw_radio_field(self, c: canvas.Canvas, x: float, y: float, width: float,
+                         height: float, field: Dict[str, Any],
+                         field_values: Dict[str, Any]):
+        """
+        Draw radio field. Supports TWO models:
+          1) NEW single-option-per-field: { groupName, optionValue, optionLabel }
+             — draws ONE circle; filled when field_values[groupName] == optionValue.
+          2) LEGACY multi-option: { radioOptions: [...], selectedOption } — draws all options.
+        """
+        try:
+            field_id = field.get('id') or field.get('name', '')
+            options_legacy = field.get('radioOptions') or []
+            option_value_new = field.get('optionValue') or field.get('option_value')
+            is_legacy = bool(options_legacy) and not option_value_new
+
+            c.setStrokeColorRGB(0, 0, 0)
+            c.setFillColorRGB(0, 0, 0)
+            c.setLineWidth(1)
+
+            if is_legacy:
+                selected = str((field_values or {}).get(field_id) or field.get('selectedOption') or '')
+                # Phase 58: Only draw the SELECTED option — no labels, no unchecked circles.
+                is_vertical = (field.get('radioLayout') or 'vertical') == 'vertical'
+                size = 8
+                opt_x = x + 2
+                opt_y = y + height - 10
+                for opt in options_legacy:
+                    if str(opt) != selected:
+                        if is_vertical:
+                            opt_y -= 14
+                        else:
+                            opt_x += 70
+                        continue
+                    cx = opt_x + size / 2
+                    cy = opt_y - size / 2
+                    c.circle(cx, cy, size / 2, stroke=1, fill=0)
+                    c.circle(cx, cy, (size / 2) - 2, stroke=0, fill=1)
+                    # Label intentionally NOT drawn.
+                    break
+            else:
+                group = field.get('groupName') or field.get('group_name') or f'__single_{field_id}'
+                option_value = option_value_new or field_id
+                group_val = (field_values or {}).get(group)
+                checked = str(group_val) == str(option_value)
+
+                # Phase 58: Draw the circle ONLY when selected. Unselected radio
+                # fields are omitted entirely from the final PDF, matching the
+                # DocuSign-style "selected-only" output of the other PDF paths.
+                if not checked:
+                    return
+                size = min(height - 4, 12)
+                # Phase 73: Center the radio circle horizontally within the
+                # field bounding box (matches signing view's justify-center).
+                cx = x + width / 2
+                cy = y + height / 2
+                c.circle(cx, cy, size / 2, stroke=1, fill=0)
+                c.circle(cx, cy, (size / 2) - 2.5, stroke=0, fill=1)
+                # Label intentionally NOT drawn.
+
+            logger.info(f"Drew radio field ({'legacy' if is_legacy else 'group'}) at ({x}, {y})")
+        except Exception as e:
+            logger.error(f"Error drawing radio field: {e}")
     
     def _draw_initials_field(self, c: canvas.Canvas, x: float, y: float, width: float,
-                            height: float, field_id: str, field_values: Dict[str, Any]):
-        """Draw initials on PDF (similar to signature but smaller)"""
+                            height: float, field_id: str, field_values: Dict[str, Any],
+                            field: Optional[Dict[str, Any]] = None):
+        """Draw initials on PDF with aspect-fit + alignment (Phase 58)."""
         initials_data = field_values.get(field_id)
         if not initials_data:
             return
@@ -364,14 +481,60 @@ class PDFOverlayService:
             try:
                 base64_data = initials_data.split(',')[1] if ',' in initials_data else initials_data
                 img_data = base64.b64decode(base64_data)
+                
+                # Phase 3: Remove white background for transparency
+                img_data = self._make_transparent(img_data)
+                
                 img_reader = ImageReader(io.BytesIO(img_data))
 
-                c.drawImage(img_reader, x, y, width=width, height=height,
-                          preserveAspectRatio=True, mask='auto')
+                try:
+                    iw, ih = img_reader.getSize()
+                except Exception:
+                    iw, ih = 0, 0
 
-                logger.info(f"Drew initials at ({x}, {y})")
+                align = ((field or {}).get('style') or {}).get('textAlign') or 'center'
+                if iw > 0 and ih > 0:
+                    aspect = iw / ih
+                    fit_w, fit_h = height * aspect, height
+                    if fit_w > width:
+                        fit_w, fit_h = width, width / aspect
+                else:
+                    fit_w, fit_h = width, height
+
+                if align == 'left':
+                    sub_x = x
+                elif align == 'right':
+                    sub_x = x + (width - fit_w)
+                else:
+                    sub_x = x + (width - fit_w) / 2
+                sub_y = y + (height - fit_h) / 2
+
+                c.drawImage(img_reader, sub_x, sub_y, width=fit_w, height=fit_h, mask='auto')
+
+                logger.info(f"Drew initials at ({sub_x}, {sub_y}) align={align}")
             except Exception as e:
                 logger.error(f"Error drawing initials: {e}")
+
+    def _make_transparent(self, img_data: bytes) -> bytes:
+        """Process image to remove white/near-white background and ensure alpha channel."""
+        try:
+            img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+            datas = img.getdata()
+            new_data = []
+            # Threshold for "white" - 240 is safe for most digital "white"
+            for item in datas:
+                if item[0] > 240 and item[1] > 240 and item[2] > 240:
+                    # Replace with transparent white
+                    new_data.append((255, 255, 255, 0))
+                else:
+                    new_data.append(item)
+            img.putdata(new_data)
+            output = io.BytesIO()
+            img.save(output, format="PNG")
+            return output.getvalue()
+        except Exception as e:
+            logger.error(f"Error making image transparent: {e}")
+            return img_data
     
 
     def _draw_merge_field(self, c: canvas.Canvas, x: float, y: float, width: float,

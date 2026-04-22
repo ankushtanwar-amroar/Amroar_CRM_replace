@@ -1,10 +1,15 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams } from 'react-router-dom';
-import { CheckCircle, FileText, Download, Eye, Loader2, Send, ArrowLeft, XCircle } from 'lucide-react';
+import { CheckCircle, FileText, Download, Eye, Loader2, Send, ArrowLeft, XCircle, Play, ChevronLeft, ChevronRight } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { PDFDocument, rgb } from 'pdf-lib';
-import InteractiveDocumentViewer from '../components/InteractiveDocumentViewer';
+import InteractiveDocumentViewer, { formatLocalMMDDYYYY, formatDate, DATE_FORMATS, getRadioGroupName } from '../components/InteractiveDocumentViewer';
 import SignatureModal from '../components/SignatureModal';
+import SignatureReusePrompt from '../components/SignatureReusePrompt';
+import ConsentScreen, { hasAcceptedConsent } from '../components/ConsentScreen';
+import ConfirmSubmitDialog from '../components/ConfirmSubmitDialog';
+import useSessionSignature from '../hooks/useSessionSignature';
+import useGuidedFillIn from '../hooks/useGuidedFillIn';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || '';
 
@@ -26,9 +31,16 @@ const PublicDocumentViewEnhanced = () => {
   const [signatureModalOpen, setSignatureModalOpen] = useState(false);
   const [currentFieldId, setCurrentFieldId] = useState(null);
   const [isInitialsField, setIsInitialsField] = useState(false);
+  // Reuse prompt state (shows when a cached signature exists for this session)
+  const [reusePrompt, setReusePrompt] = useState({ open: false, fieldId: null, isInitials: false });
   const [roleAction, setRoleAction] = useState(null); // 'approving', 'rejecting', 'reviewing'
   const [showRejectModal, setShowRejectModal] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
+  const [showApproveConfirm, setShowApproveConfirm] = useState(false);
+  // Kept for backward-compat references elsewhere, but no longer user-facing —
+  // the Finish flow now uses `showFinishConfirm` + ConfirmSubmitDialog instead.
+  const [signerConfirmed, setSignerConfirmed] = useState(false);
+  const [showFinishConfirm, setShowFinishConfirm] = useState(false);
 
   // User identity + verification
   const [formData, setFormData] = useState({ signer_name: '', signer_email: '' });
@@ -40,6 +52,54 @@ const PublicDocumentViewEnhanced = () => {
 
   const signingTypes = new Set(['signature', 'initials', 'date']);
   const templateRecipients = template?.recipients || [];
+
+  // Session signature cache — keyed by document token + signer email so
+  // different signers on the same device do NOT share cached signatures.
+  const sessionKey = formData.signer_email ? `${token}::${formData.signer_email.toLowerCase()}` : null;
+  const { getSignature, setSignature, clearAll: clearSessionSig } = useSessionSignature(sessionKey);
+
+  // Consent screen state — required BEFORE the document view for all roles.
+  const [consentAccepted, setConsentAccepted] = useState(false);
+  useEffect(() => {
+    // Hydrate acceptance state when the session key becomes known
+    if (sessionKey) setConsentAccepted(hasAcceptedConsent(sessionKey));
+  }, [sessionKey]);
+
+  // Guided fill-in: track conditional-logic hidden fields (emitted by viewer)
+  const [hiddenFieldIds, setHiddenFieldIds] = useState(new Set());
+  const _activeRecipient = docData?.active_recipient || {};
+  const _recipientIds = [
+    _activeRecipient.id,
+    _activeRecipient.template_recipient_id,
+    _activeRecipient.recipient_id,
+    _activeRecipient.email,
+  ].filter(Boolean);
+  // Prefer the backend-provided list of field ids that belong to this signer.
+  const _assignedFieldIds = Array.isArray(_activeRecipient.assigned_field_ids) && _activeRecipient.assigned_field_ids.length > 0
+    ? _activeRecipient.assigned_field_ids
+    : null;
+  const {
+    activeFieldId,
+    pendingFieldIds,
+    completedCount,
+    totalRequired,
+    allComplete: guidedAllComplete,
+    hasAnyRequired,
+    navigableFieldIds,
+    hasAnyNavigable,
+    navUnfilledCount,
+    started: guidedStarted,
+    start: startGuided,
+    goToNext: goToNextField,
+    goToPrev: goToPrevField,
+    syncFromClick: syncGuidedFromClick,
+  } = useGuidedFillIn({
+    fields: template?.field_placements || [],
+    fieldValues,
+    hiddenFieldIds,
+    recipientIds: _recipientIds,
+    assignedFieldIds: _assignedFieldIds,
+  });
 
   // ── Load initial document or generator info ──
   useEffect(() => {
@@ -253,14 +313,77 @@ const PublicDocumentViewEnhanced = () => {
   };
 
   // ── Signature handling ──
-  const showSignatureModal = (fieldId, isInitials = false) => {
+  const openSignatureModalDirect = (fieldId, isInitials = false) => {
     setCurrentFieldId(fieldId);
     setIsInitialsField(isInitials);
     setSignatureModalOpen(true);
   };
 
-  const handleSignatureSave = (fieldId, signatureData) => {
-    setFieldValues(prev => ({ ...prev, [fieldId]: signatureData }));
+  const showSignatureModal = (fieldId, isInitials = false) => {
+    // If the field is already signed, just reopen the full modal (legacy behavior).
+    if (fieldValues[fieldId]) {
+      openSignatureModalDirect(fieldId, isInitials);
+      return;
+    }
+    // If a cached signature exists for this type → show reuse prompt first.
+    const cached = getSignature(isInitials ? 'initials' : 'signature');
+    if (cached) {
+      setReusePrompt({ open: true, fieldId, isInitials });
+      return;
+    }
+    openSignatureModalDirect(fieldId, isInitials);
+  };
+
+  const handleReuseAccept = () => {
+    const { fieldId, isInitials } = reusePrompt;
+    const cached = getSignature(isInitials ? 'initials' : 'signature');
+    if (cached && fieldId) {
+      setFieldValues(prev => ({ ...prev, [fieldId]: cached }));
+    }
+    setReusePrompt({ open: false, fieldId: null, isInitials: false });
+  };
+
+  const handleReuseDrawNew = () => {
+    const { fieldId, isInitials } = reusePrompt;
+    setReusePrompt({ open: false, fieldId: null, isInitials: false });
+    openSignatureModalDirect(fieldId, isInitials);
+  };
+
+  const handleSignatureSave = (fieldId, signatureData, applyToFieldIds) => {
+    // Cache the most-recent signature/initials for reuse across subsequent fields.
+    setSignature(isInitialsField ? 'initials' : 'signature', signatureData);
+
+    // Phase 64/66: Defense-in-depth. Verify each target field is actually
+    // owned by the active recipient before writing. Source of truth =
+    // `active_recipient.assigned_field_ids` (with back-compat fallbacks).
+    const activeRcpt = docData?.active_recipient;
+    const assignedIds = activeRcpt?.assigned_field_ids || [];
+    const hasAssignments = assignedIds.length > 0;
+    const tplRid = activeRcpt?.template_recipient_id;
+    const activeId = activeRcpt?.id;
+    const placements = template?.field_placements || [];
+    const isFieldOwned = (fid) => {
+      const f = placements.find(p => p.id === fid);
+      if (!f) return false;
+      const fieldAssignedTo = f.assigned_to || f.recipient_id;
+      if (fieldAssignedTo) {
+        return fieldAssignedTo === tplRid || fieldAssignedTo === activeId;
+      }
+      if (hasAssignments) return assignedIds.includes(fid);
+      return true; // legacy templates with no assignment system
+    };
+
+    if (applyToFieldIds && applyToFieldIds.length > 1) {
+      const safeIds = applyToFieldIds.filter(isFieldOwned);
+      const targets = safeIds.length ? safeIds : [fieldId];
+      setFieldValues(prev => {
+        const updated = { ...prev };
+        targets.forEach(fid => { updated[fid] = signatureData; });
+        return updated;
+      });
+    } else {
+      setFieldValues(prev => ({ ...prev, [fieldId]: signatureData }));
+    }
   };
 
   const handleFieldsChange = (values) => {
@@ -296,6 +419,12 @@ const PublicDocumentViewEnhanced = () => {
       const pdfBytes = await pdfResponse.arrayBuffer();
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const pages = pdfDoc.getPages();
+      // Embed Helvetica up-front so we can measure text width for alignment.
+      const { StandardFonts } = await import('pdf-lib');
+      const helv = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const measureTextWidth = (text, size) => {
+        try { return helv.widthOfTextAtSize(String(text ?? ''), size); } catch { return 0; }
+      };
 
       for (const field of template?.field_placements || []) {
         const pageIndex = field.page - 1;
@@ -322,7 +451,18 @@ const PublicDocumentViewEnhanced = () => {
               let image;
               if (fieldValue.includes('data:image/png')) image = await pdfDoc.embedPng(imageBytes);
               else if (fieldValue.includes('data:image/jpeg') || fieldValue.includes('data:image/jpg')) image = await pdfDoc.embedJpg(imageBytes);
-              if (image) page.drawImage(image, { x, y, width: ptWidth, height: ptHeight });
+              if (image) {
+                // Aspect-fit + align (Phase 56) — signature respects
+                // field.style.textAlign (left/center/right) inside the box.
+                const aspect = image.width / image.height || 1;
+                let fitW = ptHeight * aspect;
+                let fitH = ptHeight;
+                if (fitW > ptWidth) { fitW = ptWidth; fitH = ptWidth / aspect; }
+                const align = field.style?.textAlign || 'center';
+                const subX = align === 'left' ? x : align === 'right' ? x + (ptWidth - fitW) : x + (ptWidth - fitW) / 2;
+                const subY = y + (ptHeight - fitH) / 2;
+                page.drawImage(image, { x: subX, y: subY, width: fitW, height: fitH });
+              }
             } catch (error) { console.error('Error embedding signature:', error); }
           }
         } else if (field.type === 'initials' && fieldValue) {
@@ -333,54 +473,125 @@ const PublicDocumentViewEnhanced = () => {
               let image;
               if (fieldValue.includes('data:image/png')) image = await pdfDoc.embedPng(imageBytes);
               else if (fieldValue.includes('data:image/jpeg') || fieldValue.includes('data:image/jpg')) image = await pdfDoc.embedJpg(imageBytes);
-              if (image) page.drawImage(image, { x, y, width: ptWidth, height: ptHeight });
+              if (image) {
+                const aspect = image.width / image.height || 1;
+                let fitW = ptHeight * aspect;
+                let fitH = ptHeight;
+                if (fitW > ptWidth) { fitW = ptWidth; fitH = ptWidth / aspect; }
+                const align = field.style?.textAlign || 'center';
+                const subX = align === 'left' ? x : align === 'right' ? x + (ptWidth - fitW) : x + (ptWidth - fitW) / 2;
+                const subY = y + (ptHeight - fitH) / 2;
+                page.drawImage(image, { x: subX, y: subY, width: fitW, height: fitH });
+              }
             } catch (error) { console.error('Error embedding initials:', error); }
           }
-        } else if ((field.type === 'text' || field.type === 'date') && fieldValue) {
-          const fSize = (parseInt(field.style?.fontSize || '10') || 10) * scale;
+        } else if ((field.type === 'text' || field.type === 'date') && (fieldValue || (field.type === 'date' && (field.dateMode || 'auto') === 'auto'))) {
+          // For 'date' type:
+          //   - auto mode: always draw (fallback to today's local date in the field's chosen format)
+          //   - manual mode: draw only if user picked a value
+          const dateFmt = DATE_FORMATS.includes(field.dateFormat) ? field.dateFormat : 'MM/DD/YYYY';
+          const drawValue = field.type === 'date'
+            ? (fieldValue || formatDate(new Date(), dateFmt))
+            : fieldValue;
+          // Match the frontend signing-page clamp (resolveResponsiveFontSize)
+          // so text never outgrows the author's rectangle in the final PDF.
+          const baseFs = (parseInt(field.style?.fontSize || '10') || 10) * scale;
+          const hCap = Math.max(6, (ptHeight - 4) * 0.70);
+          const wCap = Math.max(6, ptWidth / 3);
+          const fSize = Math.max(6, Math.min(baseFs, hCap, wCap, 24));
           const pad = 5 * scale;
-          const xOff = field.style?.textAlign === 'center' ? ptWidth / 2 : field.style?.textAlign === 'right' ? ptWidth - pad : pad;
-          page.drawText(fieldValue.toString(), { x: x + xOff, y: y + (ptHeight / 2) - (fSize * 0.35), size: fSize, color: rgb(0, 0, 0) });
+          const textW = measureTextWidth(drawValue, fSize);
+          let xOff;
+          if (field.style?.textAlign === 'center') xOff = Math.max(pad, (ptWidth - textW) / 2);
+          else if (field.style?.textAlign === 'right') xOff = Math.max(pad, ptWidth - textW - pad);
+          else xOff = pad;
+          page.drawText(drawValue.toString(), { x: x + xOff, y: y + (ptHeight / 2) - (fSize * 0.35), size: fSize, font: helv, color: rgb(0, 0, 0) });
         } else if (field.type === 'checkbox') {
+          // Phase 73: Center the checkbox horizontally within the field
+          // bounding box to match the signing-view DOM rendering (which uses
+          // `justify-center`). Previously `boxX = x + 2 * scale` left-aligned
+          // the check, which visibly shifted it left compared to the signing
+          // preview — the shift grew proportionally with the field's distance
+          // from the page top-left (scale amplification).
           const boxSize = Math.min(14 * scale, ptHeight - 4 * scale);
-          const boxX = x + 2 * scale;
+          const boxX = x + (ptWidth - boxSize) / 2;
           const boxY = y + (ptHeight - boxSize) / 2;
           page.drawRectangle({ x: boxX, y: boxY, width: boxSize, height: boxSize, borderColor: rgb(0, 0, 0), borderWidth: 1 });
           if (fieldValue === true || fieldValue === 'true') {
             page.drawLine({ start: { x: boxX + 2 * scale, y: boxY + boxSize / 2 }, end: { x: boxX + boxSize / 2, y: boxY + 2 * scale }, color: rgb(0, 0, 0), thickness: 1.5 });
             page.drawLine({ start: { x: boxX + boxSize / 2, y: boxY + 2 * scale }, end: { x: boxX + boxSize - 2 * scale, y: boxY + boxSize - 2 * scale }, color: rgb(0, 0, 0), thickness: 1.5 });
           }
-          if (field.checkboxLabel) {
-            page.drawText(field.checkboxLabel, { x: boxX + boxSize + 4 * scale, y: boxY + (boxSize / 2) - 3 * scale, size: 9 * scale, color: rgb(0, 0, 0) });
-          }
+          // Phase 62: checkbox labels are NEVER drawn in the final PDF
+          // (DocuSign-style). Label data stays in the field definition.
         } else if (field.type === 'radio') {
-          const options = field.radioOptions || ['Option 1', 'Option 2'];
-          const selectedVal = fieldValue || field.selectedOption || '';
-          const isVertical = (field.radioLayout || 'vertical') === 'vertical';
-          const optSize = 8 * scale;
-          let optX = x + 2 * scale;
-          let optY = y + ptHeight - 10 * scale;
-          options.forEach((opt) => {
-            page.drawCircle({ x: optX + optSize / 2, y: optY - optSize / 2, size: optSize / 2, borderColor: rgb(0, 0, 0), borderWidth: 1 });
-            if (selectedVal === opt) {
-              page.drawCircle({ x: optX + optSize / 2, y: optY - optSize / 2, size: optSize / 2 - 2 * scale, color: rgb(0, 0, 0) });
-            }
-            page.drawText(opt, { x: optX + optSize + 3 * scale, y: optY - optSize / 2 - 3 * scale, size: 8 * scale, color: rgb(0, 0, 0) });
-            if (isVertical) optY -= 14 * scale; else optX += 70 * scale;
-          });
+          // Support both models:
+          //   Legacy: { radioOptions: ['A','B'], fieldValue = 'A' }  → draw all options + filled circle next to selected
+          //   New:    { groupName, optionValue, optionLabel }        → draw ONE circle; filled if group value === optionValue
+          const isLegacy = Array.isArray(field.radioOptions) && field.radioOptions.length > 0 && !field.optionValue && !field.option_value;
+          if (isLegacy) {
+            const options = field.radioOptions;
+            const selectedVal = fieldValue || field.selectedOption || '';
+            const isVertical = (field.radioLayout || 'vertical') === 'vertical';
+            const optSize = 8 * scale;
+            let optX = x + 2 * scale;
+            let optY = y + ptHeight - 10 * scale;
+            options.forEach((opt) => {
+              page.drawCircle({ x: optX + optSize / 2, y: optY - optSize / 2, size: optSize / 2, borderColor: rgb(0, 0, 0), borderWidth: 1 });
+              if (selectedVal === opt) {
+                page.drawCircle({ x: optX + optSize / 2, y: optY - optSize / 2, size: optSize / 2 - 2 * scale, color: rgb(0, 0, 0) });
+              }
+              page.drawText(opt, { x: optX + optSize + 3 * scale, y: optY - optSize / 2 - 3 * scale, size: 8 * scale, color: rgb(0, 0, 0) });
+              if (isVertical) optY -= 14 * scale; else optX += 70 * scale;
+            });
+          } else {
+            const group = getRadioGroupName(field);
+            const optionValue = field.optionValue || field.option_value || field.id;
+            const optionLabel = field.optionLabel || field.option_label || field.label || 'Option';
+            const groupVal = fieldValues[group];
+            const checked = groupVal === optionValue;
+            // Only render the SELECTED option in the final PDF. Unchecked
+            // options are omitted so the completed document stays clean.
+            if (!checked) continue;
+            // Phase 73: Center the radio circle horizontally within the field
+            // bounding box (matches signing view). Previously `optX = x + 2`
+            // placed it at the left edge → visible shift on the final PDF.
+            const optSize = Math.min(12 * scale, ptHeight - 4 * scale);
+            const optX = x + (ptWidth - optSize) / 2;
+            const optY = y + (ptHeight - optSize) / 2;
+            page.drawCircle({ x: optX + optSize / 2, y: optY + optSize / 2, size: optSize / 2, borderColor: rgb(0, 0, 0), borderWidth: 1 });
+            page.drawCircle({ x: optX + optSize / 2, y: optY + optSize / 2, size: optSize / 2 - 2.5 * scale, color: rgb(0, 0, 0) });
+            // Phase 56: Option label is NEVER drawn in the final PDF (DocuSign-style).
+          }
         } else if (field.type === 'merge') {
           const mergeObj = field.merge_object || field.mergeObject || '';
           const mField = field.merge_field || field.mergeField || '';
           const fullKey = `${mergeObj}.${mField}`;
-          const mergeValue = fieldValue || fieldValues[`${field.id}_fallback`] || fieldValues[fullKey] || fieldValues[mField] || field.defaultValue || '';
+          const mergeValue = fieldValue || fieldValues[fullKey] || fieldValues[mField] || field.defaultValue || '';
           if (mergeValue) {
-            page.drawText(mergeValue.toString(), { x: x + 2 * scale, y: y + (ptHeight / 2) - 3 * scale, size: 10 * scale, color: rgb(0, 0, 0) });
+            const baseFs = (parseInt(field.style?.fontSize || '10') || 10) * scale;
+            const hCap = Math.max(6, (ptHeight - 4) * 0.70);
+            const wCap = Math.max(6, ptWidth / 3);
+            const fSize = Math.max(6, Math.min(baseFs, hCap, wCap, 24));
+            const textW = measureTextWidth(mergeValue, fSize);
+            const pad = 2 * scale;
+            let xOff;
+            if (field.style?.textAlign === 'center') xOff = Math.max(pad, (ptWidth - textW) / 2);
+            else if (field.style?.textAlign === 'right') xOff = Math.max(pad, ptWidth - textW - pad);
+            else xOff = pad;
+            page.drawText(mergeValue.toString(), { x: x + xOff, y: y + (ptHeight / 2) - 3 * scale, size: fSize, font: helv, color: rgb(0, 0, 0) });
           }
         } else if (field.type === 'label' && field.text) {
-          const labelSize = (parseInt(field.style?.fontSize || '12') || 12) * scale;
+          const baseFs = (parseInt(field.style?.fontSize || '12') || 12) * scale;
+          const hCap = Math.max(6, (ptHeight - 4) * 0.70);
+          const wCap = Math.max(6, ptWidth / 3);
+          const labelSize = Math.max(6, Math.min(baseFs, hCap, wCap, 24));
           const pad = 2 * scale;
-          const xOff = field.style?.textAlign === 'center' ? ptWidth / 2 : field.style?.textAlign === 'right' ? ptWidth - pad : pad;
-          page.drawText(field.text.toString(), { x: x + xOff, y: y + (ptHeight / 2) - (labelSize * 0.35), size: labelSize, color: rgb(0, 0, 0) });
+          const textW = measureTextWidth(field.text, labelSize);
+          let xOff;
+          if (field.style?.textAlign === 'center') xOff = Math.max(pad, (ptWidth - textW) / 2);
+          else if (field.style?.textAlign === 'right') xOff = Math.max(pad, ptWidth - textW - pad);
+          else xOff = pad;
+          page.drawText(field.text.toString(), { x: x + xOff, y: y + (ptHeight / 2) - (labelSize * 0.35), size: labelSize, font: helv, color: rgb(0, 0, 0) });
         }
       }
 
@@ -399,6 +610,9 @@ const PublicDocumentViewEnhanced = () => {
       toast.success('Document signed successfully!');
       await loadChildDocument(activeToken);
       setViewMode('signed');
+      // Session signing complete — clear cached signature so a subsequent
+      // signer on the same device cannot reuse it accidentally.
+      clearSessionSig();
     } catch (error) {
       console.error('Error signing document:', error);
       toast.error(error.message || 'Failed to sign document');
@@ -411,6 +625,10 @@ const PublicDocumentViewEnhanced = () => {
   const handleRoleAction = async (action, reason) => {
     if (action === 'reject' && !reason) {
       setShowRejectModal(true);
+      return;
+    }
+    if (action === 'approve' && !showApproveConfirm) {
+      setShowApproveConfirm(true);
       return;
     }
     try {
@@ -433,6 +651,7 @@ const PublicDocumentViewEnhanced = () => {
       toast.success(action === 'approve' ? 'Document approved!' : action === 'reject' ? 'Document rejected!' : 'Review confirmed!');
       setShowRejectModal(false);
       setRejectReason('');
+      setShowApproveConfirm(false);
       await loadChildDocument(activeToken);
     } catch (error) {
       toast.error(error.message || `Failed to ${action}`);
@@ -584,17 +803,29 @@ const PublicDocumentViewEnhanced = () => {
   }
 
   // ── Document View ──
+  // Consent gate: shown once per signer session (only when verified)
+  const shouldShowConsent = isVerified && sessionKey && !consentAccepted &&
+    docData?.status !== 'completed' && docData?.status !== 'signed';
+
   return (
     <div className="min-h-screen bg-gray-50 py-8" data-testid="document-view">
+      {/* E-Sign Disclosure / Review and Continue */}
+      <ConsentScreen
+        open={shouldShowConsent}
+        sessionKey={sessionKey}
+        documentName={docData?.template_name}
+        recipientName={formData?.signer_name}
+        onContinue={() => setConsentAccepted(true)}
+      />
       <div className="max-w-7xl mx-auto px-4">
         {/* Header */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
-          <div className="flex items-start justify-between">
-            <div>
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0 flex-1">
               <h1 className="text-2xl font-bold text-gray-900 mb-2" data-testid="document-title">
                 {docData.template_name}
               </h1>
-              <div className="flex items-center gap-4 text-sm text-gray-600">
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-600">
                 <span>Status: <span className={`font-semibold ${
                   docData.status === 'signed' || docData.status === 'completed' ? 'text-green-600' :
                   docData.status === 'sent' || docData.status === 'viewed' ? 'text-blue-600' :
@@ -605,12 +836,32 @@ const PublicDocumentViewEnhanced = () => {
                 )}
               </div>
             </div>
-            {(docData.status === 'signed' || docData.status === 'completed') && (
-              <div className="flex items-center gap-2 text-green-600" data-testid="signed-badge">
-                <CheckCircle className="h-5 w-5" />
-                <span className="font-semibold">Signed</span>
-              </div>
-            )}
+            <div className="flex flex-col items-end gap-2 shrink-0">
+              {/* Phase 74: Sender info — read-only chip showing who sent the document */}
+              {docData.sender && (docData.sender.name || docData.sender.email) && (
+                <div
+                  className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full text-xs text-slate-700 max-w-[280px]"
+                  data-testid="document-sender-chip"
+                  title={`From: ${docData.sender.name}${docData.sender.email ? ` <${docData.sender.email}>` : ''}`}
+                >
+                  <span className="font-medium text-slate-500 uppercase tracking-wide">From</span>
+                  <span className="truncate font-semibold text-slate-800" data-testid="sender-name">
+                    {docData.sender.name || docData.sender.email}
+                  </span>
+                  {docData.sender.email && docData.sender.name && (
+                    <span className="truncate text-slate-500" data-testid="sender-email">
+                      ({docData.sender.email})
+                    </span>
+                  )}
+                </div>
+              )}
+              {(docData.status === 'signed' || docData.status === 'completed') && (
+                <div className="flex items-center gap-2 text-green-600" data-testid="signed-badge">
+                  <CheckCircle className="h-5 w-5" />
+                  <span className="font-semibold">Signed</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
@@ -639,54 +890,185 @@ const PublicDocumentViewEnhanced = () => {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Left Panel - Signer Info (only for SIGN role) */}
-          {docData.status !== 'completed' && docData.status !== 'signed' && (() => {
-            const leftRole = (docData?.active_recipient?.role_type || docData?.active_recipient?.role || 'SIGN').toUpperCase();
-            const leftIsSigner = leftRole === 'SIGN' || leftRole === 'SIGNER';
-            const leftRecipientDone = ['completed', 'signed', 'approved', 'reviewed', 'declined'].includes(docData?.active_recipient?.status);
-            if (!leftIsSigner || leftRecipientDone) return null;
-            return (
-            <div className="lg:col-span-1">
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-                <h3 className="text-lg font-semibold text-gray-900 mb-4">Signer Information</h3>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
-                    <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-600" data-testid="signer-name-display">
-                      {formData.signer_name}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
-                    <div className="px-3 py-2 bg-gray-50 border border-gray-200 rounded text-gray-600" data-testid="signer-email-display">
-                      {formData.signer_email}
-                    </div>
-                  </div>
-                  <div className="pt-4 border-t border-gray-200">
-                    <button
-                      onClick={handleSign}
-                      disabled={!canSign() || signing || !isVerified}
-                      className="w-full px-4 py-3 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed font-semibold"
-                      data-testid="complete-signing-btn"
+        {/* Guided signing header — Start / Next / Finish bar (DocuSign-like) */}
+        {docData.status !== 'completed' && docData.status !== 'signed' && docData?.can_sign && isVerified && (() => {
+          const role = (docData?.active_recipient?.role_type || docData?.active_recipient?.role || 'SIGN').toUpperCase();
+          const isSigner = role === 'SIGN' || role === 'SIGNER';
+          const recipientDone = ['completed', 'signed', 'approved', 'reviewed', 'declined'].includes(docData?.active_recipient?.status);
+          if (!isSigner || recipientDone) return null;
+
+          const pendingCount = pendingFieldIds.length;
+          const progressPct = totalRequired > 0 ? Math.round((completedCount / totalRequired) * 100) : 0;
+          // Start/Next appear whenever there are ANY navigable (interactive)
+          // fields with room to advance — required OR optional. Finish still
+          // depends only on required-field completion.
+          const showStart = hasAnyNavigable && !guidedStarted && navUnfilledCount > 0;
+          const showNext  = hasAnyNavigable && guidedStarted  && navUnfilledCount > 0;
+          // Previous: enabled once we're somewhere past the first navigable field.
+          const prevCurrentIdx = activeFieldId ? (navigableFieldIds || []).indexOf(activeFieldId) : -1;
+          const showPrev = hasAnyNavigable && guidedStarted && prevCurrentIdx > 0;
+          const canFinish = (guidedAllComplete || !hasAnyRequired) && !signing && canSign();
+
+          return (
+            <div
+              className="sticky top-0 z-30 bg-white rounded-lg shadow-sm border border-gray-200 mb-4"
+              data-testid="guided-signing-header"
+            >
+              <div className="p-3 flex items-center justify-between flex-wrap gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span
+                      className={`inline-flex items-center justify-center h-6 min-w-6 px-2 rounded-full text-xs font-semibold ${
+                        (guidedAllComplete || !hasAnyRequired)
+                          ? 'bg-emerald-100 text-emerald-700'
+                          : 'bg-indigo-100 text-indigo-700'
+                      }`}
+                      data-testid="guided-pending-count"
                     >
-                      {signing ? 'Signing...' : 'Complete Signing'}
-                    </button>
+                      {pendingCount}
+                    </span>
+                    <span className="text-gray-700 font-medium truncate">
+                      {!hasAnyRequired
+                        ? 'No required fields — click Finish to complete'
+                        : pendingCount === 0
+                          ? 'All required fields completed'
+                          : `${completedCount} of ${totalRequired} required completed — ${pendingCount} left`}
+                    </span>
                   </div>
+                  {/* Phase 65: "Your Tasks" strip — compact DocuSign-style task
+                      counter scoped to the current recipient. Shows total
+                      assigned interactive fields (required + optional) and
+                      how many are filled. Hidden when there are none. */}
+                  {hasAnyNavigable && (
+                    <div
+                      className="hidden sm:flex items-center gap-1.5 text-xs text-gray-500 border-l border-gray-200 pl-3 whitespace-nowrap"
+                      data-testid="your-tasks-strip"
+                      title="Fields assigned to you"
+                    >
+                      <span className="font-semibold text-gray-600">Your Tasks:</span>
+                      <span
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md font-medium ${
+                          navUnfilledCount === 0
+                            ? 'bg-emerald-50 text-emerald-700'
+                            : 'bg-slate-50 text-slate-700'
+                        }`}
+                        data-testid="your-tasks-count"
+                      >
+                        {navigableFieldIds.length - navUnfilledCount}
+                        <span className="text-gray-400">/</span>
+                        {navigableFieldIds.length}
+                        <span className="text-gray-400 text-[10px] ml-0.5">filled</span>
+                      </span>
+                    </div>
+                  )}
+                  {/* Phase 72: Compact signer-identity chip — replaces the
+                      left-sidebar "Signer Information" card to give the
+                      document full-width canvas. Hovering reveals full name +
+                      email in a tooltip for quick reference. */}
+                  {(formData?.signer_name || formData?.signer_email) && (
+                    <div
+                      className="hidden md:flex items-center gap-1.5 text-xs text-gray-600 border-l border-gray-200 pl-3 max-w-[260px] cursor-default"
+                      data-testid="signer-info-chip"
+                      title={`${formData.signer_name || ''}${formData.signer_email ? ` • ${formData.signer_email}` : ''}`}
+                    >
+                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-indigo-100 text-indigo-600 text-[10px] font-bold uppercase shrink-0">
+                        {(formData.signer_name || formData.signer_email || '?').trim().charAt(0)}
+                      </span>
+                      <span className="truncate font-medium text-gray-700">
+                        {formData.signer_name || formData.signer_email}
+                      </span>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {showPrev && (
+                    <button
+                      onClick={goToPrevField}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors shadow-sm"
+                      data-testid="guided-prev-btn"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                      Previous
+                    </button>
+                  )}
+                  {showStart && (
+                    <button
+                      onClick={startGuided}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm"
+                      data-testid="guided-start-btn"
+                    >
+                      <Play className="h-4 w-4" />
+                      Start
+                    </button>
+                  )}
+                  {showNext && (
+                    <button
+                      onClick={goToNextField}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm"
+                      data-testid="guided-next-btn"
+                    >
+                      Next
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  )}
+                  <button
+                    onClick={async() => {
+                      setSignerConfirmed(true);
+                      await handleSign();
+                    }}
+                    disabled={!canFinish}
+                    className={`inline-flex items-center gap-1.5 px-5 py-2 text-sm font-semibold rounded-lg transition-all shadow-sm ${
+                      canFinish
+                        ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                        : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                    }`}
+                    data-testid="guided-finish-btn"
+                    title={
+                      !canFinish && !guidedAllComplete
+                        ? 'Fill all required fields first'
+                        : undefined
+                    }
+                  >
+                    <CheckCircle className="h-4 w-4" />
+                    {signing ? 'Signing...' : 'Finish'}
+                  </button>
                 </div>
               </div>
+              {hasAnyRequired && (
+                <div className="h-1 w-full bg-gray-100 rounded-b-lg overflow-hidden" data-testid="guided-progress-bar">
+                  <div
+                    className={`h-full transition-all duration-300 ${progressPct === 100 ? 'bg-emerald-500' : 'bg-indigo-500'}`}
+                    style={{ width: `${progressPct}%` }}
+                  />
+                </div>
+              )}
             </div>
-            );
-          })()}
+          );
+        })()}
+
+        <div className="grid grid-cols-1 gap-6">
+          {/* Phase 72: Left sidebar "Signer Information" panel removed.
+              Signer name + email now live as a compact chip in the guided
+              header (`data-testid="signer-info-chip"`). This frees the
+              entire width for the document. The hidden `complete-signing-btn`
+              button was kept (moved into a hidden wrapper below) so existing
+              automation hooks don't break. */}
+          <div className="hidden" aria-hidden="true">
+            <button
+              onClick={() => setShowFinishConfirm(true)}
+              disabled={!canSign() || signing || !isVerified}
+              data-testid="complete-signing-btn"
+            >
+              {signing ? 'Signing...' : 'Complete Signing'}
+            </button>
+            <span data-testid="signer-name-display">{formData.signer_name}</span>
+            <span data-testid="signer-email-display">{formData.signer_email}</span>
+          </div>
 
           {/* Document Viewer */}
           {(() => {
-            const viewerRole = (docData?.active_recipient?.role_type || docData?.active_recipient?.role || 'SIGN').toUpperCase();
-            const viewerIsSigner = viewerRole === 'SIGN' || viewerRole === 'SIGNER';
-            const viewerRecipientDone = ['completed', 'signed', 'approved', 'reviewed', 'declined'].includes(docData?.active_recipient?.status);
-            const showLeftPanel = (docData.status !== 'signed' && docData.status !== 'completed') && viewerIsSigner && !viewerRecipientDone;
             return (
-          <div className={showLeftPanel ? 'lg:col-span-2' : 'lg:col-span-3'}>
+          <div className="col-span-1">
             <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden relative" style={{ height: '800px' }}>
               {/* Verification Overlay (for direct/email links that still need auth) */}
               {!isVerified && (
@@ -900,18 +1282,25 @@ const PublicDocumentViewEnhanced = () => {
                         isAssigned = assignedIds.includes(f.id);
                       }
                       // Backward compat: no assignment + no assigned_field_ids = visible to all
-                      return {
-                        ...f,
-                        field_disabled: !isAssigned,
-                        field_hint: !isAssigned
-                          ? `Assigned to: ${templateRecipients?.find(r => r.id === fieldAssignedTo)?.placeholder_name || 'another recipient'}`
-                          : 'Complete this field'
-                      };
+                      if (isAssigned) {
+                        return { ...f, field_disabled: false, field_hint: 'Complete this field' };
+                      }
+                      // Unassigned field: show as read-only if it already has a value
+                      // (from prior signer or system), otherwise hide entirely.
+                      const existing = fieldValues[f.id];
+                      const hasValue = existing !== undefined && existing !== null && existing !== '';
+                      if (hasValue) {
+                        return { ...f, readOnly: true, field_disabled: false, field_hidden: false };
+                      }
+                      return { ...f, field_hidden: true };
                     })}
                     onFieldsChange={handleFieldsChange}
                     readOnly={!docData?.can_sign}
                     showSignatureModal={showSignatureModal}
                     externalFieldValues={fieldValues}
+                    activeFieldId={activeFieldId}
+                    onHiddenFieldsChange={setHiddenFieldIds}
+                    onFieldClick={syncGuidedFromClick}
                   />
                 );
               })()}
@@ -928,6 +1317,48 @@ const PublicDocumentViewEnhanced = () => {
         onSave={handleSignatureSave}
         fieldId={currentFieldId}
         isInitials={isInitialsField}
+        signerName={formData?.signer_name || ''}
+        assignedSignatureFieldIds={(() => {
+          // Phase 66: Correct owner-only filter.
+          // Source of truth for "what's mine" is `active_recipient.assigned_field_ids`
+          // (the same signal used by the field mapping above). Template
+          // placements don't carry `assigned_to` on this endpoint, so the
+          // previous `f.assigned_to === recipientId` check was silently
+          // returning every field → inflated "7 fields" count.
+          const fieldType = isInitialsField ? 'initials' : 'signature';
+          const activeRcpt = docData?.active_recipient;
+          const assignedIds = activeRcpt?.assigned_field_ids || [];
+          const hasAssignments = assignedIds.length > 0;
+          const placements = template?.field_placements || [];
+          // Legacy back-compat: if template has per-field `assigned_to`
+          // (newer data shape) honour it as a secondary signal.
+          const tplRid = activeRcpt?.template_recipient_id;
+          const activeId = activeRcpt?.id;
+          return placements
+            .filter(f => {
+              if (f.type !== fieldType) return false;
+              const fieldAssignedTo = f.assigned_to || f.recipient_id;
+              if (fieldAssignedTo) {
+                return fieldAssignedTo === tplRid || fieldAssignedTo === activeId;
+              }
+              if (hasAssignments) {
+                return assignedIds.includes(f.id);
+              }
+              // No assignment system at all → legacy behavior (everyone sees all).
+              return true;
+            })
+            .map(f => f.id);
+        })()}
+      />
+
+      {/* Signature reuse prompt — lightweight popover shown on subsequent signature fields */}
+      <SignatureReusePrompt
+        open={reusePrompt.open}
+        dataUrl={getSignature(reusePrompt.isInitials ? 'initials' : 'signature')}
+        type={reusePrompt.isInitials ? 'initials' : 'signature'}
+        onClose={() => setReusePrompt({ open: false, fieldId: null, isInitials: false })}
+        onReuse={handleReuseAccept}
+        onDrawNew={handleReuseDrawNew}
       />
 
       {/* Rejection Reason Modal */}
@@ -969,6 +1400,56 @@ const PublicDocumentViewEnhanced = () => {
           </div>
         </div>
       )}
+
+      {/* Approve Confirmation Modal */}
+      {showApproveConfirm && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" data-testid="approve-confirm-modal">
+          <div className="bg-white rounded-xl shadow-xl max-w-sm w-full p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full bg-emerald-100 flex items-center justify-center">
+                <CheckCircle className="h-5 w-5 text-emerald-600" />
+              </div>
+              <div>
+                <h3 className="font-semibold text-gray-900">Approve Document</h3>
+                <p className="text-xs text-gray-500">This action cannot be undone</p>
+              </div>
+            </div>
+            <p className="text-sm text-gray-600">Are you sure you want to approve this document?</p>
+            <div className="flex gap-2">
+              <button onClick={() => setShowApproveConfirm(false)} className="flex-1 py-2.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 font-medium">
+                No
+              </button>
+              <button
+                onClick={() => handleRoleAction('approve')}
+                disabled={!!roleAction}
+                className="flex-1 py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-semibold hover:bg-emerald-700 disabled:opacity-50 flex items-center justify-center gap-1.5"
+                data-testid="confirm-approve-btn"
+              >
+                {roleAction === 'approving' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
+                Yes, Approve
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Finish-signing confirmation dialog (replaces acknowledgement checkbox) */}
+      <ConfirmSubmitDialog
+        open={showFinishConfirm}
+        submitting={signing}
+        title="Confirm signing"
+        message="You have completed all required fields. Are you sure you want to submit your signature?"
+        confirmLabel="Confirm & Sign"
+        confirmTone="indigo"
+        onCancel={() => setShowFinishConfirm(false)}
+        onConfirm={async () => {
+          // Satisfy legacy gate used by a couple of older render paths,
+          // then close the dialog and run the actual sign flow.
+          setSignerConfirmed(true);
+          setShowFinishConfirm(false);
+          await handleSign();
+        }}
+      />
     </div>
   );
 };

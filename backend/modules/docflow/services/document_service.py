@@ -200,7 +200,7 @@ class DocumentService:
     
     async def list_documents(self, tenant_id: str, template_id: Optional[str] = None,
                            status: Optional[str] = None, search: Optional[str] = None,
-                           page: int = 1, limit: int = 10) -> Dict[str, Any]:
+                           page: int = 1, limit: int = 10, sort_order: str = "newest") -> Dict[str, Any]:
         """List documents with pagination and search
         
         OPTIMIZED: Uses projection and parallel queries
@@ -219,6 +219,9 @@ class DocumentService:
             ]
 
         skip = (page - 1) * limit
+        
+        # Sort direction
+        sort_dir = -1 if sort_order == "newest" else 1
         
         # OPTIMIZATION: Use projection to exclude large fields
         projection = {
@@ -247,7 +250,7 @@ class DocumentService:
         # OPTIMIZATION: Run count and find in parallel
         import asyncio
         total_task = self.collection.count_documents(query)
-        documents_task = self.collection.find(query, projection).sort("created_at", -1).skip(skip).limit(limit).to_list(length=limit)
+        documents_task = self.collection.find(query, projection).sort("created_at", sort_dir).skip(skip).limit(limit).to_list(length=limit)
         
         total, documents = await asyncio.gather(total_task, documents_task)
 

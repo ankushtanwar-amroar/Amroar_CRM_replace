@@ -417,11 +417,20 @@ class EnhancedDocumentService:
         
         # Send email to initially-active recipients (routing-aware)
         email_sent_any = False
+        email_success = 0
+        email_failed = 0
+        email_skipped = 0
         if "email" in delivery_channels and send_email:
             for r in recipient_instances:
                 if r.get("status") != "sent":
+                    email_skipped += 1
                     continue
                 if not r.get("email"):
+                    email_skipped += 1
+                    logger.warning(
+                        f"[generate-document] Skipped email: recipient '{r.get('name')}' has no email "
+                        f"(document={document_id})"
+                    )
                     continue
 
                 recipient_url = f"{frontend_url}/docflow/view/{r.get('public_token')}"
@@ -471,6 +480,7 @@ class EnhancedDocumentService:
 
                 if email_result.get("success"):
                     email_sent_any = True
+                    email_success += 1
                     await self.collection.update_one(
                         {"id": document["id"]},
                         {
@@ -506,6 +516,7 @@ class EnhancedDocumentService:
                         extra_data={"recipient_email": r.get("email"), "recipient_name": r.get("name")}
                     )
                 else:
+                    email_failed += 1
                     logger.error(f"Failed to send email: {email_result.get('error')}")
                     await self.email_history_service.log_email(
                         template_id=template_id,
@@ -528,6 +539,22 @@ class EnhancedDocumentService:
                     }
                 )
                 document["status"] = "sent"
+
+            # Final email dispatch summary (helps diagnose "silent failures")
+            logger.info(
+                f"[generate-document] email dispatch summary: document={document_id} "
+                f"success={email_success} failed={email_failed} skipped={email_skipped} "
+                f"total_recipients={len(recipient_instances)}"
+            )
+        elif not send_email:
+            logger.info(
+                f"[generate-document] email dispatch skipped by caller (send_email=False): document={document_id}"
+            )
+        elif "email" not in delivery_channels:
+            logger.info(
+                f"[generate-document] email not in delivery_channels: document={document_id} "
+                f"channels={delivery_channels}"
+            )
         
         return document
     
@@ -729,6 +756,52 @@ class EnhancedDocumentService:
 
             # Note: field_data is cumulative (previous signers' values are included).
             # We therefore do NOT reject signing values for other recipients here.
+            #
+            # ─── Phase 64: Strict recipient ownership enforcement ───
+            # Defensive back-end guard. Strip any incoming field values for
+            # fields explicitly assigned to OTHER recipients whose status is
+            # still pending (i.e., they haven't signed yet). Values for
+            # already-signed recipients stay in existing_field_data and are
+            # merged in later. This prevents a bypass via the API even if a
+            # malicious/buggy client submits cross-recipient field data.
+            try:
+                placements_by_id = {p.get("id"): p for p in field_placements if p.get("id")}
+                active_tpl_rid = active_recipient.get("template_recipient_id")
+                signed_recipient_tpl_ids = {
+                    r.get("template_recipient_id")
+                    for r in recipients
+                    if r.get("status") in ("signed", "completed") and r.get("template_recipient_id")
+                }
+                existing_fd = document.get("field_data", {}) or {}
+                cleaned = {}
+                for fid, val in field_data.items():
+                    p = placements_by_id.get(fid)
+                    if not p:
+                        # Not a known placement — pass through untouched.
+                        cleaned[fid] = val
+                        continue
+                    assigned_to = p.get("assigned_to") or p.get("recipient_id")
+                    if not assigned_to:
+                        # Unassigned field — trust cumulative write.
+                        cleaned[fid] = val
+                        continue
+                    if assigned_to == active_tpl_rid:
+                        # Owned by this recipient — accept.
+                        cleaned[fid] = val
+                    elif assigned_to in signed_recipient_tpl_ids and fid in existing_fd:
+                        # Already signed by the rightful owner — keep existing
+                        # value; ignore any attempted overwrite.
+                        cleaned[fid] = existing_fd[fid]
+                    else:
+                        # Belongs to another still-pending recipient — reject
+                        # silently (log) to prevent cross-signing.
+                        logger.warning(
+                            f"Rejected cross-recipient field write: field={fid} "
+                            f"assigned_to={assigned_to} active={active_tpl_rid}"
+                        )
+                field_data = cleaned
+            except Exception as _e:
+                logger.warning(f"Ownership filter failed softly: {_e}")
 
             # Validate required signing fields for this recipient
             for f in required_signing_fields:
@@ -976,6 +1049,22 @@ class EnhancedDocumentService:
                         },
                     }
                 )
+                # Send completion email to ALL recipients
+                try:
+                    all_recipients = document.get("recipients", [])
+                    doc_name = document.get("template_name", "Document")
+                    frontend_url = os.environ.get("FRONTEND_URL", "")
+                    for r in all_recipients:
+                        if r.get("email"):
+                            view_url = f"{frontend_url}/docflow/view/{r.get('public_token')}" if r.get("public_token") else ""
+                            await self.email_service.send_workflow_notification_email(
+                                to_email=r["email"], to_name=r.get("name", ""),
+                                document_name=doc_name, notification_type="completed",
+                                extra={"view_url": view_url},
+                            )
+                    logger.info(f"Sent completion emails to all recipients for document {document_id}")
+                except Exception as ce:
+                    logger.warning(f"Failed to send completion emails: {ce}")
 
             # For public_recipients mode, sync the signing status back to the
             # package/run level so the admin UI reflects the correct state.

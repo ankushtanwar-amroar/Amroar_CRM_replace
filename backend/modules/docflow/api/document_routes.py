@@ -505,6 +505,52 @@ async def document_role_action(document_id: str, request: Request):
             {"id": document_id},
             {"$set": {"status": "completed", "completed_at": now, "updated_at": now}}
         )
+        # Send completion email to ALL recipients
+        try:
+            from ..services.system_email_service import SystemEmailService
+            email_svc = SystemEmailService()
+            doc_name = updated_doc.get("template_name", "Document")
+            frontend_url = os.environ.get("FRONTEND_URL", "")
+            if not frontend_url:
+                try:
+                    from services.email_service import FRONTEND_URL
+                    frontend_url = FRONTEND_URL or ""
+                except Exception:
+                    pass
+            for r in updated_doc.get("recipients", []):
+                if r.get("email"):
+                    view_url = f"{frontend_url}/docflow/view/{r.get('public_token')}" if r.get("public_token") else ""
+                    await email_svc.send_workflow_notification_email(
+                        to_email=r["email"], to_name=r.get("name", ""),
+                        document_name=doc_name, notification_type="completed",
+                        extra={"view_url": view_url},
+                    )
+            logger.info(f"Sent completion emails to all recipients for document {document_id}")
+        except Exception as ce:
+            logger.warning(f"Failed to send completion emails: {ce}")
+
+    # Send approval/rejection notification to previous recipients
+    if action in ("approve", "reject"):
+        try:
+            from ..services.system_email_service import SystemEmailService
+            email_svc = SystemEmailService()
+            doc_name = updated_doc.get("template_name", "Document")
+            notify_type = "approved" if action == "approve" else "rejected"
+            extra_info = {
+                "actor_name": matched.get("name", ""),
+                "reason": rejection_reason if action == "reject" else None,
+            }
+            for r in updated_doc.get("recipients", []):
+                if r.get("email") and r.get("public_token") != recipient_token:
+                    if r.get("status") in ("signed", "completed", "approved", "reviewed"):
+                        await email_svc.send_workflow_notification_email(
+                            to_email=r["email"], to_name=r.get("name", ""),
+                            document_name=doc_name, notification_type=notify_type,
+                            extra=extra_info,
+                        )
+            logger.info(f"Sent {notify_type} notification emails for document {document_id}")
+        except Exception as ne:
+            logger.warning(f"Failed to send {action} notification emails: {ne}")
 
     # Sequential routing: activate next recipient after approve/review
     if action in ("approve", "review") and not all_done and updated_doc.get("status") != "declined":

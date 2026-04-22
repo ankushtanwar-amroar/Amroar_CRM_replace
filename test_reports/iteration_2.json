@@ -1,0 +1,55 @@
+{
+  "summary": "Comprehensive testing of DocFlow field rendering and behavior fixes. All 6 issues verified: (1) Signature field has visible indigo-tinted background with 'Click to sign' text always visible, (2) Checkbox has DocuSign-style amber border + check mark + clear label, (3) Conditional logic bridges both Format A (conditionalRules on source) and Format B (conditionalLogic on target), (4) Radio Group NEW model with groupName/optionLabel/optionValue working - multiple fields with same groupName behave as single-select group, (5) Date format standardized to MM/DD/YYYY, (6) Date field auto-filled with signer's local today's date and read-only.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_docflow_fields.py",
+    "/app/test_reports/pytest/docflow_fields_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "InteractiveDocumentViewer.js: Fixed ESLint warning by adding onFieldsChange to useEffect dependency array (line 72)",
+    "Conditional logic implementation is comprehensive - supports both Format A (source-side conditionalRules) and Format B (target-side conditionalLogic)",
+    "Radio group NEW model correctly uses groupName for single-select behavior across multiple fields",
+    "Date field auto-fill uses formatLocalMMDDYYYY helper function and is read-only (rendered as div, not input)",
+    "Backend PDF overlay service correctly handles both radio models and formats dates to MM/DD/YYYY"
+  ],
+  "updated_files": [
+    "/app/frontend/src/docflow/components/InteractiveDocumentViewer.js"
+  ],
+  "success_rate": {
+    "backend": "100% (11/11 tests passed)",
+    "frontend": "100% (all field types rendering correctly)"
+  },
+  "test_credentials": "docflow@test.com / DocFlow123!",
+  "seed_data_creation": "Created test template with field placements via API: signature, date, checkbox, 2 radio fields (same groupName), text field",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "DocFlow field rendering fixes verified. Test template ID: 5f8425c8-e067-4108-818e-cf76aaa30f6d. Public signing link generated for testing. All field types (signature, date, checkbox, radio NEW model, text) render correctly in signing view. Conditional logic implementation bridges both builder formats.",
+  "verified_features": {
+    "visual_builder": {
+      "radio_group_new_model": "VERIFIED - Properties panel shows Group Name, Option Label, Option Value inputs + 'Duplicate as another option in this group' button",
+      "date_field_properties": "VERIFIED - Shows read-only auto-fill info panel explaining MM/DD/YYYY format",
+      "checkbox_properties": "VERIFIED - Shows checkboxLabel + default-checked toggle"
+    },
+    "signing_view": {
+      "signature_field": "VERIFIED - Always-visible indigo-tinted background with 'Click to sign' text",
+      "checkbox_field": "VERIFIED - Prominent amber border + amber-tinted bg + clear check mark when checked",
+      "date_field": "VERIFIED - Auto-filled with today's local MM/DD/YYYY (04/18/2026), read-only with green checkmark icon",
+      "radio_new_model": "VERIFIED - Multiple radio fields sharing same groupName behave as single-select group",
+      "conditional_logic": "VERIFIED - Implementation bridges both Format A (conditionalRules) and Format B (conditionalLogic)"
+    },
+    "backend_pdf_overlay": {
+      "date_field": "VERIFIED - _draw_date_field formats to MM/DD/YYYY",
+      "checkbox_field": "VERIFIED - _draw_checkbox_field always draws box + label",
+      "radio_field": "VERIFIED - _draw_radio_field handles both NEW groupName model and LEGACY radioOptions model"
+    }
+  }
+}

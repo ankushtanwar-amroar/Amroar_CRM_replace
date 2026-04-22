@@ -1,10 +1,30 @@
 """
 Validation Service - Comprehensive template validation for DocFlow
+
+Validation Contract (deterministic):
+- Exactly 8 fixed checks are evaluated on every call.
+- Each check produces exactly one entry with status ∈ {passed, warning, error}.
+- Score = round(passed_count / total_checks * 100). Warnings and errors do not count as pass.
+- With a fully-configured template, all 8 checks should pass → 100% score.
 """
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# Fixed, ordered list of check definitions. Count is ALWAYS this length.
+CHECK_DEFINITIONS: List[Dict[str, str]] = [
+    {"id": "template_name",      "category": "Template",    "label": "Template name"},
+    {"id": "document_file",      "category": "Template",    "label": "Document file"},
+    {"id": "crm_connection",     "category": "CRM",         "label": "CRM connection"},
+    # Phase 57: `recipients` and `routing_mode` removed — validation focuses on
+    # document structure + fields only. Recipients are validated at send time.
+    {"id": "field_placements",   "category": "Fields",      "label": "Field placements"},
+    {"id": "signature_fields",   "category": "Fields",      "label": "Signature fields"},
+    {"id": "merge_fields",       "category": "Fields",      "label": "Merge fields"},
+]
+TOTAL_CHECKS = len(CHECK_DEFINITIONS)
 
 
 class ValidationService:
@@ -14,189 +34,274 @@ class ValidationService:
         self.db = db
 
     async def validate_template(self, template_id: str, tenant_id: str) -> Dict[str, Any]:
-        """
-        Run full validation on a template.
-        Returns: { valid: bool, errors: [], warnings: [], score: int }
-        """
+        """Run full validation on a saved template."""
         template = await self.db.docflow_templates.find_one({
             "id": template_id,
             "tenant_id": tenant_id
         })
 
         if not template:
-            return {"valid": False, "errors": ["Template not found"], "warnings": [], "score": 0}
+            checks = [self._make_check(d, "error", "Template not found") for d in CHECK_DEFINITIONS]
+            return self._build_response(checks)
 
         return await self.validate_template_obj(template, tenant_id=tenant_id)
 
     async def validate_template_obj(self, template: Dict[str, Any], tenant_id: str) -> Dict[str, Any]:
         """
-        Validate an already-loaded template dict (doesn't require DB lookup by id).
-        Useful for enforcing "validate before save/send" in the API layer.
+        Validate a template object. Returns a deterministic result with exactly
+        TOTAL_CHECKS entries in `checks`.
         """
-        errors: List[str] = []
-        warnings: List[str] = []
-        passed: List[str] = []
+        checks: List[Dict[str, Any]] = []
 
         # 1. Template name
-        if not template.get("name", "").strip():
-            errors.append("Template name is required")
-        else:
-            passed.append("Template name is set")
+        checks.append(await self._check_template_name(template))
 
         # 2. Document file
-        if not template.get("file_url") and not template.get("s3_key") and not template.get("html_content"):
-            errors.append("No document file attached")
-        else:
-            passed.append("Document file is attached")
+        checks.append(await self._check_document_file(template))
 
         # 3. CRM Connection
-        crm_connection = template.get("crm_connection", {}) or {}
-        if not crm_connection.get("object_name"):
-            warnings.append("No CRM object connected")
-        else:
-            # Verify object exists based on CRM provider type
-            obj_name = crm_connection["object_name"]
-            provider = crm_connection.get("provider", "internal")
-            connection_id = crm_connection.get("connection_id")
+        checks.append(await self._check_crm_connection(template, tenant_id))
 
-            if provider == "salesforce":
-                # Salesforce objects are validated via the Salesforce API, not local DB.
-                # If we have a connection_id, trust the selected object since it was
-                # fetched from Salesforce when the user configured the connection tab.
-                if connection_id:
-                    passed.append(f"Salesforce object '{obj_name}' configured via connection")
-                else:
-                    warnings.append(f"Salesforce object '{obj_name}' selected but no connection_id linked — please reselect in Connection tab")
-            else:
-                # Internal CRM — verify object exists in tenant_objects or schema_objects
-                obj = await self.db.tenant_objects.find_one({
-                    "tenant_id": tenant_id,
-                    "object_name": obj_name
-                })
-                if not obj:
-                    schema_obj = await self.db.schema_objects.find_one({
-                        "tenant_id": tenant_id,
-                        "api_name": obj_name.lower(),
-                        "is_active": True
-                    })
-                    if not schema_obj:
-                        errors.append(f"CRM object '{obj_name}' is not found or inactive")
-                    else:
-                        passed.append(f"CRM object '{obj_name}' exists and is active")
-                else:
-                    passed.append(f"CRM object '{obj_name}' exists")
+        # Phase 57: Recipient + Routing mode checks removed from validation.
+        # The user's validation engine should only focus on document structure
+        # and fields. Recipients are configured/validated at send time.
 
-        # 3b. Recipients + routing (required for any signing field)
-        template_recipients = template.get("recipients", []) or []
-        routing_mode = template.get("routing_mode", "sequential")
-        if routing_mode not in ["sequential", "parallel"]:
-            errors.append("Invalid routing_mode (must be 'sequential' or 'parallel')")
+        # 6. Field placements
+        checks.append(await self._check_field_placements(template))
 
-        template_recipient_ids = {r.get("id") for r in template_recipients if r.get("id")}
-        signer_templates = [r for r in template_recipients if r.get("role") == "signer"]
-        # if not signer_templates:
-            # errors.append("At least one signer recipient is required")
+        # 7. Signature fields
+        checks.append(await self._check_signature_fields(template))
 
-        routing_orders = []
-        for r in template_recipients:
-            ro = r.get("routing_order", 1)
-            try:
-                ro_int = int(ro)
-                if ro_int < 1:
-                    errors.append("Recipient routing_order must be >= 1")
-                routing_orders.append(ro_int)
-            except Exception:
-                errors.append("Recipient routing_order must be an integer")
+        # 8. Merge fields
+        checks.append(await self._check_merge_fields(template, tenant_id))
 
-        if routing_orders and len(set(routing_orders)) != len(routing_orders):
-            # Routing order needs to be deterministic for sequential routing
-            errors.append("Recipient routing_order values must be unique")
+        return self._build_response(checks)
 
-        # 4. Field placements
-        field_placements = template.get("field_placements", []) or []
-        if not field_placements:
-            warnings.append("No fields placed on document")
-        else:
-            passed.append(f"{len(field_placements)} field(s) placed on document")
+    # ─── Individual Checks ──────────────────────────────────────────
 
-            # Check for signature fields
-            signatures = [f for f in field_placements if f.get("type") in ["signature", "initials", "date"]]
-            if not signatures:
-                warnings.append("No signing-related fields found (signature/initials/date)")
+    async def _check_template_name(self, template: Dict[str, Any]) -> Dict[str, Any]:
+        name = (template.get("name") or "").strip()
+        definition = self._get_definition("template_name")
+        if name:
+            return self._make_check(definition, "passed", f"Template name is set: '{name}'")
+        return self._make_check(definition, "error", "Template name is required")
 
-            # Critical rule: any signing-related field must be assigned to a recipient
-            signing_related_types = {"signature", "initials", "date"}
-            for f in field_placements:
-                if f.get("type") not in signing_related_types:
-                    continue
-                rid = f.get("recipient_id") or f.get("recipientId") or ""
-                # if not rid:
-                #     errors.append("Signing-related fields must be assigned to a recipient")
-                #     continue
-                # if rid not in template_recipient_ids:
-                #     errors.append("Signing-related field recipient_id must match a template recipient")
+    async def _check_document_file(self, template: Dict[str, Any]) -> Dict[str, Any]:
+        definition = self._get_definition("document_file")
+        if template.get("file_url") or template.get("s3_key") or template.get("html_content"):
+            return self._make_check(definition, "passed", "Document file is attached")
+        return self._make_check(definition, "error", "No document file attached")
 
-            # Validate merge fields against CRM
-            merge_fields = [f for f in field_placements if f.get("type") == "merge"]
-            if merge_fields and crm_connection.get("object_name"):
-                for mf in merge_fields:
-                    # Handle both camelCase and snake_case from different JS versions or backend models
-                    merge_obj = mf.get("mergeObject") or mf.get("merge_object") or ""
-                    merge_field = mf.get("mergeField") or mf.get("merge_field") or ""
+    async def _check_crm_connection(self, template: Dict[str, Any], tenant_id: str) -> Dict[str, Any]:
+        definition = self._get_definition("crm_connection")
+        crm = template.get("crm_connection", {}) or {}
+        provider = (crm.get("provider") or "").lower()
+        object_name = crm.get("object_name")
+        connection_id = crm.get("connection_id")
 
-                    if not merge_obj or not merge_field:
-                        label = mf.get('label') or mf.get('name') or 'unnamed'
-                        errors.append(f"Merge field '{label}' not fully configured (object or field missing)")
-                        logger.warning(f"Validation failed for field: {mf}")
-                    else:
-                        source_type = mf.get("sourceType") or crm_connection.get("provider", "internal").upper()
-                        
-                        if source_type == "SALESFORCE":
-                            # Trust Salesforce API fields, skip strict internal DB check
-                            passed.append(f"Salesforce merge field '{merge_obj}.{merge_field}' verified")
-                        else:
-                            # Verify internal CRM field exists on object
-                            valid = await self._check_field_exists(
-                                tenant_id, merge_obj, merge_field
-                            )
-                            if not valid:
-                                errors.append(f"Field '{merge_obj}.{merge_field}' not found in CRM")
-                            else:
-                                passed.append(f"CRM merge field '{merge_obj}.{merge_field}' verified")
+        if not object_name and not provider:
+            return self._make_check(
+                definition, "warning",
+                "No CRM object connected (optional — link a CRM object to enable merge fields)"
+            )
 
-        # 5. Webhook config
-        webhook_config = template.get("webhook_config", {}) or {}
-        if webhook_config.get("url") and not webhook_config.get("events"):
-            warnings.append("Webhook URL configured but no events selected")
+        if provider == "salesforce":
+            if not connection_id:
+                # Soft-warn (not hard-error) so that legacy templates and public-link
+                # generation flows are not blocked. Merge fields that rely on
+                # Salesforce will still fail at resolution time if misconfigured.
+                return self._make_check(
+                    definition, "warning",
+                    "Salesforce selected but no connection linked — link a connection in the Connection tab (required for merge fields)"
+                )
+            if not object_name:
+                return self._make_check(
+                    definition, "warning",
+                    "Salesforce connection linked but no object selected"
+                )
+            return self._make_check(
+                definition, "passed",
+                f"Salesforce connection linked — object '{object_name}' configured"
+            )
 
-        # Calculate score
-        total_checks = len(errors) + len(warnings) + len(passed)
-        score = round((len(passed) / max(total_checks, 1)) * 100)
+        # Internal CRM or other provider: verify object exists
+        if not object_name:
+            return self._make_check(
+                definition, "warning",
+                f"Provider '{provider}' selected but no object chosen"
+            )
+
+        obj = await self.db.tenant_objects.find_one({
+            "tenant_id": tenant_id,
+            "object_name": object_name
+        })
+        if obj:
+            return self._make_check(
+                definition, "passed",
+                f"CRM object '{object_name}' is connected and active"
+            )
+
+        schema_obj = await self.db.schema_objects.find_one({
+            "tenant_id": tenant_id,
+            "api_name": object_name.lower(),
+            "is_active": True
+        })
+        if schema_obj:
+            return self._make_check(
+                definition, "passed",
+                f"CRM object '{object_name}' is connected and active"
+            )
+
+        return self._make_check(
+            definition, "error",
+            f"CRM object '{object_name}' is not found or inactive"
+        )
+
+    # Phase 57: _check_recipients and _check_routing_mode intentionally removed.
+    # Recipient/routing validation is now handled exclusively at send time
+    # (see generate_links_routes.py).
+
+    async def _check_field_placements(self, template: Dict[str, Any]) -> Dict[str, Any]:
+        definition = self._get_definition("field_placements")
+        fields = template.get("field_placements", []) or []
+        if not fields:
+            return self._make_check(
+                definition, "warning",
+                "No fields placed on document"
+            )
+        return self._make_check(
+            definition, "passed",
+            f"{len(fields)} field(s) placed on document"
+        )
+
+    async def _check_signature_fields(self, template: Dict[str, Any]) -> Dict[str, Any]:
+        definition = self._get_definition("signature_fields")
+        fields = template.get("field_placements", []) or []
+        signing_types = {"signature", "initials", "date"}
+        sign_fields = [f for f in fields if (f.get("type") or "").lower() in signing_types]
+
+        if not sign_fields:
+            return self._make_check(
+                definition, "warning",
+                "No signing fields present (signature / initials / date)"
+            )
+
+        sig_count = sum(1 for f in sign_fields if (f.get("type") or "").lower() == "signature")
+        return self._make_check(
+            definition, "passed",
+            f"{len(sign_fields)} signing field(s) present ({sig_count} signature)"
+        )
+
+    async def _check_merge_fields(self, template: Dict[str, Any], tenant_id: str) -> Dict[str, Any]:
+        definition = self._get_definition("merge_fields")
+        fields = template.get("field_placements", []) or []
+        merge_fields = [f for f in fields if (f.get("type") or "").lower() == "merge"]
+
+        if not merge_fields:
+            return self._make_check(
+                definition, "passed",
+                "No merge fields used (nothing to validate)"
+            )
+
+        crm = template.get("crm_connection", {}) or {}
+        provider = (crm.get("provider") or "").lower()
+
+        misconfigured: List[str] = []
+        for mf in merge_fields:
+            merge_obj = mf.get("mergeObject") or mf.get("merge_object") or ""
+            merge_field = mf.get("mergeField") or mf.get("merge_field") or ""
+            if not merge_obj or not merge_field:
+                label = mf.get("label") or mf.get("name") or "unnamed"
+                misconfigured.append(label)
+
+        if misconfigured:
+            return self._make_check(
+                definition, "error",
+                f"{len(misconfigured)} merge field(s) not fully configured: "
+                f"{', '.join(misconfigured[:3])}{'...' if len(misconfigured) > 3 else ''}"
+            )
+
+        # Salesforce: trust API-driven selection — do not re-verify here to avoid flakiness.
+        if provider == "salesforce":
+            return self._make_check(
+                definition, "passed",
+                f"{len(merge_fields)} Salesforce merge field(s) configured"
+            )
+
+        # Internal: verify each field exists on its object.
+        invalid: List[str] = []
+        for mf in merge_fields:
+            merge_obj = mf.get("mergeObject") or mf.get("merge_object") or ""
+            merge_field = mf.get("mergeField") or mf.get("merge_field") or ""
+            valid = await self._check_field_exists(tenant_id, merge_obj, merge_field)
+            if not valid:
+                invalid.append(f"{merge_obj}.{merge_field}")
+
+        if invalid:
+            return self._make_check(
+                definition, "error",
+                f"{len(invalid)} merge field(s) not found in CRM: "
+                f"{', '.join(invalid[:3])}{'...' if len(invalid) > 3 else ''}"
+            )
+
+        return self._make_check(
+            definition, "passed",
+            f"{len(merge_fields)} merge field(s) verified in CRM"
+        )
+
+    # ─── Helpers ────────────────────────────────────────────────────
+
+    def _get_definition(self, check_id: str) -> Dict[str, str]:
+        for d in CHECK_DEFINITIONS:
+            if d["id"] == check_id:
+                return d
+        raise ValueError(f"Unknown check id: {check_id}")
+
+    @staticmethod
+    def _make_check(definition: Dict[str, str], status: str, message: str) -> Dict[str, Any]:
+        assert status in ("passed", "warning", "error"), f"Invalid status: {status}"
+        return {
+            "id": definition["id"],
+            "category": definition["category"],
+            "label": definition["label"],
+            "status": status,
+            "message": message,
+        }
+
+    def _build_response(self, checks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # Assertion: count must always equal TOTAL_CHECKS to be deterministic.
+        assert len(checks) == TOTAL_CHECKS, (
+            f"Validation check count mismatch: got {len(checks)}, expected {TOTAL_CHECKS}"
+        )
+
+        passed = [c for c in checks if c["status"] == "passed"]
+        warnings = [c for c in checks if c["status"] == "warning"]
+        errors = [c for c in checks if c["status"] == "error"]
+
+        score = round((len(passed) / TOTAL_CHECKS) * 100)
 
         return {
             "valid": len(errors) == 0,
-            "errors": errors,
-            "warnings": warnings,
-            "passed": passed,
             "score": score,
-            "total_checks": total_checks
+            "total_checks": TOTAL_CHECKS,
+            "checks": checks,
+            # Legacy flat arrays for backward compatibility (strings):
+            "passed": [c["message"] for c in passed],
+            "warnings": [c["message"] for c in warnings],
+            "errors": [c["message"] for c in errors],
         }
 
     async def _check_field_exists(self, tenant_id: str, object_name: str, field_name: str) -> bool:
-        """Check if a field exists on a CRM object"""
+        """Check if a field exists on a CRM object (internal CRM only)."""
         try:
-            # Check tenant_objects
             obj = await self.db.tenant_objects.find_one({
                 "tenant_id": tenant_id,
                 "object_name": object_name
             })
-
             if obj:
                 fields = obj.get("fields", {})
                 if field_name in fields:
                     return True
-
-                # Check custom fields
                 custom = await self.db.metadata_fields.find_one({
                     "object_name": object_name,
                     "tenant_id": tenant_id
@@ -207,7 +312,6 @@ class ValidationService:
                             return True
                 return False
 
-            # Check schema objects
             schema_obj = await self.db.schema_objects.find_one({
                 "tenant_id": tenant_id,
                 "api_name": object_name.lower(),

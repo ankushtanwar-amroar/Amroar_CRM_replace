@@ -1,0 +1,157 @@
+{
+  "summary": "Phase 47 Follow-up: Guided Fill-In Bug Fixes - All core features tested and working correctly. Required-field detection, Start/Next/Finish state transitions, auto-advance, and manual click sync all functioning as expected.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_results": {
+    "required_field_detection": {
+      "status": "PASS",
+      "details": "Hook correctly identifies 5 required fields (3 signatures + 2 initials) from template with 9 total fields. Signature/initials are required by default; date is auto-filled; checkbox/radio need explicit required=true."
+    },
+    "assigned_field_ids_fallback": {
+      "status": "PASS",
+      "details": "When assigned_field_ids is empty array [], hook falls back to matching by recipientIds. Unassigned fields (assigned_to=null) are treated as 'public' and included for all signers."
+    },
+    "field_ordering": {
+      "status": "PASS",
+      "details": "Fields sorted by page → y → x. sortByReadingOrder function uses 5px tolerance for y-coordinate comparison to handle slight vertical misalignment."
+    },
+    "start_button_state": {
+      "status": "PASS",
+      "details": "Start button visible when started===false AND pending>0. After clicking Start, button changes to 'Next' and Fill In arrow appears."
+    },
+    "next_button_navigation": {
+      "status": "PASS",
+      "details": "Next button advances to the NEXT pending field AFTER current activeFieldId in sorted order. Tested 3 consecutive Next clicks - arrow moved correctly between fields."
+    },
+    "auto_advance": {
+      "status": "PASS",
+      "details": "After filling signature field via Type tab, pending count decreased from 5 to 4 and activeFieldId moved to next pending field automatically."
+    },
+    "finish_button_state": {
+      "status": "PASS",
+      "details": "Finish button disabled (bg-gray-200 text-gray-400 cursor-not-allowed) when required fields incomplete OR signerConfirmed===false. Requires both guidedAllComplete AND signerConfirmed AND canSign()."
+    },
+    "progress_bar": {
+      "status": "PASS",
+      "details": "Progress bar renders at bottom of guided header. Width = completedCount/totalRequired * 100%. Initially at 0%, updated to 20% after filling 1 of 5 fields."
+    },
+    "badge_color": {
+      "status": "PASS",
+      "details": "Badge shows indigo color (bg-indigo-100 text-indigo-700) when fields pending. Will turn emerald when allComplete OR hasAnyRequired=false."
+    },
+    "manual_click_sync": {
+      "status": "PASS",
+      "details": "Clicking on initials field opened initials modal and synced activeFieldId. syncFromClick function correctly maps radio clicks to group's first required field."
+    },
+    "header_copy": {
+      "status": "PASS",
+      "details": "Shows 'X of Y required completed — Z left' format. Tested: '0 of 5 required completed — 5 left' initially, '1 of 5 required completed — 4 left' after filling one field."
+    },
+    "fill_in_arrow": {
+      "status": "PASS",
+      "details": "Floating green 'Fill In' arrow with data-testid='guided-fill-in-arrow' appears to LEFT of active field. Uses emerald-500 background with triangle pointer."
+    },
+    "consent_screen_regression": {
+      "status": "PASS",
+      "details": "ConsentScreen still shows before document view with 'Review and continue' heading, checkbox, and Continue button."
+    },
+    "signature_reuse_regression": {
+      "status": "PASS",
+      "details": "SignatureReusePrompt still works - signature modal opens with Draw/Type/Upload tabs and 'Apply to all' checkbox."
+    },
+    "date_auto_fill_regression": {
+      "status": "PASS",
+      "details": "Date field shows auto-filled value '04/18/2026' in MM/DD/YYYY format with green checkmark."
+    }
+  },
+  "code_review_findings": {
+    "useGuidedFillIn_hook": {
+      "status": "CORRECT",
+      "details": [
+        "Accepts recipientIds: string[] (array) and assignedFieldIds: string[]|null",
+        "When assignedFieldIds is non-empty array, uses it as source of truth (line 109)",
+        "When assignedFieldIds is null/empty, falls back to recipientIds matching (lines 113-116)",
+        "Radio groups de-duplicated via GROUP_KEY_FOR - each unique groupName counts as ONE field (lines 129-141)",
+        "Sorting by page → y → x with 5px y-tolerance (lines 79-85)",
+        "Auto-advance finds NEXT pending after current idx, not just pendingFieldIds[0] (lines 176-182)",
+        "goToNext also finds next AFTER current position (lines 198-204)",
+        "syncFromClick maps radio clicks to group's first field (lines 214-219)"
+      ]
+    },
+    "PublicDocumentViewEnhanced": {
+      "status": "CORRECT",
+      "details": [
+        "Passes recipientIds array with [.id, .template_recipient_id, .recipient_id, .email] (lines 67-72)",
+        "Passes assignedFieldIds from active_recipient.assigned_field_ids (lines 74-76)",
+        "Uses syncFromClick on viewer onFieldClick (line 1169)",
+        "Header shows Start→Next transition via 'started' flag (lines 795-796)",
+        "Progress bar with dynamic width and emerald color at 100% (lines 869-876)",
+        "Badge color changes based on allComplete/hasAnyRequired (lines 808-812)"
+      ]
+    },
+    "InteractiveDocumentViewer": {
+      "status": "CORRECT",
+      "details": [
+        "Renders Fill In arrow with data-testid='guided-fill-in-arrow' (lines 656-669, 806-820)",
+        "Auto-switches page when activeFieldId is on different page (lines 300-302)",
+        "Scrolls field into view with block:'center' (lines 305-309)",
+        "Calls onFieldClick for manual click sync (lines 650, 802)"
+      ]
+    }
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_5.json"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "All Phase 47 follow-up bug fixes are correctly implemented",
+    "Required-field detection now properly handles assigned_field_ids from backend",
+    "Next button navigation correctly finds NEXT pending field after current position",
+    "Auto-advance logic correctly moves to next pending field in sorted order",
+    "Multi-page navigation code is correct but could not be tested (test template has only 1 page)"
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "N/A (frontend-only test)",
+    "frontend": "100%"
+  },
+  "test_credentials": "docflow@test.com / DocFlow123!",
+  "seed_data_creation": "Used existing test document: R5azq2m5g5fvWzHKqQrN8-ZsJ7MnsuFedEHlqI2HRW8 (Test Signer NoAuth) with template 5f8425c8-e067-4108-818e-cf76aaa30f6d",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 47 follow-up fixes verified. Test document R5azq2m5g5fvWzHKqQrN8-ZsJ7MnsuFedEHlqI2HRW8 has 5 required fields (3 signatures, 2 initials) on single page. Multi-page navigation could not be tested due to single-page template. To test multi-page: create template with fields on pages 1, 2, 3 and verify page auto-switch when clicking Next.",
+  "features_tested": [
+    "Required-field detection with assigned_field_ids (empty array fallback)",
+    "Required-field detection with recipientIds matching",
+    "Signature/initials required by default",
+    "Date auto-filled and excluded from pending",
+    "Checkbox/radio need explicit required=true",
+    "Field ordering by page → y → x",
+    "Start button → Next button transition",
+    "Next button advances to NEXT pending after current position",
+    "Auto-advance after filling required field",
+    "Finish button disabled until allComplete + signerConfirmed + canSign()",
+    "Progress bar width and color",
+    "Badge color (indigo when pending, emerald when complete)",
+    "Manual click sync via syncFromClick",
+    "Fill In arrow positioning and styling",
+    "ConsentScreen regression",
+    "SignatureReusePrompt regression",
+    "Date auto-fill MM/DD/YYYY regression"
+  ],
+  "untested_features": [
+    "Multi-page navigation (test template has only 1 page)",
+    "Radio group de-duplication (test template has legacy radio without groupName)",
+    "Hidden-by-conditional field exclusion (no conditional logic in test template)",
+    "field_disabled field exclusion (no disabled fields in test template)",
+    "Edge case: template with only 1 required field",
+    "Edge case: template with no required fields (hasAnyRequired=false)"
+  ]
+}

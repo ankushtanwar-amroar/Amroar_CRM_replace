@@ -8,6 +8,9 @@ import {
 import { toast } from 'react-hot-toast';
 import InteractiveDocumentViewer from '../components/InteractiveDocumentViewer';
 import SignatureModal from '../components/SignatureModal';
+import SignatureReusePrompt from '../components/SignatureReusePrompt';
+import ConsentScreen, { hasAcceptedConsent } from '../components/ConsentScreen';
+import useSessionSignature from '../hooks/useSessionSignature';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || '';
 
@@ -45,9 +48,19 @@ const PackagePublicLinkView = () => {
   const [currentSignDocId, setCurrentSignDocId] = useState(null);
   const [isInitialsField, setIsInitialsField] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [reusePrompt, setReusePrompt] = useState({ open: false, docId: null, fieldId: null, isInitials: false });
 
   // Completed state
   const [completedResult, setCompletedResult] = useState(null);
+
+  // Phase 69: Consent gate state for the package link signing flow.
+  // Hoisted to the top-level (alongside other useState/useEffect calls) so
+  // it is always executed on every render regardless of which branch the
+  // flow is currently in. Previously declared inline just before the
+  // `flowState === 'signing'` early-return block, which triggered
+  // "Rendered more hooks than during the previous render" when the user
+  // progressed past OTP into the signing step.
+  const [plConsentAccepted, setPlConsentAccepted] = useState(false);
 
   // Resend cooldown timer
   useEffect(() => {
@@ -57,6 +70,15 @@ const PackagePublicLinkView = () => {
     }, 1000);
     return () => clearInterval(timer);
   }, [resendCooldown]);
+
+  // Phase 69: Initialize consent-accepted state from session storage whenever
+  // the email/token combo changes. Kept at the top-level with the other hooks
+  // so call order is stable.
+  useEffect(() => {
+    const key = userEmail ? `pkglink-${token}::${userEmail.toLowerCase()}` : null;
+    if (key) setPlConsentAccepted(hasAcceptedConsent(key));
+    else setPlConsentAccepted(false);
+  }, [userEmail, token]);
 
   // Load package info on mount
   useEffect(() => {
@@ -218,20 +240,58 @@ const PackagePublicLinkView = () => {
     }));
   }, []);
 
-  const openSignatureModal = useCallback((docId, fieldId, isInitials = false) => {
+  const openSignatureModalDirect = useCallback((docId, fieldId, isInitials = false) => {
     setCurrentSignDocId(docId);
     setCurrentSignFieldId(fieldId);
     setIsInitialsField(isInitials);
     setSignatureModalOpen(true);
   }, []);
 
+  // Session signature cache — keyed per signer.
+  const _sigSessionKey = userEmail ? `${token}::${userEmail.toLowerCase()}` : null;
+  const { getSignature: getSessionSig, setSignature: setSessionSig, clearAll: clearSessionSig } = useSessionSignature(_sigSessionKey);
+
+  const openSignatureModal = useCallback((docId, fieldId, isInitials = false) => {
+    const existing = (docFieldValues[docId] || {})[fieldId];
+    if (existing) {
+      openSignatureModalDirect(docId, fieldId, isInitials);
+      return;
+    }
+    const cached = getSessionSig(isInitials ? 'initials' : 'signature');
+    if (cached) {
+      setReusePrompt({ open: true, docId, fieldId, isInitials });
+      return;
+    }
+    openSignatureModalDirect(docId, fieldId, isInitials);
+  }, [docFieldValues, getSessionSig, openSignatureModalDirect]);
+
+  const handleReuseAccept = useCallback(() => {
+    const { docId, fieldId, isInitials } = reusePrompt;
+    const cached = getSessionSig(isInitials ? 'initials' : 'signature');
+    if (cached && docId && fieldId) {
+      setDocFieldValues(prev => ({
+        ...prev,
+        [docId]: { ...(prev[docId] || {}), [fieldId]: cached },
+      }));
+    }
+    setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false });
+  }, [reusePrompt, getSessionSig]);
+
+  const handleReuseDrawNew = useCallback(() => {
+    const { docId, fieldId, isInitials } = reusePrompt;
+    setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false });
+    openSignatureModalDirect(docId, fieldId, isInitials);
+  }, [reusePrompt, openSignatureModalDirect]);
+
   const handleSignatureSave = useCallback((fieldId, sigData) => {
     if (!currentSignDocId) return;
+    // Cache for reuse across subsequent fields in this session
+    setSessionSig(isInitialsField ? 'initials' : 'signature', sigData);
     setDocFieldValues(prev => ({
       ...prev,
       [currentSignDocId]: { ...(prev[currentSignDocId] || {}), [fieldId]: sigData },
     }));
-  }, [currentSignDocId]);
+  }, [currentSignDocId, isInitialsField, setSessionSig]);
 
   // Check if all required fields are filled
   const allRequiredFieldsComplete = useMemo(() => {
@@ -288,6 +348,8 @@ const PackagePublicLinkView = () => {
       setCompletedResult(data);
       setFlowState('completed');
       toast.success('Submitted successfully!');
+      // Clear cached signatures on session completion
+      clearSessionSig();
     } catch (e) {
       toast.error(e.message || 'Submission failed');
     } finally {
@@ -551,9 +613,20 @@ const PackagePublicLinkView = () => {
   }
 
   // ── Signing Flow ──
+  // Consent gate for the package link signing flow (state + effect are
+  // declared at the top of the component — see Phase 69 comment).
+  const _plConsentKey = userEmail ? `pkglink-${token}::${userEmail.toLowerCase()}` : null;
+
   if (flowState === 'signing') {
     return (
       <div className="min-h-screen bg-gray-50" data-testid="public-link-signing">
+        <ConsentScreen
+          open={!!_plConsentKey && !plConsentAccepted}
+          sessionKey={_plConsentKey}
+          documentName={pkg?.package_name}
+          recipientName={userName}
+          onContinue={() => setPlConsentAccepted(true)}
+        />
         {/* Header */}
         <div className="bg-white border-b border-gray-200 px-4 py-5">
           <div className="max-w-3xl mx-auto">
@@ -746,6 +819,16 @@ const PackagePublicLinkView = () => {
           onSave={handleSignatureSave}
           fieldId={currentSignFieldId}
           isInitials={isInitialsField}
+          signerName={userName || ''}
+        />
+
+        <SignatureReusePrompt
+          open={reusePrompt.open}
+          dataUrl={getSessionSig(reusePrompt.isInitials ? 'initials' : 'signature')}
+          type={reusePrompt.isInitials ? 'initials' : 'signature'}
+          onClose={() => setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false })}
+          onReuse={handleReuseAccept}
+          onDrawNew={handleReuseDrawNew}
         />
       </div>
     );

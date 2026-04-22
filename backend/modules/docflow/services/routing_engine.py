@@ -371,6 +371,30 @@ class RoutingEngine:
             except Exception as e:
                 logger.warning(f"Webhook fire_package_event failed: {e}")
 
+        # Send completion email to ALL recipients
+        try:
+            from .system_email_service import SystemEmailService
+            email_svc = SystemEmailService()
+            pkg_name = result.get("package_name") or result.get("name", "Package")
+            frontend_url = os.environ.get("FRONTEND_URL", "")
+            if not frontend_url:
+                try:
+                    from services.email_service import FRONTEND_URL
+                    frontend_url = FRONTEND_URL or ""
+                except Exception:
+                    pass
+            for r in result.get("recipients", []):
+                if r.get("email") and r.get("role_type") != "RECEIVE_COPY":
+                    view_url = f"{frontend_url}/docflow/package/{result.get('id', '')}/view/{r.get('public_token', '')}" if r.get("public_token") else ""
+                    await email_svc.send_workflow_notification_email(
+                        to_email=r["email"], to_name=r.get("name", ""),
+                        document_name=pkg_name, notification_type="completed",
+                        extra={"view_url": view_url},
+                    )
+            logger.info(f"Sent completion emails to all package recipients for {package_id}")
+        except Exception as ce:
+            logger.warning(f"Failed to send package completion emails: {ce}")
+
         # Notify RECEIVE_COPY recipients about package completion
         receive_copy_recipients = [
             r for r in result.get("recipients", [])

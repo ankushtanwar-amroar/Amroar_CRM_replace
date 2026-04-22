@@ -1,0 +1,80 @@
+{
+  "summary": "DocFlow Template Validation Score & Validation Checks Logic - All tests passed. Backend validation service correctly implements 8-check deterministic contract. Frontend ValidationPanel correctly renders backend results as single source of truth.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_validation_service.py",
+    "/app/backend/tests/test_validation_api.py",
+    "/app/test_reports/pytest/validation_api_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [],
+  "updated_files": [
+    "/app/backend/tests/test_validation_api.py"
+  ],
+  "success_rate": {
+    "backend": "100% (15/15 tests passed - 7 unit tests + 8 API tests)",
+    "frontend": "100% (ValidationPanel UI working correctly)"
+  },
+  "test_credentials": "docflow@test.com / DocFlow123!",
+  "seed_data_creation": "Created test template: 20c2e4de-84a6-4c04-93fa-9581e1007e8e",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Validation fix verified. Backend returns exactly 8 checks with deterministic scores. Frontend ValidationPanel correctly displays all checks, score, and categorizes errors/warnings/passed. Test template ID: 20c2e4de-84a6-4c04-93fa-9581e1007e8e",
+  "test_results": {
+    "backend_unit_tests": {
+      "file": "/app/backend/tests/test_validation_service.py",
+      "passed": 7,
+      "failed": 0,
+      "tests": [
+        "test_total_checks_constant_is_eight - PASSED",
+        "test_empty_template_returns_8_checks_with_low_score - PASSED",
+        "test_fully_configured_salesforce_template_reaches_100 - PASSED",
+        "test_salesforce_without_connection_id_shows_error_not_warning - PASSED",
+        "test_score_is_deterministic_across_runs - PASSED",
+        "test_merge_field_misconfiguration_is_error - PASSED",
+        "test_no_crm_connection_shows_warning_not_error - PASSED"
+      ]
+    },
+    "backend_api_tests": {
+      "file": "/app/backend/tests/test_validation_api.py",
+      "passed": 8,
+      "failed": 0,
+      "tests": [
+        "test_validate_object_empty_body_returns_8_checks - PASSED (total_checks=8, score<50%, valid=false)",
+        "test_validate_object_fully_configured_salesforce_100_percent - PASSED (score=100%, valid=true, 0 warnings, 0 errors)",
+        "test_validate_object_salesforce_no_connection_id_error - PASSED (crm_connection status=error)",
+        "test_validate_object_determinism - PASSED (identical results across runs)",
+        "test_validate_object_merge_field_misconfiguration_error - PASSED (merge_fields status=error with field label)",
+        "test_validate_object_no_crm_connection_warning - PASSED (crm_connection status=warning)",
+        "test_validate_object_total_checks_always_8 - PASSED (verified across 3 test cases)",
+        "test_validate_object_check_ids_consistent - PASSED (all 8 check IDs present)"
+      ]
+    },
+    "frontend_ui_tests": {
+      "tests": [
+        "ValidationPanel loads in template editor - PASSED",
+        "Run Validation button triggers backend call - PASSED",
+        "Validation score displays correctly (38%) - PASSED",
+        "Total checks count is always 8 - PASSED",
+        "Errors section renders correctly (1 error) - PASSED",
+        "Warnings section renders correctly (4 warnings) - PASSED",
+        "Passed section renders correctly (3 passed) - PASSED",
+        "Determinism test - identical results across runs - PASSED"
+      ]
+    }
+  },
+  "verified_fixes": [
+    "Validation Score reaches 100% when template is fully configured (Salesforce with connection_id, object_name, recipients, signature fields)",
+    "All 8 checks are always displayed in UI (no hidden/missing checks)",
+    "Correct warning messages - 'No CRM connection' only shown when CRM is NOT connected",
+    "Validation count is deterministic - always 8, does not change between runs"
+  ]
+}

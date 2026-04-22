@@ -573,3 +573,66 @@ class SystemEmailService:
                 "success": False,
                 "error": str(e)
             }
+
+
+    async def send_workflow_notification_email(
+        self,
+        to_email: str,
+        to_name: str,
+        document_name: str,
+        notification_type: str,
+        extra: dict = None,
+    ) -> Dict[str, Any]:
+        """Send workflow notification emails (approved, rejected, completed)."""
+        extra = extra or {}
+        type_config = {
+            "approved": {
+                "subject": f"Document Approved: {document_name}",
+                "heading": "Document Approved",
+                "message": f"The document <strong>{document_name}</strong> has been approved.",
+                "color": "#059669",
+            },
+            "rejected": {
+                "subject": f"Document Rejected: {document_name}",
+                "heading": "Document Rejected",
+                "message": f"The document <strong>{document_name}</strong> has been rejected.",
+                "color": "#DC2626",
+            },
+            "completed": {
+                "subject": f"Document Completed: {document_name}",
+                "heading": "Document Completed",
+                "message": f"All required actions for <strong>{document_name}</strong> have been completed. The final signed document is now available.",
+                "color": "#4F46E5",
+            },
+        }
+        cfg = type_config.get(notification_type, type_config["completed"])
+        reason_html = ""
+        if notification_type == "rejected" and extra.get("reason"):
+            reason_html = f'<div style="margin:16px 0;padding:12px 16px;background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;"><strong>Reason:</strong> {extra["reason"]}</div>'
+        actor_html = ""
+        if extra.get("actor_name"):
+            actor_html = f'<p style="color:#6B7280;font-size:14px;">Action by: <strong>{extra["actor_name"]}</strong></p>'
+        download_html = ""
+        view_url = extra.get("view_url") or extra.get("download_url") or ""
+        if notification_type == "completed" and view_url:
+            download_html = f'''<div style="text-align:center;margin:24px 0;">
+  <a href="{view_url}" style="background:{cfg["color"]};color:white;padding:14px 36px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;font-size:16px;">View Document</a>
+</div>
+<p style="text-align:center;font-size:13px;color:#6B7280;">If the button is not working, <a href="{view_url}" style="color:{cfg["color"]};">click here to view document</a></p>'''
+        elif view_url:
+            download_html = f'<div style="text-align:center;margin:24px 0;"><a href="{view_url}" style="background:{cfg["color"]};color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">View Document</a></div>'
+
+        html = f'''<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+  <div style="background:{cfg["color"]};padding:24px;border-radius:8px 8px 0 0;">
+    <h1 style="color:white;margin:0;font-size:20px;">{cfg["heading"]}</h1>
+  </div>
+  <div style="padding:24px;background:#ffffff;border:1px solid #e5e7eb;border-top:none;">
+    <p>Hi {to_name or "there"},</p>
+    <p>{cfg["message"]}</p>
+    {reason_html}
+    {actor_html}
+    {download_html}
+  </div>
+  <div style="padding:16px;text-align:center;color:#9ca3af;font-size:12px;">Powered by Cluvik DocFlow</div>
+</div>'''
+        return await self.send_generic_email(to_email, cfg["subject"], html)

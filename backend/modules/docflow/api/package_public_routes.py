@@ -35,6 +35,24 @@ routing_engine = RoutingEngine(db, audit_service=audit_service, webhook_service=
 session_service = SessionService(db)
 
 
+@router.get("/{token}/status")
+async def get_package_status(token: str):
+    """Lightweight endpoint for real-time status polling."""
+    package = await db.docflow_packages.find_one(
+        {"recipients.public_token": token},
+        {"_id": 0, "status": 1, "void_reason": 1}
+    )
+    if not package:
+        # Check package_runs too
+        package = await db.docflow_package_runs.find_one(
+            {"recipients.public_token": token},
+            {"_id": 0, "status": 1, "void_reason": 1}
+        )
+    if not package:
+        return {"status": "not_found"}
+    return {"status": package.get("status", "unknown"), "void_reason": package.get("void_reason")}
+
+
 async def _find_package_by_recipient_token(token: str):
     """Find package and active recipient by the recipient's public_token."""
     package = await db.docflow_packages.find_one(
@@ -317,6 +335,29 @@ async def get_package_public(
     except Exception as e:
         logger.warning(f"Webhook fire_package_event (opened) failed: {e}")
 
+    # Phase 74: Resolve sender info (document.created_by → user record) for
+    # the public signing-view header. Falls back silently if user is missing.
+    sender_info = None
+    try:
+        sender_user_id = package.get("created_by")
+        if sender_user_id:
+            user = await db.users.find_one(
+                {"id": sender_user_id},
+                {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
+            )
+            if user:
+                name = (
+                    user.get("full_name")
+                    or user.get("name")
+                    or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
+                    or (user.get("email") or "").split("@")[0]
+                )
+                email = user.get("email") or ""
+                if name or email:
+                    sender_info = {"name": name, "email": email}
+    except Exception as e:
+        logger.warning(f"Sender resolution failed for package {package.get('id')}: {e}")
+
     # Determine if all SIGN recipients in earlier waves have completed
     recipients = package.get("recipients", [])
     sign_recipients = [r for r in recipients if r.get("role_type") == "SIGN"]
@@ -331,6 +372,7 @@ async def get_package_public(
         "total_documents": len(documents),
         "documents": documents,
         "all_signing_complete": all_signing_complete,
+        "sender": sender_info,
         "active_recipient": {
             "id": active_recipient.get("id"),
             "name": active_recipient.get("name", ""),
@@ -503,6 +545,54 @@ async def sign_with_fields(
             if not document:
                 continue
 
+            # ─── Phase 64: Strict recipient ownership (package flow) ───
+            # Drop any submitted field values for fields assigned to OTHER
+            # recipients (whose ownership must be preserved regardless of a
+            # malformed/malicious client payload). We still accept writes for
+            # fields that are either (a) owned by the active recipient,
+            # (b) fully unassigned, or (c) already-signed (read-only pass-through
+            # via existing field_data).
+            try:
+                # Look up the template placements EARLY so we can validate
+                # ownership before merging.
+                _tpl_preview = await db.docflow_templates.find_one(
+                    {"id": template_id},
+                    {"_id": 0, "field_placements": 1}
+                )
+                _placements = (_tpl_preview or {}).get("field_placements", []) or []
+                _placements_by_id = {p.get("id"): p for p in _placements if p.get("id")}
+                active_tpl_rid = active_recipient.get("template_recipient_id")
+                all_recipients_on_pkg = package.get("recipients", []) or []
+                signed_tpl_rids = {
+                    r.get("template_recipient_id")
+                    for r in all_recipients_on_pkg
+                    if r.get("status") in ("signed", "completed") and r.get("template_recipient_id")
+                }
+                existing_fd_preview = document.get("field_data", {}) or {}
+                filtered = {}
+                for fid, val in (field_data_for_doc or {}).items():
+                    p = _placements_by_id.get(fid)
+                    if not p:
+                        filtered[fid] = val  # unknown placement — pass through
+                        continue
+                    assigned_to = p.get("assigned_to") or p.get("recipient_id")
+                    if not assigned_to:
+                        filtered[fid] = val
+                        continue
+                    if assigned_to == active_tpl_rid:
+                        filtered[fid] = val
+                    elif assigned_to in signed_tpl_rids and fid in existing_fd_preview:
+                        filtered[fid] = existing_fd_preview[fid]  # preserve signed owner
+                    else:
+                        logger.warning(
+                            f"Package sign: rejected cross-recipient write "
+                            f"doc={doc_id} field={fid} assigned_to={assigned_to} "
+                            f"active={active_tpl_rid}"
+                        )
+                field_data_for_doc = filtered
+            except Exception as _ownership_err:
+                logger.warning(f"Ownership filter soft-failed: {_ownership_err}")
+
             # Merge pre-existing field_data (from document generation merge fields)
             # with user-submitted field_data (signatures, text, dates)
             existing_doc_field_data = document.get("field_data", {}) or {}
@@ -605,24 +695,76 @@ async def sign_with_fields(
                 h = field.get("height", 30) * scale
 
                 if field_type in ("signature", "initials") and field_value:
-                    # Embed base64 image
+                    # Embed base64 image as an aspect-preserving sub-rect inside
+                    # the author's bounding box, aligned per field.style.textAlign
+                    # (left/center/right). Previously `insert_image(full_rect)`
+                    # stretched the signature to fill — now it fits inside with
+                    # the correct alignment (DocuSign-style).
                     try:
                         if isinstance(field_value, str) and field_value.startswith("data:image"):
                             b64_data = field_value.split(",", 1)[1]
                             img_bytes = base64.b64decode(b64_data)
-                            img_rect = fitz.Rect(x, y, x + w, y + h)
+                            # Determine native image size via Pixmap (PyMuPDF)
+                            try:
+                                pm = fitz.Pixmap(img_bytes)
+                                img_w, img_h = pm.width, pm.height
+                                pm = None
+                            except Exception:
+                                img_w = img_h = 0
+                            # Compute aspect-fit rect within (w × h) — never overflow.
+                            align = (field.get("style") or {}).get("textAlign") or "center"
+                            if img_w > 0 and img_h > 0:
+                                aspect = img_w / img_h
+                                # Height-constrained: fit to h, width = h * aspect.
+                                fit_w = h * aspect
+                                fit_h = h
+                                if fit_w > w:
+                                    fit_w = w
+                                    fit_h = w / aspect
+                            else:
+                                fit_w, fit_h = w, h
+                            # Horizontal alignment
+                            if align == "left":
+                                sub_x = x
+                            elif align == "right":
+                                sub_x = x + (w - fit_w)
+                            else:
+                                sub_x = x + (w - fit_w) / 2
+                            # Vertical center
+                            sub_y = y + (h - fit_h) / 2
+                            img_rect = fitz.Rect(sub_x, sub_y, sub_x + fit_w, sub_y + fit_h)
                             page.insert_image(img_rect, stream=img_bytes)
                     except Exception as e:
                         logger.warning(f"Failed to embed {field_type} for field {field_id}: {e}")
 
                 elif field_type in ("text", "date") and field_value:
                     try:
-                        font_size = float(field.get("style", {}).get("fontSize", 10) or 10) * scale
-                        font_size = max(6, min(font_size, 24))
-                        text_point = fitz.Point(x + 2 * scale, y + h - 4 * scale)
+                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
+                        # Scale from 800px canvas to PDF points, then clamp to the
+                        # field's own bounding box so text never outgrows the
+                        # author-designed rectangle (matches frontend
+                        # resolveResponsiveFontSize in InteractiveDocumentViewer).
+                        font_size = base_fs * scale
+                        height_cap = max(6, (h - 4 * scale) * 0.70)
+                        width_cap  = max(6, w / 3)
+                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        # Honour field alignment (left / center / right) in the final PDF.
+                        text_str = str(field_value)
+                        align = (field.get("style") or {}).get("textAlign") or "left"
+                        try:
+                            text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
+                        except Exception:
+                            text_w = 0
+                        if align == "center":
+                            tx = x + max(0, (w - text_w) / 2)
+                        elif align == "right":
+                            tx = x + max(0, w - text_w - 2 * scale)
+                        else:
+                            tx = x + 2 * scale
+                        text_point = fitz.Point(tx, y + h - 4 * scale)
                         page.insert_text(
                             text_point,
-                            str(field_value),
+                            text_str,
                             fontsize=font_size,
                             color=(0, 0, 0)
                         )
@@ -633,7 +775,9 @@ async def sign_with_fields(
                     try:
                         is_checked = field_value in (True, "true", "True")
                         box_size = min(14 * scale, h - 4 * scale)
-                        bx = x + 2 * scale
+                        # Phase 73: Center the checkbox horizontally within the
+                        # field bounding box (matches signing view's justify-center).
+                        bx = x + (w - box_size) / 2
                         by = y + (h - box_size) / 2
                         box_rect = fitz.Rect(bx, by, bx + box_size, by + box_size)
                         page.draw_rect(box_rect, color=(0, 0, 0), width=1)
@@ -655,17 +799,69 @@ async def sign_with_fields(
                         # White background to cover placeholder text
                         bg_rect = fitz.Rect(x, y, x + w, y + h)
                         page.draw_rect(bg_rect, color=None, fill=(1, 1, 1))
-                        font_size = float(field.get("style", {}).get("fontSize", 10) or 10) * scale
-                        font_size = max(6, min(font_size, 24))
-                        text_point = fitz.Point(x + 2 * scale, y + h - 4 * scale)
+                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
+                        font_size = base_fs * scale
+                        height_cap = max(6, (h - 4 * scale) * 0.70)
+                        width_cap  = max(6, w / 3)
+                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        text_str = str(field_value)
+                        align = (field.get("style") or {}).get("textAlign") or "left"
+                        try:
+                            text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
+                        except Exception:
+                            text_w = 0
+                        if align == "center":
+                            tx = x + max(0, (w - text_w) / 2)
+                        elif align == "right":
+                            tx = x + max(0, w - text_w - 2 * scale)
+                        else:
+                            tx = x + 2 * scale
+                        text_point = fitz.Point(tx, y + h - 4 * scale)
                         page.insert_text(
                             text_point,
-                            str(field_value),
+                            text_str,
                             fontsize=font_size,
                             color=(0.05, 0.05, 0.15)
                         )
                     except Exception as e:
                         logger.warning(f"Failed to embed merge field {field_id}: {e}")
+
+                elif field_type == "radio":
+                    # Radio: multiple fields share a group (field.groupName).
+                    # Only draw the option whose optionValue matches the stored
+                    # group selection. Unselected options are omitted from the
+                    # final PDF to keep it clean (matches `hideLabelOnFinal` UX).
+                    try:
+                        group = field.get("groupName") or field.get("group_name")
+                        option_value = field.get("optionValue") or field.get("option_value") or field_id
+                        selected_val = None
+                        if group:
+                            selected_val = combined_field_data.get(group)
+                        if selected_val is None:
+                            # Fallback: stored directly under the field's own id
+                            selected_val = combined_field_data.get(field_id)
+                        is_selected = (selected_val == option_value)
+                        if not is_selected:
+                            # Skip unchecked options — avoids unwanted overlays on the base PDF.
+                            continue
+
+                        # Phase 73: Center the radio circle horizontally
+                        # within the field bounding box (matches signing view).
+                        # Previously `cx = x + radius + 2 * scale` left-aligned
+                        # the circle, producing visible shift on the final PDF
+                        # that grew with field distance from page origin.
+                        radius = min(7 * scale, (h / 2) - 2 * scale)
+                        cx = x + w / 2
+                        cy = y + h / 2
+                        # Outer ring
+                        page.draw_circle(fitz.Point(cx, cy), radius, color=(0, 0, 0), width=1 * scale)
+                        # Inner filled dot
+                        page.draw_circle(fitz.Point(cx, cy), radius * 0.55, color=(0, 0, 0), fill=(0, 0, 0), width=0)
+
+                        # Phase 56: Option label is NEVER drawn in the final PDF
+                        # (DocuSign-style — circle-only, clean output).
+                    except Exception as e:
+                        logger.warning(f"Failed to embed radio field {field_id}: {e}")
 
             # Save modified PDF
             signed_pdf_bytes = pdf_doc.tobytes()
@@ -1032,6 +1228,23 @@ async def approve_package(
     except Exception as e:
         logger.warning(f"Webhook fire_package_event (approved) failed: {e}")
 
+    # Send approval notification email to other recipients
+    try:
+        from ..services.system_email_service import SystemEmailService
+        email_svc = SystemEmailService()
+        pkg_name = package.get("package_name") or package.get("name", "Package")
+        for r in package.get("recipients", []):
+            if r.get("email") and r.get("id") != active_recipient.get("id"):
+                if r.get("status") in ("signed", "completed", "approved", "reviewed", "notified", "sent"):
+                    await email_svc.send_workflow_notification_email(
+                        to_email=r["email"], to_name=r.get("name", ""),
+                        document_name=pkg_name, notification_type="approved",
+                        extra={"actor_name": active_recipient.get("name", "")},
+                    )
+        logger.info(f"Sent approval notification emails for package {package['id']}")
+    except Exception as ae:
+        logger.warning(f"Failed to send approval notification emails: {ae}")
+
     return {
         "success": True,
         "message": "Package approved",
@@ -1149,6 +1362,23 @@ async def reject_package(
         )
     except Exception as e:
         logger.warning(f"Webhook fire_package_event (rejected) failed: {e}")
+
+    # Send rejection notification email to other recipients
+    try:
+        from ..services.system_email_service import SystemEmailService
+        email_svc = SystemEmailService()
+        pkg_name = package.get("package_name") or package.get("name", "Package")
+        for r in package.get("recipients", []):
+            if r.get("email") and r.get("id") != active_recipient.get("id"):
+                if r.get("status") in ("signed", "completed", "approved", "reviewed", "notified", "sent"):
+                    await email_svc.send_workflow_notification_email(
+                        to_email=r["email"], to_name=r.get("name", ""),
+                        document_name=pkg_name, notification_type="rejected",
+                        extra={"actor_name": active_recipient.get("name", ""), "reason": req.reason.strip()},
+                    )
+        logger.info(f"Sent rejection notification emails for package {package['id']}")
+    except Exception as re_err:
+        logger.warning(f"Failed to send rejection notification emails: {re_err}")
 
     return {
         "success": True,

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { X, Pencil, Type, Upload, Check } from 'lucide-react';
+import { computeInitials } from '../utils/initials';
 
 const SIGNATURE_FONTS = [
   { name: 'Classic', family: "'Dancing Script', cursive", weight: 700 },
@@ -9,19 +10,51 @@ const SIGNATURE_FONTS = [
   { name: 'Smooth', family: "'Pacifico', cursive", weight: 400 },
 ];
 
-const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }) => {
-  const [mode, setMode] = useState('draw');
+const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, assignedSignatureFieldIds = [], signerName = '' }) => {
+  const [mode, setMode] = useState('type');
   const [typedText, setTypedText] = useState('');
   const [selectedFont, setSelectedFont] = useState(0);
   const canvasRef = useRef(null);
   const [isDrawing, setIsDrawing] = useState(false);
   const [hasDrawn, setHasDrawn] = useState(false);
+  const [applyToAll, setApplyToAll] = useState(false);
+
+  // Only show "apply to all" if there are multiple assigned fields of the same type
+  const otherFields = assignedSignatureFieldIds.filter(id => id !== fieldId);
+  const showApplyToAll = otherFields.length > 0;
 
   useEffect(() => {
-    if (isOpen && mode === 'draw') {
-      initializeCanvas();
+    if (isOpen) {
+      // Reset state every time the modal opens so the signer can't accidentally
+      // carry text from a previous field (e.g., typing "John Doe" for signature
+      // and having it pre-filled into the next Initials modal).
+      setMode('type');
+      // Pre-fill for DocuSign-style UX:
+      //   • Signature field → full name (e.g. "Rohit Singh")
+      //   • Initials field  → derived initials (e.g. "RS")
+      // In both cases the signer can overwrite before saving.
+      const nameToSeed = (signerName || '').trim();
+      setTypedText(nameToSeed ? (isInitials ? computeInitials(nameToSeed) : nameToSeed) : '');
+      setSelectedFont(0);
+      setHasDrawn(false);
+      // Phase 66: Safety-first default — the "Apply to all my assigned fields"
+      // checkbox must start UNCHECKED. Users must explicitly opt-in to bulk
+      // apply; the previous "default ON" behavior was unsafe when counts were
+      // inflated. The checkbox still renders whenever >1 owned field exists.
+      setApplyToAll(false);
+      if (mode === 'draw') {
+        initializeCanvas();
+      }
     }
-  }, [isOpen, mode]);
+    // eslint-disable-next-line
+  }, [isOpen]);
+
+  // Re-initialize the canvas whenever mode switches to 'draw' (after the canvas
+  // DOM node remounts). Separate from the open-reset effect above.
+  useEffect(() => {
+    if (isOpen && mode === 'draw') initializeCanvas();
+    // eslint-disable-next-line
+  }, [mode, isOpen]);
 
   const initializeCanvas = () => {
     const canvas = canvasRef.current;
@@ -67,8 +100,10 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }
     canvas.width = 400;
     canvas.height = 100;
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Phase 3: Ensure transparency by NOT filling with white background
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
     const fontSize = isInitials ? 36 : 44;
     ctx.font = `${font.weight} ${fontSize}px ${font.family}`;
     ctx.fillStyle = '#1a1a2e';
@@ -78,17 +113,37 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }
     return canvas.toDataURL('image/png');
   };
 
+  const removeWhiteBackground = (canvas) => {
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      // If pixel is near-white (R, G, B > 240), make it transparent
+      if (data[i] > 240 && data[i + 1] > 240 && data[i + 2] > 240) {
+        data[i + 3] = 0;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  };
+
   const handleSave = () => {
     let signatureData = null;
     if (mode === 'draw') {
       if (!hasDrawn) { alert('Please draw your signature first'); return; }
-      signatureData = canvasRef.current.toDataURL('image/png');
+      const canvas = canvasRef.current;
+      removeWhiteBackground(canvas);
+      signatureData = canvas.toDataURL('image/png');
     } else if (mode === 'type') {
       if (!typedText.trim()) { alert('Please type your signature first'); return; }
       signatureData = generateTypedSignatureImage(typedText, selectedFont);
     }
     if (signatureData) {
-      onSave(fieldId, signatureData);
+      if (applyToAll && otherFields.length > 0) {
+        // Apply to current field + all other assigned signature fields
+        onSave(fieldId, signatureData, [fieldId, ...otherFields]);
+      } else {
+        onSave(fieldId, signatureData, null);
+      }
       onClose();
     }
   };
@@ -97,7 +152,20 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => { onSave(fieldId, event.target.result); onClose(); };
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        removeWhiteBackground(canvas);
+        onSave(fieldId, canvas.toDataURL('image/png'));
+        onClose();
+      };
+      img.src = event.target.result;
+    };
     reader.readAsDataURL(file);
   };
 
@@ -120,9 +188,8 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }
         <div className="flex border-b border-gray-200">
           <button
             onClick={() => setMode('draw')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors ${
-              mode === 'draw' ? 'border-b-2 border-indigo-500 text-indigo-600' : 'text-gray-500 hover:text-gray-700'
-            }`}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors ${mode === 'draw' ? 'border-b-2 border-indigo-500 text-indigo-600' : 'text-gray-500 hover:text-gray-700'
+              }`}
             data-testid="signature-mode-draw"
           >
             <Pencil className="h-4 w-4" />
@@ -130,9 +197,8 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }
           </button>
           <button
             onClick={() => setMode('type')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors ${
-              mode === 'type' ? 'border-b-2 border-indigo-500 text-indigo-600' : 'text-gray-500 hover:text-gray-700'
-            }`}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors ${mode === 'type' ? 'border-b-2 border-indigo-500 text-indigo-600' : 'text-gray-500 hover:text-gray-700'
+              }`}
             data-testid="signature-mode-type"
           >
             <Type className="h-4 w-4" />
@@ -140,9 +206,8 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }
           </button>
           <button
             onClick={() => setMode('upload')}
-            className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors ${
-              mode === 'upload' ? 'border-b-2 border-indigo-500 text-indigo-600' : 'text-gray-500 hover:text-gray-700'
-            }`}
+            className={`flex-1 flex items-center justify-center gap-2 py-3 text-sm font-medium transition-colors ${mode === 'upload' ? 'border-b-2 border-indigo-500 text-indigo-600' : 'text-gray-500 hover:text-gray-700'
+              }`}
             data-testid="signature-mode-upload"
           >
             <Upload className="h-4 w-4" />
@@ -190,11 +255,10 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }
                       <button
                         key={idx}
                         onClick={() => setSelectedFont(idx)}
-                        className={`relative w-full h-16 border-2 rounded-lg flex items-center justify-center bg-white transition-all ${
-                          selectedFont === idx
+                        className={`relative w-full h-16 border-2 rounded-lg flex items-center justify-center bg-white transition-all ${selectedFont === idx
                             ? 'border-indigo-500 ring-2 ring-indigo-200 bg-indigo-50/50'
                             : 'border-gray-200 hover:border-gray-400'
-                        }`}
+                          }`}
                         data-testid={`signature-style-${idx}`}
                       >
                         <span
@@ -236,6 +300,23 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false }
             </div>
           )}
         </div>
+
+        {/* Apply to All Checkbox */}
+        {showApplyToAll && (
+          <div className="px-6 pb-2">
+            <label className="flex items-center gap-2.5 cursor-pointer select-none p-3 rounded-lg bg-indigo-50 border border-indigo-100 hover:bg-indigo-100 transition-colors" data-testid="apply-to-all-checkbox">
+              <input
+                type="checkbox"
+                checked={applyToAll}
+                onChange={(e) => setApplyToAll(e.target.checked)}
+                className="h-4 w-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+              />
+              <span className="text-sm text-indigo-800 font-medium">
+                Apply this {isInitials ? 'initial' : 'signature'} to all my assigned {isInitials ? 'initial' : 'signature'} fields ({otherFields.length + 1} fields)
+              </span>
+            </label>
+          </div>
+        )}
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-3 p-4 border-t border-gray-200">

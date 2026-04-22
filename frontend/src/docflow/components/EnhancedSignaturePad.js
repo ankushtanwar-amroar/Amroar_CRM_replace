@@ -3,7 +3,7 @@ import { X, Type, Edit3, Upload } from 'lucide-react';
 
 const EnhancedSignaturePad = ({ onSave, onClose }) => {
   const canvasRef = useRef(null);
-  const [mode, setMode] = useState('draw'); // draw, type, upload
+  const [mode, setMode] = useState('type'); // draw, type, upload
   const [isDrawing, setIsDrawing] = useState(false);
   const [isEmpty, setIsEmpty] = useState(true);
   const [typedText, setTypedText] = useState('');
@@ -101,6 +101,19 @@ const EnhancedSignaturePad = ({ onSave, onClose }) => {
     if (isEmpty) return;
     
     const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    // Phase 3: Remove white background to ensure transparency
+    const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const data = imgData.data;
+    for (let i = 0; i < data.length; i += 4) {
+      // If pixel is near-white, make it transparent
+      if (data[i] > 240 && data[i+1] > 240 && data[i+2] > 240) {
+        data[i+3] = 0;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+
     const signatureData = canvas.toDataURL('image/png');
     console.log(onSave)
     onSave(signatureData);

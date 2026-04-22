@@ -21,8 +21,17 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (response) => response.data,
   (error) => {
-    const message = error.response?.data?.detail || error.response?.data?.message || error.message || 'Request failed';
-    return Promise.reject(new Error(message));
+    const data = error.response?.data;
+    const message = data?.detail || data?.message || error.message || 'Request failed';
+    const err = new Error(message);
+    // Preserve backend's structured error payload (list of specific validation
+    // reasons) so callers can surface the real cause, not just the top-level
+    // "Processing failed." label. Also attach HTTP status for finer-grained
+    // error UX in the caller.
+    err.status = error.response?.status;
+    err.errors = Array.isArray(data?.errors) ? data.errors : [];
+    err.payload = data;
+    return Promise.reject(err);
   }
 );
 
@@ -108,9 +117,9 @@ export const docflowService = {
   // ===== AI Generation =====
 
   async aiGenerateTemplate(prompt, industry = 'General', selectedDocType = null, basePrompt = '') {
-    return api.post('/docflow/templates/ai-generate', { 
-      prompt, 
-      industry, 
+    return api.post('/docflow/templates/ai-generate', {
+      prompt,
+      industry,
       selected_doc_type: selectedDocType,
       base_prompt: basePrompt
     });
@@ -130,6 +139,10 @@ export const docflowService = {
 
   async validateTemplate(templateId) {
     return api.post(`/docflow/templates/${templateId}/validate`);
+  },
+
+  async validateTemplateObject(templateBody) {
+    return api.post('/docflow/templates/validate-object', templateBody);
   },
 
   // ===== Logs =====
@@ -195,6 +208,18 @@ export const docflowService = {
 
   async getDocuments(params = {}) {
     return api.get('/docflow/documents', { params });
+  },
+
+  async downloadDocument(documentId, version = 'signed') {
+    const token = localStorage.getItem('token');
+    const resp = await fetch(`${API_URL}/api/docflow/documents/${documentId}/download/${version}`, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `Failed to download ${version} document`);
+    }
+    return resp.blob();
   },
 
   // ===== Generate Links API (Salesforce → DocFlow) =====
