@@ -200,10 +200,18 @@ class DocumentService:
     
     async def list_documents(self, tenant_id: str, template_id: Optional[str] = None,
                            status: Optional[str] = None, search: Optional[str] = None,
-                           page: int = 1, limit: int = 10, sort_order: str = "newest") -> Dict[str, Any]:
+                           page: int = 1, limit: int = 10, sort_order: str = "newest",
+                           include_children: bool = False) -> Dict[str, Any]:
         """List documents with pagination and search
-        
+
         OPTIMIZED: Uses projection and parallel queries
+
+        Phase 79 — rollup: by default, filters out documents that have a
+        `parent_document_id` set. These are generated per-recipient child
+        records that inflate the listing (e.g., one template sent to 3
+        recipients would show 4 rows: 1 parent + 3 children). The parent
+        row already aggregates all recipient state; children can be fetched
+        via the detail endpoint. Pass `include_children=True` to see them.
         """
         query = {"tenant_id": tenant_id}
         if template_id:
@@ -217,12 +225,21 @@ class DocumentService:
                 {"recipient_email": {"$regex": search, "$options": "i"}},
                 {"recipient_name": {"$regex": search, "$options": "i"}}
             ]
+        if not include_children:
+            # Phase 79: exclude per-recipient children (their parent covers them)
+            query["$and"] = (query.get("$and") or []) + [
+                {"$or": [
+                    {"parent_document_id": None},
+                    {"parent_document_id": {"$exists": False}},
+                    {"parent_document_id": ""},
+                ]}
+            ]
 
         skip = (page - 1) * limit
-        
+
         # Sort direction
         sort_dir = -1 if sort_order == "newest" else 1
-        
+
         # OPTIMIZATION: Use projection to exclude large fields
         projection = {
             "_id": 0,
@@ -235,11 +252,21 @@ class DocumentService:
             "recipient_email": 1,
             "recipient_name": 1,
             "created_at": 1,
+            "updated_at": 1,
             "sent_at": 1,
             "viewed_at": 1,
             "signed_at": 1,
+            "completed_at": 1,
             "expires_at": 1,
             "document_url": 1,
+            # Phase 79 — rollup extras for enterprise listing
+            "recipients": 1,
+            "delivery_channels": 1,
+            "delivery_mode": 1,
+            "routing_mode": 1,
+            "parent_document_id": 1,
+            "child_document_ids": 1,
+            "public_token": 1,
             # Rejection fields for comment icon display
             "reject_reason": 1,
             "rejected_by": 1,
@@ -253,6 +280,57 @@ class DocumentService:
         documents_task = self.collection.find(query, projection).sort("created_at", sort_dir).skip(skip).limit(limit).to_list(length=limit)
         
         total, documents = await asyncio.gather(total_task, documents_task)
+
+        # Phase 79 — enrich each doc with derived rollup fields for the UI.
+        for doc in documents:
+            recipients = doc.get("recipients") or []
+            total_recipients = len(recipients)
+            signed_count = sum(1 for r in recipients if r.get("status") in ("signed", "completed") or r.get("signed_at"))
+            viewed_count = sum(1 for r in recipients if r.get("status") == "viewed")
+            voided_count = sum(1 for r in recipients if r.get("voided") or r.get("status") == "voided")
+            pending_count = max(0, total_recipients - signed_count - voided_count)
+
+            channels = doc.get("delivery_channels") or []
+            is_public_link = "public_link" in channels and "email" not in channels
+            is_email = "email" in channels
+            doc["send_type"] = "public_link" if is_public_link else ("email" if is_email else (channels[0] if channels else "email"))
+            doc["total_recipients"] = total_recipients
+            doc["signed_count"] = signed_count
+            doc["viewed_count"] = viewed_count
+            doc["voided_count"] = voided_count
+            doc["pending_count"] = pending_count
+
+            # Aggregate status (for UI chip). Uses recipients when present;
+            # falls back to the doc's own status for single-recipient legacy rows.
+            raw_status = (doc.get("status") or "").lower()
+            if doc["send_type"] == "public_link":
+                # Public link: Active (always, until closed). Submissions appear on detail page.
+                if raw_status in ("voided", "cancelled", "closed"):
+                    agg = "closed"
+                else:
+                    agg = "active" if not signed_count else "active_with_submissions"
+            else:
+                if total_recipients == 0:
+                    agg = raw_status or "pending"
+                elif voided_count == total_recipients:
+                    agg = "voided"
+                elif signed_count == total_recipients:
+                    agg = "completed"
+                elif signed_count > 0 or viewed_count > 0:
+                    agg = "in_progress"
+                else:
+                    agg = "pending"
+            doc["aggregate_status"] = agg
+
+            # Best-effort last_updated: completed_at || signed_at || viewed_at || sent_at || updated_at || created_at
+            doc["last_updated"] = (
+                doc.get("completed_at")
+                or doc.get("signed_at")
+                or doc.get("viewed_at")
+                or doc.get("sent_at")
+                or doc.get("updated_at")
+                or doc.get("created_at")
+            )
 
         return {
             "documents": documents,

@@ -796,9 +796,10 @@ async def sign_with_fields(
 
                 elif field_type == "merge" and field_value:
                     try:
-                        # White background to cover placeholder text
-                        bg_rect = fitz.Rect(x, y, x + w, y + h)
-                        page.draw_rect(bg_rect, color=None, fill=(1, 1, 1))
+                        # Removed white background to make merge fields transparent
+                        #     bg_rect = fitz.Rect(x, y, x + w, y + h)
+                        # page.draw_rect(bg_rect, color=None, fill=(1, 1, 1))
+                        
                         base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
                         font_size = base_fs * scale
                         height_cap = max(6, (h - 4 * scale) * 0.70)
@@ -862,6 +863,24 @@ async def sign_with_fields(
                         # (DocuSign-style — circle-only, clean output).
                     except Exception as e:
                         logger.warning(f"Failed to embed radio field {field_id}: {e}")
+
+            # Phase 76: stamp Package Verification ID at top-left of every
+            # page (DocuSign-style audit trail). Runs once per page regardless
+            # of whether that page has fields.
+            try:
+                package_verification_id = str(package.get("id") or "").upper()
+                if package_verification_id:
+                    stamp_text = f"Package Verification ID: {package_verification_id}"
+                    for _pg in pdf_doc:
+                        _pg.insert_text(
+                            fitz.Point(18, 14),
+                            stamp_text,
+                            fontname="helv",
+                            fontsize=8,
+                            color=(0.4, 0.4, 0.4),
+                        )
+            except Exception as stamp_err:
+                logger.warning(f"Verification stamp failed for package {package.get('id')}: {stamp_err}")
 
             # Save modified PDF
             signed_pdf_bytes = pdf_doc.tobytes()

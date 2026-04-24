@@ -9,7 +9,7 @@ import os
 import io
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,33 @@ router = APIRouter(prefix="/docflow", tags=["DocFlow Documents"])
 # Services
 document_service = DocumentService(db)
 enhanced_document_service = EnhancedDocumentService(db)
+
+
+async def _resolve_sender_info(user_id: Optional[str]) -> Optional[dict]:
+    """Phase 74: Resolve `created_by` user id → {name, email} for public
+    signing-view header. Returns None when user_id is missing or the user
+    record cannot be found (caller must treat as optional)."""
+    if not user_id:
+        return None
+    try:
+        user = await db.users.find_one(
+            {"id": user_id},
+            {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
+        )
+        if not user:
+            return None
+        name = (
+            user.get("full_name")
+            or user.get("name")
+            or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
+            or (user.get("email") or "").split("@")[0]
+        )
+        email = user.get("email") or ""
+        if not name and not email:
+            return None
+        return {"name": name, "email": email}
+    except Exception:
+        return None
 
 
 @router.post("/documents/generate", response_model=Document, status_code=status.HTTP_201_CREATED)
@@ -94,6 +121,129 @@ async def get_document(
     return Document(**document)
 
 
+@router.get("/documents/{document_id}/detail")
+async def get_document_detail(
+    document_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Phase 79 — enriched detail payload for the new Documents detail page.
+
+    Returns the document's full state:
+      * metadata (name, send id, template, routing mode, channels, timestamps)
+      * sender info (resolved from created_by)
+      * recipients / submissions array with per-row status + download links
+      * aggregated counters (total / completed / pending / viewed / voided)
+      * download urls (original unsigned + final signed when available)
+      * audit trail
+      * per-recipient children if a parent-child split was used
+    """
+    document = await db.docflow_documents.find_one(
+        {"id": document_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0},
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Children (per-recipient split) — only when parent has explicit child list
+    child_ids = document.get("child_document_ids") or []
+    children = []
+    if child_ids:
+        cursor = db.docflow_documents.find(
+            {"id": {"$in": child_ids}, "tenant_id": current_user.tenant_id},
+            {"_id": 0},
+        )
+        async for c in cursor:
+            children.append(c)
+
+    # Effective recipients: prefer the parent's recipients[] (that's where
+    # current send flow stores state). Fall back to the children array.
+    recipients = document.get("recipients") or []
+    if not recipients and children:
+        # Synthesize a minimal recipient row per child so the detail UI has
+        # something to show even for older split documents.
+        for c in children:
+            recipients.append({
+                "id": c.get("id"),
+                "name": c.get("recipient_name"),
+                "email": c.get("recipient_email"),
+                "status": c.get("status"),
+                "public_token": c.get("public_token"),
+                "signed_at": c.get("signed_at"),
+                "viewed_at": c.get("viewed_at"),
+            })
+
+    # Counters
+    total = len(recipients)
+    signed = sum(1 for r in recipients if r.get("status") in ("signed", "completed") or r.get("signed_at"))
+    viewed = sum(1 for r in recipients if r.get("status") == "viewed")
+    voided = sum(1 for r in recipients if r.get("voided") or r.get("status") == "voided")
+    pending = max(0, total - signed - voided)
+
+    # Type detection
+    channels = document.get("delivery_channels") or []
+    send_type = (
+        "public_link" if ("public_link" in channels and "email" not in channels)
+        else ("email" if "email" in channels else (channels[0] if channels else "email"))
+    )
+
+    # Sender info
+    sender = await _resolve_sender_info(document.get("created_by"))
+
+    # Download URLs (when present)
+    downloads = {
+        "original": document.get("unsigned_file_url") or document.get("document_url"),
+        "signed": document.get("signed_file_url"),
+    }
+
+    # Aggregate status for the detail header chip (same logic as listing)
+    raw_status = (document.get("status") or "").lower()
+    if send_type == "public_link":
+        if raw_status in ("voided", "cancelled", "closed"):
+            aggregate_status = "closed"
+        else:
+            aggregate_status = "active_with_submissions" if signed else "active"
+    else:
+        if total == 0:
+            aggregate_status = raw_status or "pending"
+        elif voided == total:
+            aggregate_status = "voided"
+        elif signed == total:
+            aggregate_status = "completed"
+        elif signed > 0 or viewed > 0:
+            aggregate_status = "in_progress"
+        else:
+            aggregate_status = "pending"
+
+    return {
+        "id": document.get("id"),
+        "send_id": document.get("id"),
+        "template_id": document.get("template_id"),
+        "template_name": document.get("template_name"),
+        "status": document.get("status"),
+        "aggregate_status": aggregate_status,
+        "send_type": send_type,
+        "routing_mode": document.get("routing_mode") or "parallel",
+        "delivery_channels": channels,
+        "created_at": document.get("created_at"),
+        "updated_at": document.get("updated_at"),
+        "sent_at": document.get("sent_at"),
+        "completed_at": document.get("completed_at"),
+        "expires_at": document.get("expires_at"),
+        "sender": sender,
+        "recipients": recipients,
+        "counters": {
+            "total": total,
+            "signed": signed,
+            "viewed": viewed,
+            "voided": voided,
+            "pending": pending,
+        },
+        "downloads": downloads,
+        "public_token": document.get("public_token"),
+        "audit_trail": document.get("audit_trail") or [],
+    }
+
+
 @router.get("/documents/public/{token}")
 async def get_document_public(token: str):
     """Get document by public token (for signing - no auth required)"""
@@ -130,7 +280,22 @@ async def get_document_public(token: str):
             result["unsigned_view_url"] = f"/api/docflow/documents/{doc_id}/view/unsigned"
             if result["has_signed_version"]:
                 result["signed_view_url"] = f"/api/docflow/documents/{doc_id}/view/signed"
-        
+
+        # Phase 74: Resolve sender info (document.created_by → user record)
+        # for the public signing-view header. Falls back silently if missing.
+        sender_info = await _resolve_sender_info(result.get("created_by"))
+        if sender_info:
+            result["sender"] = sender_info
+
+        # Phase 80: surface voided state so the signing page can block actions
+        # and show the "access revoked" popup. Frontend polls this endpoint to
+        # detect mid-session voids.
+        active = result.get("active_recipient") or {}
+        if active.get("voided") or active.get("status") == "voided":
+            result["recipient_voided"] = True
+            result["can_sign"] = False
+            result["voided_at"] = active.get("voided_at")
+
         return result
     except HTTPException:
         raise
@@ -212,6 +377,21 @@ async def sign_document(
     try:
         if await enhanced_document_service.mark_expired_if_needed(document_id):
             raise HTTPException(status_code=410, detail="Document has expired")
+
+        # Phase 80: block signing attempts from voided recipients server-side.
+        # Frontend will also hide controls, but this is the authoritative check.
+        if recipient_token:
+            _doc = await db.docflow_documents.find_one(
+                {"id": document_id},
+                {"_id": 0, "recipients": 1},
+            )
+            if _doc:
+                _r = next(
+                    (r for r in (_doc.get("recipients") or []) if r.get("public_token") == recipient_token),
+                    None,
+                )
+                if _r and (_r.get("voided") or _r.get("status") == "voided"):
+                    raise HTTPException(status_code=403, detail="This signing request has been voided by the sender")
 
         # Parse field data
         field_data_dict = {}
@@ -421,7 +601,352 @@ async def get_analytics_summary(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
-@router.post("/documents/{document_id}/role-action")
+@router.post("/documents/{document_id}/recipients/{recipient_id}/resend")
+async def resend_recipient_email(
+    document_id: str,
+    recipient_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Phase 79 — resend the signing invitation email to a single recipient.
+
+    Re-renders the signing URL (recipient.public_token) and pushes a fresh
+    email through the existing EmailService. Updates the recipient's
+    `resent_at` timestamp on success for auditing.
+    """
+    document = await db.docflow_documents.find_one(
+        {"id": document_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0},
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    recipient = next(
+        (r for r in (document.get("recipients") or []) if r.get("id") == recipient_id),
+        None,
+    )
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    if not recipient.get("email"):
+        raise HTTPException(status_code=400, detail="Recipient has no email to send to")
+
+    # Build signing URL using existing EmailService helper pattern
+    try:
+        from ..services.system_email_service import SystemEmailService
+        email_service = SystemEmailService()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Email service unavailable: {e}")
+
+    public_token = recipient.get("public_token")
+    if not public_token:
+        raise HTTPException(status_code=400, detail="Recipient has no public_token")
+
+    # Resolve a sensible frontend base URL (same logic used on initial send)
+    frontend_base = os.environ.get("FRONTEND_URL") or os.environ.get("PUBLIC_BASE_URL") or ""
+    recipient_url = f"{frontend_base.rstrip('/')}/docflow/view/{public_token}" if frontend_base else f"/docflow/view/{public_token}"
+
+    try:
+        result = await email_service.send_document_email(
+            recipient_email=recipient.get("email"),
+            recipient_name=recipient.get("name") or recipient.get("email"),
+            template_name=document.get("template_name") or "Document",
+            document_url=recipient_url,
+            pdf_content=None,
+            sender_name="DocFlow CRM"
+        )
+    except Exception as e:
+        logger.error(f"Error resending email: {e}")
+        raise HTTPException(status_code=500, detail="Unable to resend email. Please try again.")
+
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "Unable to resend email. Please try again.")
+
+    # Audit: stamp resent_at on the recipient + push audit_trail event
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.docflow_documents.update_one(
+        {"id": document_id, "recipients.id": recipient_id},
+        {
+            "$set": {"recipients.$.resent_at": now_iso, "updated_at": now_iso},
+            "$push": {
+                "audit_trail": {
+                    "event": "email_resent",
+                    "actor": current_user.email,
+                    "recipient_id": recipient_id,
+                    "recipient_email": recipient.get("email"),
+                    "at": now_iso,
+                }
+            },
+        },
+    )
+
+    return {"success": True, "resent_at": now_iso}
+
+
+async def _advance_sequential_routing(document_id: str, tenant_id: str, voided_recipient_id: str) -> Optional[dict]:
+    """Phase 80 — for sequential routing, when the ACTIVE recipient is voided,
+    advance to the next non-voided, non-signed recipient in order and send
+    them a fresh signing email. Returns the newly-activated recipient dict
+    (with side-effect email sent) or None if no next recipient exists."""
+    doc = await db.docflow_documents.find_one(
+        {"id": document_id, "tenant_id": tenant_id},
+        {"_id": 0},
+    )
+    if not doc:
+        return None
+    if (doc.get("routing_mode") or "parallel").lower() != "sequential":
+        return None
+
+    recipients = sorted(
+        doc.get("recipients") or [],
+        key=lambda r: r.get("routing_order") if r.get("routing_order") is not None else 9999,
+    )
+    # Find next candidate after the voided recipient's order
+    voided = next((r for r in recipients if r.get("id") == voided_recipient_id), None)
+    if not voided:
+        return None
+    voided_order = voided.get("routing_order") or 0
+
+    next_r = next(
+        (
+            r for r in recipients
+            if (r.get("routing_order") or 0) > voided_order
+            and not r.get("voided")
+            and r.get("status") not in ("signed", "completed", "voided")
+        ),
+        None,
+    )
+    if not next_r:
+        return None
+
+    # Send signing email to the next recipient
+    try:
+        from ..services.system_email_service import SystemEmailService
+        email_service = SystemEmailService()
+    except Exception as e:
+        logger.warning(f"EmailService unavailable for sequential advance: {e}")
+        return next_r
+
+    public_token = next_r.get("public_token")
+    frontend_base = os.environ.get("FRONTEND_URL") or os.environ.get("PUBLIC_BASE_URL") or ""
+    recipient_url = f"{frontend_base.rstrip('/')}/docflow/view/{public_token}" if frontend_base and public_token else (f"/docflow/view/{public_token}" if public_token else "")
+
+    try:
+        if recipient_url and next_r.get("email"):
+            await email_service.send_document_email(
+                recipient_email=next_r.get("email"),
+                recipient_name=next_r.get("name") or next_r.get("email"),
+                template_name=doc.get("template_name") or "Document",
+                document_url=recipient_url,
+                pdf_content=None,
+                sender_name="DocFlow CRM"
+            )
+    except Exception as e:
+        logger.warning(f"Sequential advance email failed: {e}")
+
+    # Stamp sent_at on the advanced recipient
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.docflow_documents.update_one(
+        {"id": document_id, "recipients.id": next_r.get("id")},
+        {
+            "$set": {
+                "recipients.$.sent_at": now_iso,
+                "recipients.$.status": "sent",
+                "updated_at": now_iso,
+            },
+            "$push": {
+                "audit_trail": {
+                    "event": "sequential_advanced",
+                    "recipient_id": next_r.get("id"),
+                    "recipient_email": next_r.get("email"),
+                    "at": now_iso,
+                }
+            },
+        },
+    )
+    return next_r
+
+
+@router.post("/documents/{document_id}/recipients/{recipient_id}/void")
+async def void_recipient(
+    document_id: str,
+    recipient_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Phase 80 — void a single recipient (EMAIL flow only).
+
+    Blocks the recipient from opening their signing link, advances sequential
+    routing to the next recipient, and sends a cancellation email. Already-
+    signed recipients cannot be voided (returns 409).
+    """
+    document = await db.docflow_documents.find_one(
+        {"id": document_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0},
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    recipient = next(
+        (r for r in (document.get("recipients") or []) if r.get("id") == recipient_id),
+        None,
+    )
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+
+    # Public link docs don't have per-recipient void semantics
+    channels = document.get("delivery_channels") or []
+    if "public_link" in channels and "email" not in channels:
+        raise HTTPException(status_code=400, detail="Void is only supported for Email flow documents")
+
+    if recipient.get("status") in ("signed", "completed") or recipient.get("signed_at"):
+        raise HTTPException(status_code=409, detail="Cannot void a recipient who has already signed")
+    if recipient.get("voided"):
+        raise HTTPException(status_code=409, detail="Recipient is already voided")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.docflow_documents.update_one(
+        {"id": document_id, "recipients.id": recipient_id},
+        {
+            "$set": {
+                "recipients.$.voided": True,
+                "recipients.$.voided_at": now_iso,
+                "recipients.$.voided_by": current_user.email,
+                "recipients.$.status": "voided",
+                "updated_at": now_iso,
+            },
+            "$push": {
+                "audit_trail": {
+                    "event": "recipient_voided",
+                    "actor": current_user.email,
+                    "recipient_id": recipient_id,
+                    "recipient_email": recipient.get("email"),
+                    "at": now_iso,
+                }
+            },
+        },
+    )
+
+    # Send cancellation email (best-effort, never blocks the void)
+    try:
+        from ..services.email_service import EmailService
+        email_service = EmailService()
+        if recipient.get("email") and email_service.smtp_user and email_service.smtp_password:
+            subject = f"Signing request cancelled: {document.get('template_name') or 'Document'}"
+            body_html = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; padding: 24px;">
+              <h2 style="color:#b91c1c; margin:0 0 12px;">Signing request cancelled</h2>
+              <p>Hello {recipient.get('name') or recipient.get('email')},</p>
+              <p>Your signing request for <strong>{document.get('template_name') or 'Document'}</strong> has been cancelled by the sender. You will no longer be able to access or sign the document.</p>
+              <p>If you believe this was a mistake, please contact the sender directly.</p>
+              <hr style="border:none; border-top:1px solid #e5e7eb; margin:24px 0;" />
+              <p style="color:#9ca3af; font-size:12px;">Sent by DocFlow CRM</p>
+            </div>
+            """
+            await email_service._send_email(
+                to_email=recipient.get("email"),
+                subject=subject,
+                html_body=body_html,
+            )
+    except Exception as e:
+        logger.warning(f"Void cancellation email failed: {e}")
+
+    # Sequential routing: advance to next if applicable
+    advanced = await _advance_sequential_routing(document_id, current_user.tenant_id, recipient_id)
+
+    return {
+        "success": True,
+        "voided_at": now_iso,
+        "advanced_to": {
+            "id": advanced.get("id"),
+            "name": advanced.get("name"),
+            "email": advanced.get("email"),
+        } if advanced else None,
+    }
+
+
+@router.post("/documents/{document_id}/recipients/{recipient_id}/unvoid")
+async def unvoid_recipient(
+    document_id: str,
+    recipient_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Phase 80 — unvoid (restore) a previously voided recipient.
+
+    Flips `voided=False`, restores status back to `pending` (or `sent` if the
+    recipient had been sent already), clears void stamps, and re-sends a
+    fresh signing email so the recipient has a working link.
+    """
+    document = await db.docflow_documents.find_one(
+        {"id": document_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0},
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    recipient = next(
+        (r for r in (document.get("recipients") or []) if r.get("id") == recipient_id),
+        None,
+    )
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+
+    if not recipient.get("voided") and recipient.get("status") != "voided":
+        raise HTTPException(status_code=409, detail="Recipient is not voided")
+
+    # Decide the restored status: pending if never sent, else sent
+    restored_status = "sent" if recipient.get("sent_at") else "pending"
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.docflow_documents.update_one(
+        {"id": document_id, "recipients.id": recipient_id},
+        {
+            "$set": {
+                "recipients.$.voided": False,
+                "recipients.$.voided_at": None,
+                "recipients.$.voided_by": None,
+                "recipients.$.status": restored_status,
+                "recipients.$.unvoided_at": now_iso,
+                "recipients.$.unvoided_by": current_user.email,
+                "updated_at": now_iso,
+            },
+            "$push": {
+                "audit_trail": {
+                    "event": "recipient_unvoided",
+                    "actor": current_user.email,
+                    "recipient_id": recipient_id,
+                    "recipient_email": recipient.get("email"),
+                    "at": now_iso,
+                }
+            },
+        },
+    )
+
+    # Send fresh signing email so the recipient has a working link
+    try:
+        from ..services.email_service import EmailService
+        email_service = EmailService()
+        public_token = recipient.get("public_token")
+        frontend_base = os.environ.get("FRONTEND_URL") or os.environ.get("PUBLIC_BASE_URL") or ""
+        recipient_url = (
+            f"{frontend_base.rstrip('/')}/docflow/view/{public_token}"
+            if frontend_base and public_token
+            else (f"/docflow/view/{public_token}" if public_token else "")
+        )
+        if recipient_url and recipient.get("email"):
+            await email_service.send_document_email(
+                recipient_email=recipient.get("email"),
+                recipient_name=recipient.get("name") or recipient.get("email"),
+                template_name=document.get("template_name") or "Document",
+                document_url=recipient_url,
+                pdf_content=None,
+                sender_name="DocFlow CRM",
+                expires_in_days=None,
+            )
+    except Exception as e:
+        logger.warning(f"Unvoid signing email failed: {e}")
+
+    return {"success": True, "unvoided_at": now_iso, "status": restored_status}
+
+
+
 async def document_role_action(document_id: str, request: Request):
     """Handle Approver/Reviewer actions on a template-level document."""
     from datetime import timezone

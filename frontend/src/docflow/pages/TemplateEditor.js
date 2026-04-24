@@ -844,7 +844,11 @@ const TemplateEditor = () => {
         </div>
       )}
 
-      <div className="max-w-7xl mx-auto px-6 py-6">
+      {/* Phase 76: full-width on wide screens — visual builder needs every
+          pixel of horizontal space on 1600/1920/2560px+ monitors. We cap at
+          2xl:max-w-[1600px] for content tabs; the visual builder tab uses
+          a wider cap so the canvas can expand. */}
+      <div className={`${activeTab === 'visual' ? 'max-w-none 2xl:max-w-[1920px]' : 'max-w-7xl'} mx-auto px-4 sm:px-6 py-6`}>
         {/* Tab Content */}
         {/* {activeTab === 'visual' && (isEditMode || uploadedPdfFile) ? ( */}
         {/* Tab Content */}

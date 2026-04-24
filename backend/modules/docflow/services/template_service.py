@@ -279,6 +279,66 @@ class TemplateService:
         result = await self.collection.delete_one({"id": template_id, "tenant_id": tenant_id})
         return result.deleted_count > 0
 
+    async def clone_template(self, source_template_id: str, tenant_id: str, user_id: str) -> dict:
+        """
+        Clone a template into a completely independent copy.
+        - Copies all structural data: fields, placements, CRM mappings, builder data, etc.
+        - Resets all runtime/history data: send history, audit trail, signatures, logs.
+        - Assigns a brand-new group ID so the clone is independent of the source version tree.
+        - Sets status to 'draft' so the clone is editable before activation.
+        """
+        source = await self.get_template(source_template_id, tenant_id)
+        if not source:
+            raise ValueError("Source template not found")
+
+        # Deep-clone the full document
+        cloned = copy.deepcopy(source)
+
+        # Remove MongoDB internal fields
+        cloned.pop("_id", None)
+
+        # ── New identity ─────────────────────────────────────────────
+        new_id = str(uuid.uuid4())
+        cloned["id"] = new_id
+
+        # Brand-new group ID — completely independent version tree
+        cloned["template_group_id"] = new_id
+        cloned["version"] = 1
+        cloned["is_latest"] = True
+        cloned["created_from_version"] = None
+
+        # ── Name ────────────────────────────────────────────────────
+        original_name = source.get("name", "Untitled Template")
+        # Avoid doubling suffix if already a clone
+        if original_name.endswith(" (Copy)"):
+            cloned["name"] = original_name
+        else:
+            cloned["name"] = f"{original_name} (Copy)"
+
+        # ── Ownership & timestamps ───────────────────────────────────
+        cloned["created_by"] = user_id
+        cloned["updated_by"] = user_id
+        cloned["created_at"] = datetime.now(timezone.utc)
+        cloned["updated_at"] = datetime.now(timezone.utc)
+
+        # ── Reset status to draft ────────────────────────────────────
+        cloned["status"] = "draft"
+        cloned["is_validated"] = False
+
+        # ── Reset runtime / history fields ───────────────────────────
+        # These must never carry over from the source template
+        for field in (
+            "send_history", "generated_documents", "audit_trail",
+            "previous_signatures", "signer_data", "runtime_logs",
+            "completed_documents", "signed_documents", "document_count",
+            "last_sent_at", "last_signed_at", "send_count",
+        ):
+            cloned.pop(field, None)
+
+        await self.collection.insert_one(cloned)
+        logger.info(f"Cloned template '{original_name}' (src={source_template_id}) -> new id={new_id}")
+        return cloned
+
     def parse_merge_fields(self, content: str) -> List[str]:
         """Parse merge fields from content like {{Object.Field}}"""
         pattern = r'\{\{([^}]+)\}\}'

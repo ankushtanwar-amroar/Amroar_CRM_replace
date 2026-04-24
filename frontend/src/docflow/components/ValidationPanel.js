@@ -44,7 +44,8 @@ const ValidationPanel = ({ templateId, templateData, fieldPlacements, onValidati
         field_placements: fieldPlacements || [],
       };
 
-      const backendResult = templateId
+      const hasLiveData = Object.keys(templateData || {}).length > 0 || (fieldPlacements && fieldPlacements.length > 0);
+      const backendResult = templateId && !hasLiveData
         ? await docflowService.validateTemplate(templateId)
         : await docflowService.validateTemplateObject(payload);
 

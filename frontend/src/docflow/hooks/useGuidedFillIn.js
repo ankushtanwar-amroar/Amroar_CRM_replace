@@ -77,12 +77,31 @@ const isFilled = (field, values) => {
 // render → auto-advance effect re-ran → infinite render loop.
 const NON_INTERACTIVE_TYPES = new Set(['label', 'merge']);
 
-const shouldIncludeAsRequired = (field) => {
+// Phase 76: radio "required" is a GROUP property. A radio field participates
+// in a required group if ANY sibling (same groupName) has required=true.
+// This provides backward compat for legacy templates where only one option
+// was flagged required before Phase 76 propagation was added.
+const isRadioGroupRequired = (field, allFields) => {
+  const group = GROUP_KEY_FOR(field);
+  if (!group) return Boolean(field?.required); // legacy / ungrouped radio
+  return (allFields || []).some(f =>
+    getFieldType(f) === 'radio' &&
+    GROUP_KEY_FOR(f) === group &&
+    (f.required === true || f.required === 'true')
+  );
+};
+
+const shouldIncludeAsRequired = (field, allFields) => {
   const type = getFieldType(field);
+  if (type === 'radio') {
+    if (isExplicitlyOptional(field)) return false;
+    return isRadioGroupRequired(field, allFields);
+  }
   if (isExplicitlyOptional(field)) return false;
   if (isExplicitlyRequired(field)) return true;
   // Default: signature/initials are required; others need explicit required=true
-  return isRequiredByDefault(type);};
+  return isRequiredByDefault(type);
+};
 
 const sortByReadingOrder = (a, b) => {
   const pa = a.page || 1, pb = b.page || 1;
@@ -174,7 +193,7 @@ export default function useGuidedFillIn({
       if (f.field_hidden) return false;
       if (f.readOnly) return false;
       if (!isAssignedToCurrentSigner(f)) return false;
-      return shouldIncludeAsRequired(f);
+      return shouldIncludeAsRequired(f, fields);
     });
 
     // De-duplicate radio groups — only the first field in each group counts.

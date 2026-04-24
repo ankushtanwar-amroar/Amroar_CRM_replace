@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { CheckCircle, Layers, ScrollText, Check } from 'lucide-react';
+import { CheckCircle, Layers, ScrollText, Check, Edit3, PenTool } from 'lucide-react';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
 
@@ -92,6 +92,34 @@ const InteractiveDocumentViewer = ({
 
   const PDF_WIDTH = 800;
   const PAGE_GAP = 16; // gap between pages in scroll mode
+
+  // Phase 75 (mobile responsive): when the viewer container is narrower than
+  // PDF_WIDTH, we visually scale down the PDF + field overlays using a CSS
+  // transform. This preserves the internal coordinate system (fields stay at
+  // their stored x/y/width/height relative to PDF_WIDTH), while letting the
+  // canvas fit phones at 320–430px width. Desktop (>= PDF_WIDTH) stays 1x.
+  const [viewportScale, setViewportScale] = useState(1);
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const compute = () => {
+      // Account for the viewer's own padding (p-2 sm:p-6 → ~16–48px) by
+      // subtracting a safe inset so the scaled PDF never touches the edges.
+      const inset = window.innerWidth < 640 ? 20 : 48;
+      const available = Math.max(0, el.clientWidth - inset);
+      if (available <= 0) return;
+      const next = Math.min(1, available / PDF_WIDTH);
+      setViewportScale((prev) => (Math.abs(prev - next) > 0.01 ? next : prev));
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    window.addEventListener('resize', compute);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('resize', compute);
+    };
+  }, []);
 
   // Memoize the file prop to prevent infinite reload loops in react-pdf
   const pdfFile = useMemo(() => ({ url: pdfUrl }), [pdfUrl]);
@@ -450,6 +478,60 @@ const InteractiveDocumentViewer = ({
     return () => timers.forEach(clearTimeout);
   }, [activeFieldId, viewMode, currentPage, fieldsById]);
 
+  // Phase 78: floating "Fill In" side indicator — DocuSign-style left-gutter
+  // badge that tracks the active field vertically. Updates on active-field
+  // change, scroll, and viewport resize. Position is expressed relative to
+  // the scroll container (which owns the scrollbar), so the badge moves
+  // with the document content naturally.
+  const [fillInTop, setFillInTop] = useState(null);
+  const computeFillInTop = useCallback(() => {
+    if (!activeFieldId) { setFillInTop(null); return; }
+    const container = scrollContainerRef.current;
+    if (!container) { setFillInTop(null); return; }
+    const el = document.querySelector(`[data-field-wrapper="${activeFieldId}"]`);
+    if (!el) { setFillInTop(null); return; }
+    const fieldRect = el.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    // Center the 28px-tall badge vertically against the field.
+    // `top` is relative to the scroll container (absolute positioning).
+    const top = (fieldRect.top - containerRect.top) + container.scrollTop + (fieldRect.height / 2) - 14;
+    setFillInTop(top);
+  }, [activeFieldId]);
+
+  useEffect(() => {
+    // Re-compute on active field change + after short delays to catch
+    // smooth-scroll animation finishing.
+    computeFillInTop();
+    const timers = [
+      setTimeout(computeFillInTop, 250),
+      setTimeout(computeFillInTop, 600),
+      setTimeout(computeFillInTop, 1000),
+    ];
+    return () => timers.forEach(clearTimeout);
+  }, [computeFillInTop, viewMode, currentPage]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onScroll = () => computeFillInTop();
+    container.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    return () => {
+      container.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [computeFillInTop]);
+
+  // Click handler on the badge re-scrolls to the active field (helps when
+  // the user has manually scrolled away).
+  const scrollToActiveField = useCallback(() => {
+    if (!activeFieldId) return;
+    const el = document.querySelector(`[data-field-wrapper="${activeFieldId}"]`);
+    if (el && typeof el.scrollIntoView === 'function') {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [activeFieldId]);
+
   const renderField = (field) => {
     const fieldValue = fieldValues[field.id] !== undefined ? fieldValues[field.id] : externalFieldValues[field.id];
     const isFieldReadOnly = field.readOnly === true;
@@ -688,13 +770,13 @@ const InteractiveDocumentViewer = ({
         const sigAlign = field.style?.textAlign || field.alignment || 'center';
         const sigJustify = sigAlign === 'left' ? 'justify-start' : sigAlign === 'right' ? 'justify-end' : 'justify-center';
         return (
-          <div 
+          <div
             onClick={!isDisabled ? () => showSignatureModal && showSignatureModal(field.id, false) : null}
-            className={`w-full h-full border-2 rounded flex items-center ${sigJustify} transition-colors ${
+            className={`w-full h-full border-2 border-dashed rounded flex items-center ${sigJustify} transition-colors ${
               field.field_disabled
                 ? 'border-gray-300 bg-gray-50'
                 : hasSignature
-                  ? 'border-indigo-500 bg-transparent'
+                  ? 'border-indigo-500 bg-transparent border-solid'
                   : 'border-indigo-500 bg-indigo-50/70 hover:bg-indigo-100'
             } ${!isDisabled && !hasSignature ? 'cursor-pointer' : ''} ${disabledStyle}`}
             title={field.field_disabled ? (field.field_hint || 'Assigned to another recipient') : 'Click to sign'}
@@ -703,8 +785,9 @@ const InteractiveDocumentViewer = ({
             {hasSignature ? (
               <img src={fieldValue} alt="Signature" className="max-w-full max-h-full object-contain" />
             ) : (
-              <span className="text-[11px] font-medium text-indigo-700 truncate px-1">
-                {field.field_disabled ? 'Other recipient' : 'Click to sign'}
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-700 truncate px-1.5 uppercase tracking-wide">
+                <Edit3 className="h-3 w-3 shrink-0" />
+                {field.field_disabled ? 'Other recipient' : 'Sign Here'}
               </span>
             )}
           </div>
@@ -718,11 +801,11 @@ const InteractiveDocumentViewer = ({
         return (
           <div
             onClick={!isDisabled ? () => showSignatureModal && showSignatureModal(field.id, true) : null}
-            className={`w-full h-full border-2 rounded flex items-center ${iniJustify} transition-colors ${
+            className={`w-full h-full border-2 border-dashed rounded flex items-center ${iniJustify} transition-colors ${
               field.field_disabled
                 ? 'border-gray-300 bg-gray-50'
                 : hasInitials
-                  ? 'border-indigo-500 bg-transparent'
+                  ? 'border-indigo-500 bg-transparent border-solid'
                   : 'border-indigo-500 bg-indigo-50/70 hover:bg-indigo-100'
             } ${!isDisabled && !hasInitials ? 'cursor-pointer' : ''} ${disabledStyle}`}
             title={field.field_disabled ? (field.field_hint || 'Assigned to another recipient') : 'Click for initials'}
@@ -731,8 +814,9 @@ const InteractiveDocumentViewer = ({
             {hasInitials ? (
               <img src={fieldValue} alt="Initials" className="max-w-full max-h-full object-contain" />
             ) : (
-              <span className="text-[11px] font-medium text-indigo-700 truncate px-1">
-                {field.field_disabled ? 'Other recipient' : 'Click for initials'}
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-indigo-700 truncate px-1.5 uppercase tracking-wide">
+                <PenTool className="h-3 w-3 shrink-0" />
+                {field.field_disabled ? 'Other recipient' : 'Initials'}
               </span>
             )}
           </div>
@@ -842,9 +926,23 @@ const InteractiveDocumentViewer = ({
     return (
       <div
         key={pageNum}
-        className="relative"
-        style={{ width: `${PDF_WIDTH}px`, minHeight: `${pageHeight}px` }}
+        // Phase 75: outer wrapper uses SCALED dimensions so surrounding
+        // layout (flex/gap/shadow) flows at visual size; inner wrapper keeps
+        // the internal coord system at PDF_WIDTH via CSS transform.
+        style={{
+          width: `${PDF_WIDTH * viewportScale}px`,
+          height: `${pageHeight * viewportScale}px`,
+        }}
       >
+        <div
+          className="relative"
+          style={{
+            width: `${PDF_WIDTH}px`,
+            minHeight: `${pageHeight}px`,
+            transform: `scale(${viewportScale})`,
+            transformOrigin: 'top left',
+          }}
+        >
         {/* PDF page — pointer-events disabled so fields above receive clicks */}
         <div style={{ pointerEvents: 'none' }}>
           <Page
@@ -873,9 +971,6 @@ const InteractiveDocumentViewer = ({
               (((field.type || field.field_type || '').toLowerCase() === 'radio') &&
                 getRadioGroupName(field) === getRadioGroupName((fieldsById.get(activeFieldId) || {})))
             );
-            // Show the "Fill In" arrow only on the specific active field, not on
-            // sibling radios in the same group — prevents multiple arrows per group.
-            const isFillInAnchor = isActive && activeFieldId === field.id;
             return (
               <div
                 key={field.id}
@@ -906,31 +1001,13 @@ const InteractiveDocumentViewer = ({
                 >
                   {renderField(field)}
                 </div>
-                {isFillInAnchor && (
-                  <div
-                    className={`absolute flex items-center gap-1 pointer-events-none whitespace-nowrap z-30 ${
-                      field.x < 90
-                        ? 'left-0 top-full mt-1'            /* Field near left edge → show below-left */
-                        : 'right-full top-1/2 -translate-y-1/2 mr-2'  /* Default: pointer from the left */
-                    }`}
-                    data-testid="guided-fill-in-arrow"
-                  >
-                    <div className="bg-emerald-500 text-white px-3 py-1.5 rounded-l-full rounded-r shadow-lg text-xs font-semibold">
-                      Fill In
-                    </div>
-                    <div
-                      className="w-0 h-0"
-                      style={{
-                        borderTop: '8px solid transparent',
-                        borderBottom: '8px solid transparent',
-                        borderLeft: '10px solid #10b981',
-                      }}
-                    />
-                  </div>
-                )}
+                {/* Phase 77 — DocuSign-style UX: floating "Fill In" arrow
+                    badge removed. Inline-visible field styling + emerald
+                    ring on the active field is the only guidance needed. */}
               </div>
             );
           })}
+        </div>
       </div>
     );
   };
@@ -938,13 +1015,13 @@ const InteractiveDocumentViewer = ({
   return (
     <div className="flex flex-col h-full">
       {/* Top bar: Navigation + View Toggle */}
-      <div className="bg-white border-b border-gray-200 p-3 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+      <div className="bg-white border-b border-gray-200 p-2 sm:p-3 flex items-center justify-between flex-wrap gap-2">
+        <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
           {/* View Mode Toggle */}
           <div className="flex items-center bg-gray-100 rounded-lg p-0.5" data-testid="view-mode-toggle">
             <button
               onClick={() => setViewMode('page')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
                 viewMode === 'page'
                   ? 'bg-white text-indigo-700 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
@@ -956,7 +1033,7 @@ const InteractiveDocumentViewer = ({
             </button>
             <button
               onClick={() => setViewMode('scroll')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+              className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
                 viewMode === 'scroll'
                   ? 'bg-white text-indigo-700 shadow-sm'
                   : 'text-gray-500 hover:text-gray-700'
@@ -970,22 +1047,22 @@ const InteractiveDocumentViewer = ({
 
           {/* Page navigation (only in page mode) */}
           {viewMode === 'page' && (
-            <div className="flex items-center gap-2 ml-2">
+            <div className="flex items-center gap-1.5 sm:gap-2">
               <button
                 onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                 disabled={currentPage === 1}
-                className="px-3 py-1.5 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50 text-xs font-medium"
+                className="px-2.5 sm:px-3 py-1.5 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50 text-xs font-medium"
                 data-testid="prev-page-btn"
               >
                 Previous
               </button>
-              <span className="text-xs font-medium px-2 text-gray-600">
-                Page {currentPage} of {numPages || 1}
+              <span className="text-xs font-medium px-1 sm:px-2 text-gray-600 whitespace-nowrap">
+                {currentPage}/{numPages || 1}
               </span>
               <button
                 onClick={() => setCurrentPage(Math.min(numPages || 1, currentPage + 1))}
                 disabled={currentPage === numPages}
-                className="px-3 py-1.5 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50 text-xs font-medium"
+                className="px-2.5 sm:px-3 py-1.5 bg-gray-100 rounded-md hover:bg-gray-200 disabled:opacity-50 text-xs font-medium"
                 data-testid="next-page-btn"
               >
                 Next
@@ -995,16 +1072,17 @@ const InteractiveDocumentViewer = ({
 
           {/* Scroll mode page indicator */}
           {viewMode === 'scroll' && numPages && (
-            <span className="text-xs text-gray-500 ml-2">
-              {numPages} pages — scroll to navigate
+            <span className="text-xs text-gray-500 whitespace-nowrap">
+              {numPages} page{numPages !== 1 ? 's' : ''}
             </span>
           )}
         </div>
 
         {!readOnly && (
-          <div className="flex items-center gap-2 text-sm text-gray-600">
+          <div className="flex items-center gap-1.5 text-gray-600 shrink-0">
             <CheckCircle className="h-4 w-4" />
-            <span className="text-xs">Fill all fields to sign</span>
+            <span className="text-xs whitespace-nowrap hidden xs:inline sm:inline">Fill all fields to sign</span>
+            <span className="text-xs whitespace-nowrap inline xs:hidden sm:hidden">Fill to sign</span>
           </div>
         )}
       </div>
@@ -1012,12 +1090,57 @@ const InteractiveDocumentViewer = ({
       {/* Document Display */}
       <div
         ref={scrollContainerRef}
-        className="flex-1 overflow-auto p-6 bg-gray-100"
+        className="flex-1 overflow-auto p-2 sm:p-6 bg-gray-100 relative"
       >
+        {/* Phase 78: DocuSign-style "Fill In" side indicator. Floats in the
+            LEFT gutter of the viewer, vertically aligned to the active field.
+            Hidden when no field is active. Clicking re-scrolls to the field. */}
+        {activeFieldId && fillInTop !== null && (
+          <button
+            type="button"
+            onClick={scrollToActiveField}
+            className="absolute left-1 sm:left-2 z-20 flex items-center gap-1 whitespace-nowrap group focus:outline-none"
+            style={{
+              top: `${fillInTop}px`,
+              transition: 'top 240ms cubic-bezier(0.22, 0.61, 0.36, 1)',
+            }}
+            data-testid="guided-fill-in-arrow"
+            aria-label="Jump to active field"
+          >
+            <span className="bg-emerald-500 group-hover:bg-emerald-600 text-white pl-3 pr-2.5 py-1.5 rounded-l-full rounded-r-sm shadow-lg text-xs font-semibold tracking-wide">
+              Fill In
+            </span>
+            <span
+              className="w-0 h-0 -ml-px"
+              style={{
+                borderTop: '9px solid transparent',
+                borderBottom: '9px solid transparent',
+                borderLeft: '11px solid #10b981',
+              }}
+            />
+          </button>
+        )}
         {viewMode === 'page' ? (
           /* ═══ PAGE MODE ═══ */
           <div className="flex justify-center">
-            <div ref={containerRef} className="relative bg-white shadow-lg">
+            <div
+              // Phase 75: outer wrapper uses SCALED dimensions; inner keeps
+              // native PDF_WIDTH with a CSS transform so field coords are
+              // untouched (x/y/width/height remain relative to 800px base).
+              style={{
+                width: `${PDF_WIDTH * viewportScale}px`,
+                height: `${(pageSize.height || 1035) * viewportScale}px`,
+              }}
+            >
+              <div
+                ref={containerRef}
+                className="relative bg-white shadow-lg"
+                style={{
+                  width: `${PDF_WIDTH}px`,
+                  transform: `scale(${viewportScale})`,
+                  transformOrigin: 'top left',
+                }}
+              >
               <div style={{ pointerEvents: 'none' }}>
                 <Document
                   file={pdfFile}
@@ -1047,9 +1170,6 @@ const InteractiveDocumentViewer = ({
                     (((field.type || field.field_type || '').toLowerCase() === 'radio') &&
                       getRadioGroupName(field) === getRadioGroupName((fieldsById.get(activeFieldId) || {})))
                   );
-                  // Show the "Fill In" arrow only on the specific active field, not on
-                  // sibling radios in the same group — prevents multiple arrows per group.
-                  const isFillInAnchor = isActive && activeFieldId === field.id;
                   return (
                     <div
                       key={field.id}
@@ -1080,31 +1200,13 @@ const InteractiveDocumentViewer = ({
                       >
                         {renderField(field)}
                       </div>
-                      {isFillInAnchor && (
-                        <div
-                          className={`absolute flex items-center gap-1 pointer-events-none whitespace-nowrap z-30 ${
-                            field.x < 90
-                              ? 'left-0 top-full mt-1'
-                              : 'right-full top-1/2 -translate-y-1/2 mr-2'
-                          }`}
-                          data-testid="guided-fill-in-arrow"
-                        >
-                          <div className="bg-emerald-500 text-white px-3 py-1.5 rounded-l-full rounded-r shadow-lg text-xs font-semibold">
-                            Fill In
-                          </div>
-                          <div
-                            className="w-0 h-0"
-                            style={{
-                              borderTop: '8px solid transparent',
-                              borderBottom: '8px solid transparent',
-                              borderLeft: '10px solid #10b981',
-                            }}
-                          />
-                        </div>
-                      )}
+                      {/* Phase 77 — DocuSign-style UX: floating "Fill In"
+                          arrow badge removed. Inline-visible field styling
+                          + emerald ring on active field is enough guidance. */}
                     </div>
                   );
                 })}
+              </div>
             </div>
           </div>
         ) : (

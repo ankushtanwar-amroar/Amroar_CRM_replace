@@ -258,12 +258,57 @@ class EmailTemplateService:
         self.collection = db.docflow_email_templates
 
     async def ensure_defaults(self, tenant_id: str):
-        """Create or update default templates for a tenant."""
+        """
+        Create or update default templates for a tenant.
+        
+        IMPORTANT: This method is designed to avoid creating duplicate system templates.
+        
+        Logic:
+        1. For each template type, check if a system template already exists
+           (Note: we check ONLY is_system=True, not the default status)
+        
+        2. If system template exists:
+           - Update its HTML/subject if template design has changed
+           - PRESERVE its current default status (don't override)
+           - This ensures we don't create duplicates when a custom template is set as default
+        
+        3. If system template doesn't exist:
+           - Check if ANY default already exists for this type
+           - If custom default exists: create system template with is_default=False
+           - If no default exists: create system template with is_default=True
+        
+        This prevents the bug where:
+        - User sets custom template as default (set_default() unsets system template's default)
+        - Then list_templates() calls ensure_defaults()
+        - OLD logic: Would look for "is_system AND is_default" -> not found -> insert duplicate!
+        - NEW logic: Looks only for "is_system" -> found -> no insert, preserves status
+        """
         for ttype, tdata in DEFAULT_TEMPLATES.items():
-            exists = await self.collection.find_one(
-                {"tenant_id": tenant_id, "template_type": ttype, "is_default": True, "is_system": True}
+            # Check if a system template already exists for this type
+            system_exists = await self.collection.find_one(
+                {"tenant_id": tenant_id, "template_type": ttype, "is_system": True}
             )
-            if not exists:
+            
+            if system_exists:
+                # Update existing system template content if needed (don't touch default status)
+                if system_exists.get("body_html") != tdata["body_html"]:
+                    await self.collection.update_one(
+                        {"tenant_id": tenant_id, "template_type": ttype, "is_system": True},
+                        {"$set": {
+                            "subject": tdata["subject"],
+                            "body_html": tdata["body_html"],
+                            "updated_at": datetime.now(timezone.utc).isoformat(),
+                        }}
+                    )
+            else:
+                # System template doesn't exist. Check if any default exists for this type.
+                any_default = await self.collection.find_one(
+                    {"tenant_id": tenant_id, "template_type": ttype, "is_default": True}
+                )
+                
+                # Only set system template as default if no custom default exists
+                is_default = any_default is None
+                
                 await self.collection.insert_one({
                     "id": str(uuid.uuid4()),
                     "tenant_id": tenant_id,
@@ -271,22 +316,11 @@ class EmailTemplateService:
                     "subject": tdata["subject"],
                     "body_html": tdata["body_html"],
                     "template_type": tdata["template_type"],
-                    "is_default": True,
+                    "is_default": is_default,
                     "is_system": True,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 })
-            else:
-                # Update existing system defaults to latest HTML design
-                if exists.get("body_html") != tdata["body_html"]:
-                    await self.collection.update_one(
-                        {"tenant_id": tenant_id, "template_type": ttype, "is_default": True, "is_system": True},
-                        {"$set": {
-                            "subject": tdata["subject"],
-                            "body_html": tdata["body_html"],
-                            "updated_at": datetime.now(timezone.utc).isoformat(),
-                        }}
-                    )
 
     async def list_templates(self, tenant_id: str) -> List[dict]:
         """List all email templates for a tenant."""
@@ -365,11 +399,20 @@ class EmailTemplateService:
         return clone
 
     async def set_default(self, template_id: str, tenant_id: str) -> bool:
+        """
+        Set a template as the default for its type.
+        
+        Ensures only ONE default template exists per template type:
+        1. Unsets all current defaults for this type
+        2. Sets the specified template as the new default
+        
+        Works with both system and custom templates.
+        """
         tmpl = await self.get_template(template_id, tenant_id)
         if not tmpl:
             return False
         ttype = tmpl.get("template_type")
-        # Unset current default for this type
+        # Unset all current defaults for this type
         await self.collection.update_many(
             {"tenant_id": tenant_id, "template_type": ttype, "is_default": True},
             {"$set": {"is_default": False}}

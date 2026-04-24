@@ -440,6 +440,23 @@ async def submit_public_link(
                     except Exception as e:
                         logger.warning(f"Failed to embed checkbox for field {field_id}: {e}")
 
+            # Phase 76: stamp Package Verification ID at top-left of every
+            # page (DocuSign-style audit trail) — public-link submission flow.
+            try:
+                package_verification_id = str(package.get("id") or "").upper()
+                if package_verification_id:
+                    stamp_text = f"Package Verification ID: {package_verification_id}"
+                    for _pg in pdf_doc:
+                        _pg.insert_text(
+                            fitz.Point(18, 14),
+                            stamp_text,
+                            fontname="helv",
+                            fontsize=8,
+                            color=(0.4, 0.4, 0.4),
+                        )
+            except Exception as stamp_err:
+                logger.warning(f"Verification stamp failed for package {package.get('id')}: {stamp_err}")
+
             signed_pdf_bytes = pdf_doc.tobytes()
             pdf_doc.close()
 

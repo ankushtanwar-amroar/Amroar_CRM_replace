@@ -79,6 +79,10 @@ export const docflowService = {
     });
   },
 
+  async cloneTemplate(templateId) {
+    return api.post(`/docflow/templates/${templateId}/clone`);
+  },
+
   async migrateVersions() {
     return api.post('/docflow/templates/migrate-versions');
   },
@@ -210,6 +214,27 @@ export const docflowService = {
     return api.get('/docflow/documents', { params });
   },
 
+  async getDocumentDetail(documentId) {
+    // Phase 79 — full detail payload for the new document detail page.
+    const resp = await api.get(`/docflow/documents/${documentId}/detail`);
+    return resp;
+  },
+
+  async resendRecipientEmail(documentId, recipientId) {
+    // Phase 79 — resend signing email to a single recipient.
+    return api.post(`/docflow/documents/${documentId}/recipients/${recipientId}/resend`);
+  },
+
+  async voidRecipient(documentId, recipientId) {
+    // Phase 80 — block a recipient's access + send cancellation email.
+    return api.post(`/docflow/documents/${documentId}/recipients/${recipientId}/void`);
+  },
+
+  async unvoidRecipient(documentId, recipientId) {
+    // Phase 80 — restore a voided recipient + send fresh signing email.
+    return api.post(`/docflow/documents/${documentId}/recipients/${recipientId}/unvoid`);
+  },
+
   async downloadDocument(documentId, version = 'signed') {
     const token = localStorage.getItem('token');
     const resp = await fetch(`${API_URL}/api/docflow/documents/${documentId}/download/${version}`, {
@@ -219,7 +244,17 @@ export const docflowService = {
       const err = await resp.json().catch(() => ({}));
       throw new Error(err.detail || `Failed to download ${version} document`);
     }
-    return resp.blob();
+    const blob = await resp.blob();
+    // Trigger browser download
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `document-${documentId}-${version}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return blob;
   },
 
   // ===== Generate Links API (Salesforce → DocFlow) =====

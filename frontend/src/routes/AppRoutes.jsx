@@ -54,6 +54,7 @@ import DocFlowDashboard from '../docflow/pages/DocFlowDashboard';
 import TemplateEditor from '../docflow/pages/TemplateEditor';
 import PublicDocumentView from '../docflow/pages/PublicDocumentViewEnhanced';
 import GenerateDocumentWizard from '../docflow/pages/GenerateDocumentWizard';
+import DocumentDetailPage from '../docflow/pages/DocumentDetailPage';
 import PackageDetailPage from '../docflow/pages/PackageDetailPage';
 import CreatePackagePage from '../docflow/pages/CreatePackagePage';
 import SendPackagePage from '../docflow/pages/SendPackagePage';
@@ -492,6 +493,13 @@ const AppRoutes = () => {
         <ProtectedRoute>
           <ModuleGate moduleCode="docflow">
             <GenerateDocumentWizard />
+          </ModuleGate>
+        </ProtectedRoute>
+      } />
+      <Route path="/setup/docflow/documents/:id" element={
+        <ProtectedRoute>
+          <ModuleGate moduleCode="docflow">
+            <DocumentDetailPage />
           </ModuleGate>
         </ProtectedRoute>
       } />

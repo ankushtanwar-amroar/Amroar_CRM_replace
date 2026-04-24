@@ -343,6 +343,51 @@ async def delete_template(
     return None
 
 
+@router.post("/templates/{template_id}/clone")
+async def clone_template(
+    template_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Clone an existing template into a completely independent copy.
+
+    The clone:
+    - Gets a new unique ID and its own version tree (v1, brand-new group).
+    - Copies all visual builder fields, CRM mappings, placements, and config.
+    - Name is set to '<Original Name> (Copy)'.
+    - Status is reset to 'draft'.
+    - All runtime/history data (send history, signatures, audit trail) is cleared.
+    - The original template is left completely untouched.
+    """
+    try:
+        cloned = await template_service.clone_template(
+            source_template_id=template_id,
+            tenant_id=current_user.tenant_id,
+            user_id=current_user.id,
+        )
+
+        # Remove internal MongoDB field before returning
+        cloned.pop("_id", None)
+
+        # Refresh presigned S3 URLs so the clone's file links are valid immediately
+        from ..services.s3_service import S3Service
+        s3_service = S3Service()
+        if cloned.get("s3_key"):
+            cloned["file_url"] = s3_service.get_template_url(cloned["s3_key"], expiration=604800)
+        if cloned.get("uploaded_pdf_s3_key"):
+            cloned["uploaded_pdf_url"] = s3_service.get_template_url(
+                cloned["uploaded_pdf_s3_key"], expiration=604800
+            )
+
+        return {"success": True, "template": cloned}
+
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Clone template failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to clone template: {str(e)}")
+
+
 # ── Version Control Endpoints ───────────────────────────
 
 @router.get("/templates/{template_id}/versions")

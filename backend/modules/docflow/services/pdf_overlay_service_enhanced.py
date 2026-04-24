@@ -21,27 +21,33 @@ logger = logging.getLogger(__name__)
 class PDFOverlayService:
     """Service to overlay interactive fields onto existing PDFs"""
     
-    def overlay_fields_on_pdf(self, pdf_bytes: bytes, field_placements: List[Dict[str, Any]], 
-                             field_values: Dict[str, Any] = None, signatures: List[Dict[str, Any]] = None) -> bytes:
+    def overlay_fields_on_pdf(self, pdf_bytes: bytes, field_placements: List[Dict[str, Any]],
+                             field_values: Dict[str, Any] = None, signatures: List[Dict[str, Any]] = None,
+                             verification_id: Optional[str] = None,
+                             verification_label: str = "Verification ID") -> bytes:
         """
         Overlay all fields (text, date, checkbox, signature) onto PDF
-        
+
         Args:
             pdf_bytes: Original PDF content
             field_placements: List of field positions and types
             field_values: Values for text/date/checkbox fields
             signatures: Signature data
-        
+            verification_id: Phase 76 — if supplied, stamped at the top of every
+                page as `{verification_label}: {id}` for authenticity tracking.
+            verification_label: Prefix for the verification stamp (e.g.,
+                "Template Verification ID" or "Package Verification ID").
+
         Returns:
             PDF bytes with fields overlaid
         """
         try:
             logger.info(f"Overlaying {len(field_placements)} fields onto PDF")
-            
+
             # Read original PDF
             input_pdf = PdfReader(io.BytesIO(pdf_bytes))
             output = PdfWriter()
-            
+
             # Group fields by page (convert 1-based page numbers to 0-based)
             fields_by_page = {}
             for field in field_placements:
@@ -50,20 +56,26 @@ class PDFOverlayService:
                 if page_idx not in fields_by_page:
                     fields_by_page[page_idx] = []
                 fields_by_page[page_idx].append(field)
-            
+
             # Process each page
             for page_num in range(len(input_pdf.pages)):
                 original_page = input_pdf.pages[page_num]
-                
-                # Create overlay if this page has fields
-                if page_num in fields_by_page:
+
+                page_fields = fields_by_page.get(page_num, [])
+                # Phase 76: always create an overlay when we have either fields
+                # on this page OR a verification_id to stamp. The overlay stamp
+                # is rendered on every page (DocuSign-style audit trail).
+                should_overlay = bool(page_fields) or bool(verification_id)
+                if should_overlay:
                     overlay_bytes = self._create_overlay_for_page(
-                        fields_by_page[page_num],
+                        page_fields,
                         field_values,
                         signatures,
-                        original_page
+                        original_page,
+                        verification_id=verification_id,
+                        verification_label=verification_label,
                     )
-                    
+
                     if overlay_bytes:
                         # Merge overlay with original page
                         try:
@@ -73,7 +85,7 @@ class PDFOverlayService:
                                 original_page.merge_page(overlay_page)
                         except Exception as merge_err:
                             logger.warning(f"Failed to merge overlay for page {page_num}: {merge_err}")
-                
+
                 output.add_page(original_page)
             
             # Write output
@@ -90,7 +102,9 @@ class PDFOverlayService:
             return pdf_bytes  # Return original if overlay fails
     
     def _create_overlay_for_page(self, fields: List[Dict[str, Any]], field_values: Dict[str, Any],
-                                 signatures: List[Dict[str, Any]], original_page) -> Optional[bytes]:
+                                 signatures: List[Dict[str, Any]], original_page,
+                                 verification_id: Optional[str] = None,
+                                 verification_label: str = "Verification ID") -> Optional[bytes]:
         """Create overlay canvas with all fields for a single page"""
         try:
             # Get page dimensions
@@ -103,6 +117,19 @@ class PDFOverlayService:
 
             # Make canvas transparent
             c.setFillAlpha(1.0)
+
+            # Phase 76: stamp verification ID at top-left of every page
+            # (DocuSign-style audit trail). Small gray helvetica, above content.
+            if verification_id:
+                try:
+                    c.saveState()
+                    c.setFont("Helvetica", 8)
+                    c.setFillColorRGB(0.4, 0.4, 0.4)
+                    # 18pt inset from top-left corner (PDF origin = bottom-left)
+                    c.drawString(18, page_height - 14, f"{verification_label}: {verification_id}")
+                    c.restoreState()
+                except Exception as stamp_err:
+                    logger.warning(f"Verification stamp failed: {stamp_err}")
 
             for field in fields:
                 field_type = field.get('type', '').lower()
@@ -555,10 +582,9 @@ class PDFOverlayService:
             return
 
         try:
-            # White background to cover placeholder text
-            c.setFillColor(colors.white)
-            c.rect(x, y, width, height, fill=True, stroke=False)
-
+            # Removed white background to make merge fields transparent
+            # c.setFillColor(colors.white)
+            # c.rect(x, y, width, height, fill=True, stroke=False)
             if field.get('style'):
                 self._draw_text_with_style(c, x, y, width, height, str(value)[:100], field)
             else:

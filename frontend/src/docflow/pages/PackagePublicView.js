@@ -278,14 +278,18 @@ const PackagePublicView = () => {
   const getFieldsForDoc = useCallback((doc) => {
     const baseFields = templateFieldsMap[doc.template_id] || [];
     const values = docFieldValues[doc.document_id] || {};
+    const interactiveTypes = new Set(['signature', 'initials', 'date', 'text', 'checkbox', 'radio', 'dropdown']);
+    
     return baseFields.map(f => {
       if (f.__isAssigned) return f;
-      const hasValue = values[f.id] !== undefined && values[f.id] !== null && values[f.id] !== '';
-      if (hasValue) {
-        // Preserve any pre-existing readOnly/field_disabled semantics
-        return { ...f, readOnly: true, field_disabled: false, field_hidden: false };
+      
+      // Unassigned field: hide interactive fields completely from other recipients
+      // during active signing flow, so they don't see each other's fields.
+      if (interactiveTypes.has(f.type || f.field_type)) {
+        return { ...f, field_hidden: true };
       }
-      return { ...f, field_hidden: true };
+      
+      return { ...f, readOnly: true };
     });
   }, [templateFieldsMap, docFieldValues]);
 
@@ -367,7 +371,7 @@ const PackagePublicView = () => {
   const allRequiredFieldsComplete = useMemo(() => {
     if (!pkg || pkg.active_recipient?.role_type !== 'SIGN') return true;
     const documents = pkg.documents || [];
-    const signingTypes = new Set(['signature', 'initials', 'date']);
+    const interactiveTypes = new Set(['signature', 'initials', 'date', 'text', 'checkbox', 'radio', 'dropdown']);
 
     for (const doc of documents) {
       const templateId = doc.template_id;
@@ -378,10 +382,14 @@ const PackagePublicView = () => {
         // Skip fields not assigned to the current recipient — they're either
         // hidden or shown read-only and should not block completion.
         if (field.__isAssigned === false) continue;
-        // Only validate required signing fields (fields are already strictly filtered)
-        if (signingTypes.has(field.type) && field.required !== false) {
+        // Validate ALL required interactive fields
+        if (interactiveTypes.has(field.type) && field.required !== false) {
           const val = docValues[field.id];
-          if (!val || String(val).trim() === '') return false;
+          if (field.type === 'checkbox') {
+            if (val !== true && val !== 'true') return false;
+          } else {
+            if (val === undefined || val === null || String(val).trim() === '') return false;
+          }
         }
       }
     }
@@ -747,15 +755,15 @@ const PackagePublicView = () => {
         onContinue={() => setPkgConsentAccepted(true)}
       />
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-4 py-5">
+      <div className="bg-white border-b border-gray-200 px-3 sm:px-4 py-3 sm:py-5">
         <div className="max-w-3xl mx-auto">
-          <div className="flex items-start justify-between gap-3 mb-2">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-100 shrink-0">
-                <Package className="h-5 w-5 text-indigo-600" />
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 sm:gap-3 mb-2">
+            <div className="flex items-center gap-3 min-w-0 order-2 sm:order-1">
+              <div className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-xl bg-indigo-100 shrink-0">
+                <Package className="h-4 w-4 sm:h-5 sm:w-5 text-indigo-600" />
               </div>
-              <div className="min-w-0">
-                <h1 className="text-lg font-bold text-gray-900 truncate" data-testid="public-package-name">{package_name}</h1>
+              <div className="min-w-0 flex-1">
+                <h1 className="text-base sm:text-lg font-bold text-gray-900 break-words" data-testid="public-package-name">{package_name}</h1>
                 <p className="text-xs text-gray-500">
                   {documents.length} document{documents.length !== 1 ? 's' : ''} to {isViewOnly ? 'review' : isApprover ? 'approve' : 'sign'}
                 </p>
@@ -764,29 +772,29 @@ const PackagePublicView = () => {
             {/* Phase 74: Sender info chip — read-only header indicator */}
             {pkg?.sender && (pkg.sender.name || pkg.sender.email) && (
               <div
-                className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full text-xs text-slate-700 max-w-[280px] shrink-0"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 bg-slate-50 border border-slate-200 rounded-full text-[11px] sm:text-xs text-slate-700 max-w-full sm:max-w-[280px] shrink-0 order-1 sm:order-2 self-start"
                 data-testid="package-sender-chip"
                 title={`From: ${pkg.sender.name}${pkg.sender.email ? ` <${pkg.sender.email}>` : ''}`}
               >
-                <span className="font-medium text-slate-500 uppercase tracking-wide">From</span>
-                <span className="truncate font-semibold text-slate-800" data-testid="sender-name">
+                <span className="font-medium text-slate-500 uppercase tracking-wide shrink-0">From</span>
+                <span className="truncate font-semibold text-slate-800 min-w-0" data-testid="sender-name">
                   {pkg.sender.name || pkg.sender.email}
                 </span>
                 {pkg.sender.email && pkg.sender.name && (
-                  <span className="truncate text-slate-500 hidden sm:inline" data-testid="sender-email">
+                  <span className="truncate text-slate-500 hidden sm:inline min-w-0" data-testid="sender-email">
                     ({pkg.sender.email})
                   </span>
                 )}
               </div>
             )}
           </div>
-          <div className="mt-3 p-3 bg-gray-50 rounded-lg">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-800" data-testid="recipient-name">{active_recipient?.name}</p>
-                <p className="text-xs text-gray-500">{active_recipient?.email}</p>
+          <div className="mt-2 sm:mt-3 p-2.5 sm:p-3 bg-gray-50 rounded-lg">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-gray-800 truncate" data-testid="recipient-name">{active_recipient?.name}</p>
+                <p className="text-xs text-gray-500 truncate">{active_recipient?.email}</p>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 {sessionToken && (
                   <span className="flex items-center gap-1 text-[10px] text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full font-medium" data-testid="session-active-badge">
                     <Lock className="h-2.5 w-2.5" /> Verified
@@ -808,7 +816,7 @@ const PackagePublicView = () => {
       </div>
 
       {/* Documents */}
-      <div className="max-w-3xl mx-auto px-4 py-6">
+      <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
         {/* Signer field hint */}
         {isSigner && hasAnyFields && !loadingFields && (
           <div className="flex items-center gap-2 text-xs text-indigo-700 bg-indigo-50 px-4 py-3 rounded-xl mb-4 border border-indigo-100" data-testid="signing-instruction">

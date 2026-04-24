@@ -3,7 +3,8 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Plus, Search, FileText, Edit, Trash2, Send, Clock, CheckCircle, LayoutGrid, List, Filter,
   ArrowUpDown, ChevronDown, Sparkles, Eye, Mail, MoreVertical, Download, GitBranch, History,
-  Layers, Package, XCircle, AlertTriangle, Ban, Users, Loader2, Code, MessageSquare
+  Layers, Package, XCircle, AlertTriangle, Ban, Users, Loader2, Code, MessageSquare, Copy,
+  Link as LinkIcon
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
@@ -36,6 +37,9 @@ const DocFlowDashboard = () => {
   const [statusFilter, setStatusFilter] = useState('all');
   const [sortBy, setSortBy] = useState('created_at');
   const [showDeleteMenu, setShowDeleteMenu] = useState(null);
+  // Clone modal
+  const [cloneModalTemplate, setCloneModalTemplate] = useState(null); // template object to clone
+  const [cloning, setCloning] = useState(false);
   // Version control
   const [versionMenuOpen, setVersionMenuOpen] = useState(null); // template id whose version menu is open
   const [versionCache, setVersionCache] = useState({}); // { templateId: [versions] }
@@ -263,6 +267,27 @@ const DocFlowDashboard = () => {
       setShowDeleteMenu(null);
     } catch (error) {
       toast.error('Failed to delete template');
+    }
+  };
+
+  const handleCloneTemplate = async () => {
+    if (!cloneModalTemplate) return;
+    try {
+      setCloning(true);
+      const result = await docflowService.cloneTemplate(cloneModalTemplate.id);
+      if (result?.success && result?.template) {
+        const cloned = result.template;
+        // Optimistically prepend clone to the list so it shows immediately
+        setTemplates(prev => [cloned, ...prev]);
+        toast.success('Template cloned successfully!');
+        setCloneModalTemplate(null);
+        // Open cloned template in editor
+        navigate(`/setup/docflow/templates/${cloned.id}`);
+      }
+    } catch (err) {
+      toast.error(err?.message || 'Failed to clone template');
+    } finally {
+      setCloning(false);
     }
   };
 
@@ -752,7 +777,7 @@ const DocFlowDashboard = () => {
                             <MoreVertical className="h-4 w-4" />
                           </button>
                           {showDeleteMenu === template.id && (
-                            <div className="absolute right-0 top-8 w-40 bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden z-20">
+                            <div className="absolute right-0 top-8 w-48 bg-white rounded-lg shadow-xl border border-gray-200 overflow-hidden z-20">
                               <button
                                 onClick={() => { navigate(`/setup/docflow/templates/${template.id}`); setShowDeleteMenu(null); }}
                                 className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
@@ -764,6 +789,12 @@ const DocFlowDashboard = () => {
                                 className="w-full px-4 py-2.5 text-left text-sm text-gray-700 hover:bg-gray-50 flex items-center gap-2"
                               >
                                 <Send className="h-4 w-4" /> Generate
+                              </button>
+                              <button
+                                onClick={() => { setCloneModalTemplate(template); setShowDeleteMenu(null); }}
+                                className="w-full px-4 py-2.5 text-left text-sm text-indigo-600 hover:bg-indigo-50 flex items-center gap-2"
+                              >
+                                <Copy className="h-4 w-4" /> Clone Template
                               </button>
                               <button
                                 onClick={() => handleDeleteTemplate(template.id)}
@@ -815,6 +846,13 @@ const DocFlowDashboard = () => {
                           title="Generate Document"
                         >
                           <Send className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => setCloneModalTemplate(template)}
+                          className="p-2 text-gray-400 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors"
+                          title="Clone Template"
+                        >
+                          <Copy className="h-4 w-4" />
                         </button>
                       </div>
                     </div>
@@ -917,6 +955,13 @@ const DocFlowDashboard = () => {
                               title="Generate"
                             >
                               <Send className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={() => setCloneModalTemplate(template)}
+                              className="p-2 text-gray-400 hover:text-indigo-500 hover:bg-indigo-50 rounded-lg transition-colors"
+                              title="Clone Template"
+                            >
+                              <Copy className="h-4 w-4" />
                             </button>
                             <button
                               onClick={() => handleDeleteTemplate(template.id)}
@@ -1039,85 +1084,134 @@ const DocFlowDashboard = () => {
                 <thead className="bg-gray-50 border-b border-gray-200">
                   <tr>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Document</th>
-                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Recipient</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Type</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Recipients</th>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Status</th>
                     <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Created</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Last Updated</th>
                     <th className="px-5 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {paginatedDocuments.map(doc => {
-                    // Extract recipient info for display
+                    const sendType = doc.send_type || 'email';
+                    const isPublic = sendType === 'public_link';
                     const recipients = doc.recipients || [];
-                    const firstRecipient = recipients[0] || {};
-                    let recipientDisplay = doc.recipient_name || firstRecipient.name || firstRecipient.email || '';
-                    const recipientEmail = doc.recipient_email || firstRecipient.email || '';
-                    
-                    // Handle placeholder / empty names
-                    if (!recipientDisplay || recipientDisplay === 'Public Viewer') {
-                      recipientDisplay = recipientEmail || 'Pending Verification';
-                    }
-                    
-                    // Get a valid public token for view link
-                    const viewToken = doc.public_token || firstRecipient.public_token || '';
-                    
+                    const totalRecipients = doc.total_recipients ?? recipients.length;
+                    const signedCount = doc.signed_count ?? 0;
+                    const pendingCount = doc.pending_count ?? Math.max(0, totalRecipients - signedCount);
+                    const agg = doc.aggregate_status || doc.status || 'pending';
+
+                    // Status chip palette — enterprise neutral tones
+                    const statusPalette = {
+                      completed: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+                      in_progress: 'bg-indigo-100 text-indigo-700 border-indigo-200',
+                      pending: 'bg-amber-100 text-amber-700 border-amber-200',
+                      voided: 'bg-rose-100 text-rose-700 border-rose-200',
+                      declined: 'bg-rose-100 text-rose-700 border-rose-200',
+                      closed: 'bg-slate-100 text-slate-700 border-slate-200',
+                      active: 'bg-blue-100 text-blue-700 border-blue-200',
+                      active_with_submissions: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+                    };
+                    const statusLabel = {
+                      completed: 'Completed',
+                      in_progress: 'In Progress',
+                      pending: 'Pending',
+                      voided: 'Voided',
+                      declined: 'Declined',
+                      closed: 'Closed',
+                      active: 'Active',
+                      active_with_submissions: 'Active (submissions)',
+                    }[agg] || (agg.charAt(0).toUpperCase() + agg.slice(1));
+                    const statusClass = statusPalette[agg] || 'bg-gray-100 text-gray-700 border-gray-200';
+
                     return (
-                    <tr key={doc.id} className="hover:bg-gray-50" data-testid={`document-row-${doc.id}`}>
-                      <td className="px-5 py-4 font-medium text-gray-900">{doc.template_name || 'Document'}</td>
-                      <td className="px-5 py-4 text-sm text-gray-600" data-testid={`doc-recipient-${doc.id}`}>
-                        <div>{recipientDisplay}</div>
-                        {recipientEmail && recipientDisplay !== recipientEmail && (
-                          <div className="text-xs text-gray-400">{recipientEmail}</div>
-                        )}
-                      </td>
-                      <td className="px-5 py-4">
-                        <div className="flex items-center gap-2">
-                          <span className={`inline-flex px-2.5 py-1 text-xs font-medium rounded-full capitalize ${doc.status === 'signed' || doc.status === 'completed' ? 'bg-green-100 text-green-700' :
-                              doc.status === 'sent' ? 'bg-blue-100 text-blue-700' :
-                                doc.status === 'viewed' ? 'bg-yellow-100 text-yellow-700' :
-                                  doc.status === 'declined' ? 'bg-red-100 text-red-700' :
-                                    'bg-gray-100 text-gray-700'
-                            }`} data-testid={`doc-status-${doc.id}`}>
-                            {doc.status || 'draft'}
+                      <tr
+                        key={doc.id}
+                        className="hover:bg-indigo-50/30 cursor-pointer transition-colors"
+                        onClick={() => navigate(`/setup/docflow/documents/${doc.id}`)}
+                        data-testid={`document-row-${doc.id}`}
+                      >
+                        <td className="px-5 py-4 font-medium text-gray-900">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className={`h-9 w-9 rounded-lg flex items-center justify-center shrink-0 ${isPublic ? 'bg-teal-100' : 'bg-indigo-100'}`}>
+                              {isPublic
+                                ? <LinkIcon className="h-4 w-4 text-teal-600" />
+                                : <Send className="h-4 w-4 text-indigo-600" />}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="truncate max-w-sm">{doc.template_name || 'Document'}</div>
+                              <div className="text-[11px] text-gray-400 font-mono truncate max-w-sm" title={doc.id}>
+                                {doc.id?.slice(0, 8)}…
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-5 py-4">
+                          <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-semibold border ${isPublic ? 'bg-teal-50 text-teal-700 border-teal-200' : 'bg-indigo-50 text-indigo-700 border-indigo-200'}`} data-testid={`doc-type-${doc.id}`}>
+                            {isPublic ? 'Public Link' : 'Email'}
                           </span>
-                          {doc.status === 'declined' && doc.reject_reason && (
-                            <button
-                              onClick={() => { setSelectedRejectDoc(doc); setShowRejectReasonModal(true); }}
-                              className="p-1 text-red-400 hover:text-red-600 rounded hover:bg-red-50 transition-colors"
-                              title="View rejection reason"
-                              data-testid={`doc-reject-reason-${doc.id}`}
-                            >
-                              <MessageSquare className="h-3.5 w-3.5" />
-                            </button>
+                        </td>
+                        <td className="px-5 py-4 text-sm text-gray-700" data-testid={`doc-recipients-${doc.id}`}>
+                          {isPublic ? (
+                            <span className="text-gray-500">—</span>
+                          ) : totalRecipients > 0 ? (
+                            <div>
+                              <div className="font-semibold text-gray-800">{totalRecipients} total</div>
+                              {agg !== 'completed' && pendingCount > 0 && (
+                                <div className="text-[11px] text-amber-600">{pendingCount} pending</div>
+                              )}
+                              {signedCount > 0 && (
+                                <div className="text-[11px] text-emerald-600">{signedCount} signed</div>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">No recipients</span>
                           )}
-                        </div>
-                      </td>
-                      <td className="px-5 py-4 text-sm text-gray-500" title={doc.created_at ? new Date(doc.created_at).toLocaleString() : ''} data-testid={`doc-created-${doc.id}`}>
-                        {formatDate(doc.created_at)}
-                      </td>
-                      <td className="px-5 py-4 text-right">
-                        <div className="flex items-center justify-end gap-1">
-                          <button
-                            onClick={() => handleDownload(doc.id, 'unsigned')}
-                            className="p-2 text-gray-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50"
-                            title="Download Original"
-                            data-testid={`doc-download-${doc.id}`}
-                          >
-                            <Download className="h-4 w-4" />
-                          </button>
-                          {(doc.status === 'signed' || doc.status === 'completed') && (
+                        </td>
+                        <td className="px-5 py-4">
+                          <span className={`inline-flex px-2.5 py-1 text-xs font-medium rounded-full border ${statusClass}`} data-testid={`doc-status-${doc.id}`}>
+                            {statusLabel}
+                          </span>
+                        </td>
+                        <td className="px-5 py-4 text-sm text-gray-500" title={doc.created_at ? new Date(doc.created_at).toLocaleString() : ''} data-testid={`doc-created-${doc.id}`}>
+                          {formatDate(doc.created_at)}
+                        </td>
+                        <td className="px-5 py-4 text-sm text-gray-500" title={doc.last_updated ? new Date(doc.last_updated).toLocaleString() : ''} data-testid={`doc-updated-${doc.id}`}>
+                          {formatDate(doc.last_updated)}
+                        </td>
+                        <td className="px-5 py-4 text-right" onClick={(e) => e.stopPropagation()}>
+                          <div className="flex items-center justify-end gap-1">
                             <button
-                              onClick={() => handleDownload(doc.id, 'signed')}
-                              className="p-2 text-green-500 hover:text-green-700 rounded-lg hover:bg-green-50"
-                              title="Download Signed PDF"
-                              data-testid={`doc-download-signed-${doc.id}`}
+                              onClick={() => navigate(`/setup/docflow/documents/${doc.id}`)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 rounded-lg transition-colors"
+                              title="View Details"
+                              data-testid={`doc-view-${doc.id}`}
                             >
-                              <CheckCircle className="h-4 w-4" />
+                              <Eye className="h-3.5 w-3.5" />
+                              View Details
                             </button>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
+                            <button
+                              onClick={() => handleDownload(doc.id, 'unsigned')}
+                              className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50"
+                              title="Download Original"
+                              data-testid={`doc-download-${doc.id}`}
+                            >
+                              <Download className="h-4 w-4" />
+                            </button>
+                            {(agg === 'completed' || doc.status === 'signed' || doc.status === 'completed') && (
+                              <button
+                                onClick={() => handleDownload(doc.id, 'signed')}
+                                className="p-1.5 text-green-500 hover:text-green-700 rounded-lg hover:bg-green-50"
+                                title="Download Signed PDF"
+                                data-testid={`doc-download-signed-${doc.id}`}
+                              >
+                                <CheckCircle className="h-4 w-4" />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
                     );
                   })}
                 </tbody>
@@ -1495,6 +1589,91 @@ const DocFlowDashboard = () => {
             <button onClick={() => { setShowRejectReasonModal(false); setSelectedRejectDoc(null); }} className="w-full py-2.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50 font-medium">
               Close
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Clone Template Confirmation Modal ─────────────────── */}
+      {cloneModalTemplate && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4" data-testid="clone-template-modal">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden">
+            {/* Header */}
+            <div className="px-6 pt-6 pb-4 border-b border-gray-100">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center flex-shrink-0">
+                  <Copy className="h-5 w-5 text-indigo-600" />
+                </div>
+                <div>
+                  <h3 className="text-base font-semibold text-gray-900">Clone Template</h3>
+                  <p className="text-xs text-gray-500">Create a fully editable independent copy</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="px-6 py-5 space-y-4">
+              <div className="bg-indigo-50/60 border border-indigo-100 rounded-xl p-4">
+                <p className="text-xs font-medium text-indigo-600 uppercase tracking-wide mb-1">Cloning</p>
+                <p className="text-sm font-semibold text-gray-900 truncate">{cloneModalTemplate.name}</p>
+              </div>
+
+              <p className="text-sm text-gray-600 leading-relaxed">
+                A new editable copy will be created as{' '}
+                <span className="font-medium text-gray-800">
+                  &ldquo;{cloneModalTemplate.name} (Copy)&rdquo;
+                </span>
+                {' '}with all fields, placements, and mappings copied.
+              </p>
+
+              <ul className="space-y-1.5 text-xs text-gray-500">
+                <li className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 flex-shrink-0" />
+                  All visual builder fields &amp; layout copied
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 flex-shrink-0" />
+                  CRM mappings &amp; connections copied
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+                  Send history &amp; signatures reset — fresh start
+                </li>
+                <li className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 flex-shrink-0" />
+                  Status set to Draft — activate when ready
+                </li>
+              </ul>
+            </div>
+
+            {/* Footer */}
+            <div className="px-6 pb-6 flex gap-3">
+              <button
+                onClick={() => setCloneModalTemplate(null)}
+                disabled={cloning}
+                className="flex-1 py-2.5 text-sm font-medium text-gray-700 border border-gray-200 rounded-xl hover:bg-gray-50 disabled:opacity-50 transition-colors"
+                data-testid="clone-modal-cancel"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCloneTemplate}
+                disabled={cloning}
+                className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-semibold hover:bg-indigo-700 disabled:opacity-60 transition-all shadow-lg shadow-indigo-200"
+                data-testid="clone-modal-confirm"
+              >
+                {cloning ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Cloning...
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-4 w-4" />
+                    Clone Template
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
       )}

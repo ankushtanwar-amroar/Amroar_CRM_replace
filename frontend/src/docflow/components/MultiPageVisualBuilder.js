@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { ZoomIn, ZoomOut, Type, Edit3, Calendar, CheckSquare, FileText, BracesIcon, AlignLeft, Trash2, Copy, X, Grid, Maximize2, Sparkles, Send, Loader2, CircleDot, ChevronLeft, ChevronRight, Users } from 'lucide-react';
+import { ZoomIn, ZoomOut, Type, Edit3, Calendar, CheckSquare, FileText, BracesIcon, AlignLeft, Trash2, Copy, X, Grid, Maximize2, Sparkles, Send, Loader2, CircleDot, ChevronLeft, ChevronRight, Users, Lock } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import DocumentContentEditor from './DocumentContentEditor';
@@ -94,7 +94,9 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     if (!el) return;
 
     const PAGE_W = 800;
-    const MAX_AUTO_ZOOM = 1.2; // cap upscaling so small PDFs don't look blurry
+    // Phase 76: allow up to 1.5x zoom on ultra-wide screens (2560px+) so
+    // the canvas fills available space without blurry upscaling.
+    const MAX_AUTO_ZOOM = 1.5;
 
     const computeFit = () => {
       if (isManualZoom.current) return;
@@ -745,6 +747,44 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     updateFieldProperties(fieldId, { [key]: value });
   };
 
+  // Phase 76: radio "Required" is a GROUP property — when toggled on one
+  // radio field, we propagate the flag to every sibling with the same
+  // groupName so the signer is required to pick ONE option from the group
+  // (matches DocuSign behavior). Non-radio fields are unaffected.
+  const updateFieldPropertyWithRadioGroupSync = (fieldId, key, value) => {
+    const field = droppedFields.find(f => f.id === fieldId);
+    const fieldType = (field?.type || '').toLowerCase();
+    const groupName = field?.groupName || field?.group_name;
+    if (fieldType === 'radio' && groupName && key === 'required') {
+      const updatedFields = droppedFields.map(f => {
+        const sameGroup =
+          (f.type || '').toLowerCase() === 'radio' &&
+          ((f.groupName || f.group_name) === groupName);
+        return sameGroup ? { ...f, required: value } : f;
+      });
+      setDroppedFields(updatedFields);
+      syncToParent(updatedFields);
+      return;
+    }
+    updateFieldProperty(fieldId, key, value);
+  };
+
+  // Phase 76: for UI display, "Required" on a radio reflects the GROUP state —
+  // true if any sibling in the same groupName is required.
+  const isFieldRequiredForUI = (field) => {
+    if (!field) return false;
+    const fieldType = (field.type || '').toLowerCase();
+    const groupName = field.groupName || field.group_name;
+    if (fieldType === 'radio' && groupName) {
+      return droppedFields.some(f =>
+        (f.type || '').toLowerCase() === 'radio' &&
+        ((f.groupName || f.group_name) === groupName) &&
+        f.required
+      );
+    }
+    return Boolean(field.required);
+  };
+
   const updateFieldProperties = (fieldId, updates) => {
     const updatedFields = droppedFields.map(f =>
       f.id === fieldId ? { ...f, ...updates } : f
@@ -834,7 +874,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   return (
     <div className="flex w-full gap-4 h-[calc(100vh-140px)] min-h-[700px] overflow-hidden">
       {/* Left Sidebar - Field Palette */}
-      <div className="w-72 flex-shrink-0 bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col overflow-hidden">
+      <div className="w-64 xl:w-72 2xl:w-80 flex-shrink-0 bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col overflow-hidden">
         
         {/* AI Assistant Command Bar */}
         {/* <div className="p-4 border-b border-gray-100 bg-indigo-50/50">
@@ -1260,35 +1300,86 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           </div>
                         </div>
                       )
-                    ) : (
-                      <div
-                        className="truncate text-xs font-medium w-full px-1"
-                        style={{
-                          color: field.style?.color || config.color,
-                          // Phase 71: apply alignment + font styling to ALL
-                          // typographic fields (label, text, merge, date,
-                          // signature, initials). Previously only the first 3
-                          // honoured it, which is why changing font/align on a
-                          // Text Input looked like "styling not working".
-                          textAlign: field.style?.textAlign || 'center',
-                          ...(field.style ? {
-                            fontFamily: field.style.fontFamily || undefined,
-                            fontSize: field.style.fontSize ? `${field.style.fontSize}px` : undefined,
-                            fontWeight: field.style.fontWeight || undefined,
-                            fontStyle: field.style.fontStyle || undefined,
-                            textDecoration: field.style.textDecoration || undefined,
-                          } : {})
-                        }}
-                      >
-                        {field.type === 'merge'
-                          ? (field.mergePattern || '{{Object.Field}}')
-                          : field.type === 'label'
-                            ? (field.text || 'Label')
-                            : signingTypes.has(field.type)
-                              ? `${field.label}${getRecipientLabel(field.assigned_to || field.recipient_id) ? ` • ${getRecipientLabel(field.assigned_to || field.recipient_id)}` : ''}`
-                              : field.label}
-                      </div>
-                    )}
+                    ) : (() => {
+                      // ─── Builder preview display priority ────────────────────
+                      // 1. Default Value  → shown as prefilled text (normal color)
+                      // 2. Placeholder    → shown in muted gray-italic (hint style)
+                      // 3. Label          → fallback (standard field label)
+                      //
+                      // Applies to input-capable field types only.
+                      // merge / label / signing-type fields use their own paths.
+                      const inputTypes = ['text', 'date', 'signature', 'initials'];
+                      const isInputType = inputTypes.includes(field.type);
+
+                      const hasDefault = isInputType && !!field.defaultValue;
+                      const hasPlaceholder = isInputType && !hasDefault && !!field.placeholder;
+
+                      let displayText;
+                      let previewMode; // 'default' | 'placeholder' | 'label' | 'standard'
+
+                      if (field.type === 'merge') {
+                        displayText = field.mergePattern || '{{Object.Field}}';
+                        previewMode = 'standard';
+                      } else if (field.type === 'label') {
+                        displayText = field.text || 'Label';
+                        previewMode = 'standard';
+                      } else if (hasDefault) {
+                        // Priority 1: Default Value — looks like a prefilled real value
+                        displayText = field.defaultValue;
+                        previewMode = 'default';
+                      } else if (hasPlaceholder) {
+                        // Priority 2: Placeholder — muted gray italic hint
+                        displayText = field.placeholder;
+                        previewMode = 'placeholder';
+                      } else if (signingTypes.has(field.type)) {
+                        // Signing types (signature / initials / date) with no default/placeholder
+                        const recipientLabel = getRecipientLabel(field.assigned_to || field.recipient_id);
+                        displayText = `${field.label}${recipientLabel ? ` • ${recipientLabel}` : ''}`;
+                        previewMode = 'standard';
+                      } else {
+                        // Priority 3: Label fallback
+                        displayText = field.label;
+                        previewMode = 'label';
+                      }
+
+                      // Build tooltip for quick author reference
+                      let titleTip;
+                      if (isInputType) {
+                        const parts = [];
+                        if (field.defaultValue) parts.push(`Default: "${field.defaultValue}"`);
+                        if (field.placeholder) parts.push(`Placeholder: "${field.placeholder}"`);
+                        parts.push(`Label: "${field.label}"`);
+                        titleTip = parts.join('  |  ');
+                      }
+
+                      return (
+                        <div
+                          className="truncate text-xs font-medium w-full px-1"
+                          style={{
+                            // Default value → normal/styled (looks like real data)
+                            // Placeholder  → muted gray italic
+                            // Label/std    → field's own color + styling
+                            color: previewMode === 'placeholder'
+                              ? '#9CA3AF'
+                              : (field.style?.color || config.color),
+                            fontStyle: previewMode === 'placeholder'
+                              ? 'italic'
+                              : (field.style?.fontStyle || undefined),
+                            textAlign: field.style?.textAlign || 'center',
+                            // Apply full custom styling for default-value and label modes
+                            ...(field.style && previewMode !== 'placeholder' ? {
+                              fontFamily: field.style.fontFamily || undefined,
+                              fontSize: field.style.fontSize ? `${field.style.fontSize}px` : undefined,
+                              fontWeight: field.style.fontWeight || undefined,
+                              textDecoration: field.style.textDecoration || undefined,
+                            } : {})
+                          }}
+                          title={titleTip}
+                        >
+                          {displayText}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   {/* Delete button */}
@@ -1303,6 +1394,18 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   {/* Required indicator */}
                   {field.required && (
                     <div className="absolute -top-1 -left-1 w-2.5 h-2.5 bg-red-500 rounded-full border border-white" title="Required" />
+                  )}
+
+                  {/* Read-Only indicator badge — top-right corner, non-interactive */}
+                  {field.readOnly && (
+                    <div
+                      className="absolute top-0.5 right-0.5 flex items-center gap-0.5 bg-gray-700/80 text-white rounded px-1 py-0.5 pointer-events-none select-none"
+                      style={{ fontSize: '8px', lineHeight: '10px', zIndex: 14 }}
+                      title="Read Only — signer cannot edit this field"
+                    >
+                      <Lock style={{ width: '7px', height: '7px', flexShrink: 0 }} />
+                      <span style={{ fontWeight: 600, letterSpacing: '0.02em' }}>Read Only</span>
+                    </div>
                   )}
 
                   {/* Recipient assignment badge */}
@@ -1340,7 +1443,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       </div>
 
       {/* Right Sidebar - Property Panel */}
-      <div className="w-80 flex-shrink-0 bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col overflow-hidden">
+      <div className="w-72 xl:w-80 2xl:w-96 flex-shrink-0 bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col overflow-hidden">
         {selectedField ? (
           <>
             <div className="p-4 border-b border-gray-100 flex items-center justify-between" style={{ backgroundColor: getFieldTypeConfig(selectedField.type).bgColor }}>
@@ -1397,8 +1500,8 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                     <input
                       type="checkbox"
                       id="field-required"
-                      checked={selectedField.required || false}
-                      onChange={(e) => updateFieldProperty(selectedField.id, 'required', e.target.checked)}
+                      checked={isFieldRequiredForUI(selectedField)}
+                      onChange={(e) => updateFieldPropertyWithRadioGroupSync(selectedField.id, 'required', e.target.checked)}
                       className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
                       data-testid="field-required-checkbox"
                     />
@@ -1532,7 +1635,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                             key={a}
                             onClick={() => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), textAlign: a })}
                             className={`flex-1 px-2 py-1 text-xs rounded-md transition-colors ${
-                              (selectedField.style?.textAlign || 'left') === a
+                              (selectedField.style?.textAlign || 'center') === a
                                 ? 'bg-indigo-600 text-white'
                                 : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                             }`}
@@ -1756,7 +1859,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       Applies everywhere this field appears: signing page, completed document, and the final PDF.
                     </p>
                   </div>
-                  <div>
+                  {/* <div>
                     <label className="block text-xs font-medium text-gray-700 mb-1">Field Label (tooltip)</label>
                     <input
                       data-testid="date-label-input"
@@ -1769,7 +1872,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                     <p className="mt-1 text-[10px] text-gray-500 leading-snug">
                       Shown as a tooltip/hover label — defaults to "Date Signed".
                     </p>
-                  </div>
+                  </div> */}
                 </div>
               )}
 

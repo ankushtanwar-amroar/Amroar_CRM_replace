@@ -861,11 +861,18 @@ class EnhancedDocumentService:
 
                     logger.info(f"Calling overlay with {len(all_sigs)} signatures")
 
+                    # Phase 76: compute Template Verification ID (DocuSign-style
+                    # uppercase UUID) from the document id. Stamped on every
+                    # page of the final signed PDF for authenticity.
+                    template_verification_id = str(document.get("id") or "").upper() or None
+
                     rendered_pdf = self.pdf_overlay_service.overlay_fields_on_pdf(
                         unsigned_pdf_bytes,
                         overlay_field_placements,
                         field_values=merged_field_data,
                         signatures=all_sigs,
+                        verification_id=template_verification_id,
+                        verification_label="Template Verification ID",
                     )
                     if rendered_pdf and len(rendered_pdf) > 0:
                         signed_pdf = rendered_pdf

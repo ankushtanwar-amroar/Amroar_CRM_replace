@@ -23,6 +23,10 @@ const PublicDocumentViewEnhanced = () => {
   // Active document state (child or direct)
   const [activeToken, setActiveToken] = useState(token);
   const [docData, setDocData] = useState(null);
+  // Phase 80: when the sender voids this recipient mid-session, we surface a
+  // blocking modal and disable every action. State toggled by the background
+  // poll below and the initial load.
+  const [accessRevoked, setAccessRevoked] = useState(false);
   const [template, setTemplate] = useState({ field_placements: [], recipients: [] });
   const [loading, setLoading] = useState(true);
   const [signing, setSigning] = useState(false);
@@ -51,6 +55,7 @@ const PublicDocumentViewEnhanced = () => {
   const [instantiating, setInstantiating] = useState(false);
 
   const signingTypes = new Set(['signature', 'initials', 'date']);
+  const interactiveTypes = new Set(['signature', 'initials', 'date', 'text', 'checkbox', 'radio', 'dropdown']);
   const templateRecipients = template?.recipients || [];
 
   // Session signature cache — keyed by document token + signer email so
@@ -106,6 +111,27 @@ const PublicDocumentViewEnhanced = () => {
     loadInitial();
   }, [token]);
 
+  // Phase 80 — background poll every 15s to detect mid-session voids.
+  // When the sender voids this recipient, the public endpoint flips
+  // `recipient_voided=true`; we pop a blocking modal and disable actions.
+  useEffect(() => {
+    if (!activeToken || isGenerator) return;
+    let cancelled = false;
+    const check = async () => {
+      try {
+        const resp = await fetch(`${API_URL}/api/docflow/documents/public/${activeToken}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (cancelled) return;
+        if (data?.recipient_voided || data?.active_recipient?.voided) {
+          setAccessRevoked(true);
+        }
+      } catch (_) { /* network hiccups are non-fatal */ }
+    };
+    const interval = setInterval(check, 15000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [activeToken, isGenerator, API_URL]);
+
   const loadInitial = async () => {
     try {
       setLoading(true);
@@ -126,6 +152,10 @@ const PublicDocumentViewEnhanced = () => {
       // Normal document (direct link / email link / child doc)
       setIsGenerator(false);
       setActiveToken(token);
+      // Phase 80: if already voided, flip the revoked state immediately.
+      if (data?.recipient_voided || data?.active_recipient?.voided) {
+        setAccessRevoked(true);
+      }
       populateDocState(data);
     } catch (error) {
       console.error('Error loading document:', error);
@@ -393,14 +423,29 @@ const PublicDocumentViewEnhanced = () => {
   const canSign = () => {
     if (!docData?.can_sign) return false;
     if (!formData.signer_name) return false;
-    const activeRecipient = docData?.active_recipient || {};
-    if (activeRecipient.email && !formData.signer_email) return false;
-    const activeTemplateRecipientId = activeRecipient.template_recipient_id;
-    const requiredFields = (template?.field_placements || []).filter(
-      f => signingTypes.has(f.type) && (f.recipient_id === activeTemplateRecipientId || !f.recipient_id) && f.required
-    );
+    const activeRcpt = docData?.active_recipient || {};
+    if (activeRcpt.email && !formData.signer_email) return false;
+    
+    const assignedIds = activeRcpt?.assigned_field_ids || [];
+    const hasAssignments = assignedIds.length > 0;
+
+    const requiredFields = (template?.field_placements || []).filter(f => {
+      if (!interactiveTypes.has(f.type)) return false;
+      if (!f.required) return false;
+      
+      const fieldAssignedTo = f.assigned_to || f.recipient_id;
+      if (fieldAssignedTo) {
+        return fieldAssignedTo === activeRcpt?.template_recipient_id || fieldAssignedTo === activeRcpt?.id;
+      }
+      if (hasAssignments) {
+        return assignedIds.includes(f.id);
+      }
+      return true;
+    });
+
     return requiredFields.every(field => {
       const v = fieldValues[field.id];
+      if (field.type === 'checkbox') return v === true || v === 'true';
       return v !== undefined && v !== null && String(v).trim() !== '';
     });
   };
@@ -415,7 +460,10 @@ const PublicDocumentViewEnhanced = () => {
       const hasSignedVersion = docData.signed_s3_key || docData.signed_file_url;
       const baseVersion = hasSignedVersion ? 'signed' : 'unsigned';
       const pdfResponse = await fetch(`${API_URL}/api/docflow/documents/${docData.id}/view/${baseVersion}`);
-      if (!pdfResponse.ok) throw new Error('Failed to load PDF');
+       if (!pdfResponse.ok) {
+        const errorData = await pdfResponse.json(); 
+        throw new Error(errorData.detail || "Failed to load PDF");
+      }
       const pdfBytes = await pdfResponse.arrayBuffer();
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const pages = pdfDoc.getPages();
@@ -439,7 +487,19 @@ const PublicDocumentViewEnhanced = () => {
         const y = pdfH - (field.y * scale) - ptHeight;
         const fieldValue = fieldValues[field.id];
 
-        if (signingTypes.has(field.type) && field.recipient_id && field.recipient_id !== docData?.active_recipient?.template_recipient_id) {
+        const fieldAssignedTo = field.assigned_to || field.recipient_id;
+        const activeRcpt = docData?.active_recipient;
+        const assignedIds = activeRcpt?.assigned_field_ids || [];
+        const hasAssignments = assignedIds.length > 0;
+        
+        let isAssigned = true;
+        if (fieldAssignedTo) {
+            isAssigned = fieldAssignedTo === activeRcpt?.template_recipient_id || fieldAssignedTo === activeRcpt?.id;
+        } else if (hasAssignments && interactiveTypes.has(field.type)) {
+            isAssigned = assignedIds.includes(field.id);
+        }
+
+        if (interactiveTypes.has(field.type) && !isAssigned) {
           continue;
         }
 
@@ -808,57 +868,88 @@ const PublicDocumentViewEnhanced = () => {
     docData?.status !== 'completed' && docData?.status !== 'signed';
 
   return (
-    <div className="min-h-screen bg-gray-50 py-8" data-testid="document-view">
+    <div className="min-h-screen bg-gray-50 py-4 sm:py-8" data-testid="document-view">
+      {/* Phase 80: Access-revoked blocking popup. Overlays the whole page
+          with click-blocking backdrop when the sender voids this recipient. */}
+      {accessRevoked && (
+        <div className="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4" data-testid="access-revoked-modal">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full overflow-hidden">
+            <div className="bg-rose-50 px-5 py-4 flex items-center gap-3">
+              <div className="h-12 w-12 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728L5.636 5.636m12.728 12.728L5.636 5.636" />
+                </svg>
+              </div>
+              <h3 className="text-base sm:text-lg font-bold text-gray-900">Signing request cancelled</h3>
+            </div>
+            <div className="px-5 py-4 text-sm text-gray-700 space-y-2">
+              <p>This signing request has been <strong>voided by the sender</strong>.</p>
+              <p className="text-xs text-gray-500">
+                You no longer have access to sign this document. If you believe this was a mistake, please contact the sender directly.
+              </p>
+            </div>
+            <div className="px-5 py-3 border-t border-gray-100 bg-gray-50 flex items-center justify-end">
+              <button
+                onClick={() => window.close()}
+                className="px-4 py-2 text-sm font-semibold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-100"
+                data-testid="access-revoked-close"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {/* E-Sign Disclosure / Review and Continue */}
       <ConsentScreen
-        open={shouldShowConsent}
+        open={shouldShowConsent && !accessRevoked}
         sessionKey={sessionKey}
         documentName={docData?.template_name}
         recipientName={formData?.signer_name}
         onContinue={() => setConsentAccepted(true)}
       />
-      <div className="max-w-7xl mx-auto px-4">
+      <div className={`max-w-7xl mx-auto px-3 sm:px-4 ${accessRevoked ? 'pointer-events-none select-none opacity-60' : ''}`}>
         {/* Header */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0 flex-1">
-              <h1 className="text-2xl font-bold text-gray-900 mb-2" data-testid="document-title">
+        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 sm:p-6 mb-4 sm:mb-6">
+          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4">
+            <div className="min-w-0 flex-1 order-2 sm:order-1">
+              <h1 className="text-lg sm:text-2xl font-bold text-gray-900 mb-1.5 sm:mb-2 break-words" data-testid="document-title">
                 {docData.template_name}
               </h1>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-gray-600">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs sm:text-sm text-gray-600">
                 <span>Status: <span className={`font-semibold ${
                   docData.status === 'signed' || docData.status === 'completed' ? 'text-green-600' :
                   docData.status === 'sent' || docData.status === 'viewed' ? 'text-blue-600' :
                   'text-gray-600'
                 }`} data-testid="document-status">{docData.status}</span></span>
                 {docData.recipient_name && (
-                  <span>Recipient: {docData.recipient_name}</span>
+                  <span className="truncate max-w-full">Recipient: {docData.recipient_name}</span>
                 )}
               </div>
             </div>
-            <div className="flex flex-col items-end gap-2 shrink-0">
+            <div className="flex flex-row sm:flex-col items-start sm:items-end gap-2 shrink-0 flex-wrap order-1 sm:order-2">
               {/* Phase 74: Sender info — read-only chip showing who sent the document */}
               {docData.sender && (docData.sender.name || docData.sender.email) && (
                 <div
-                  className="flex items-center gap-2 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full text-xs text-slate-700 max-w-[280px]"
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 bg-slate-50 border border-slate-200 rounded-full text-[11px] sm:text-xs text-slate-700 max-w-full sm:max-w-[280px]"
                   data-testid="document-sender-chip"
                   title={`From: ${docData.sender.name}${docData.sender.email ? ` <${docData.sender.email}>` : ''}`}
                 >
-                  <span className="font-medium text-slate-500 uppercase tracking-wide">From</span>
-                  <span className="truncate font-semibold text-slate-800" data-testid="sender-name">
+                  <span className="font-medium text-slate-500 uppercase tracking-wide shrink-0">From</span>
+                  <span className="truncate font-semibold text-slate-800 min-w-0" data-testid="sender-name">
                     {docData.sender.name || docData.sender.email}
                   </span>
                   {docData.sender.email && docData.sender.name && (
-                    <span className="truncate text-slate-500" data-testid="sender-email">
+                    <span className="truncate text-slate-500 hidden sm:inline min-w-0" data-testid="sender-email">
                       ({docData.sender.email})
                     </span>
                   )}
                 </div>
               )}
               {(docData.status === 'signed' || docData.status === 'completed') && (
-                <div className="flex items-center gap-2 text-green-600" data-testid="signed-badge">
-                  <CheckCircle className="h-5 w-5" />
-                  <span className="font-semibold">Signed</span>
+                <div className="flex items-center gap-1.5 text-green-600" data-testid="signed-badge">
+                  <CheckCircle className="h-4 w-4 sm:h-5 sm:w-5" />
+                  <span className="text-sm font-semibold">Signed</span>
                 </div>
               )}
             </div>
@@ -867,24 +958,24 @@ const PublicDocumentViewEnhanced = () => {
 
         {/* Signed Banner */}
         {(docData.status === 'signed' || docData.status === 'completed') && (
-          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 mb-6">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-3 sm:p-4 mb-4 sm:mb-6">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3">
                 <div className="flex items-center gap-2 px-3 py-1.5 bg-green-100 rounded-full">
                   <CheckCircle className="h-4 w-4 text-green-600" />
                   <span className="text-sm font-medium text-green-700">Document Signed</span>
                 </div>
-                <span className="text-sm text-gray-500">
+                <span className="text-xs sm:text-sm text-gray-500">
                   Signed on {new Date(docData.signed_at || Date.now()).toLocaleDateString()}
                 </span>
               </div>
               <button
                 onClick={handleDownload}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+                className="flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 w-full sm:w-auto"
                 data-testid="download-signed-btn"
               >
                 <Download className="h-4 w-4" />
-                Download Signed PDF
+                <span>Download Signed PDF</span>
               </button>
             </div>
           </div>
@@ -914,11 +1005,11 @@ const PublicDocumentViewEnhanced = () => {
               className="sticky top-0 z-30 bg-white rounded-lg shadow-sm border border-gray-200 mb-4"
               data-testid="guided-signing-header"
             >
-              <div className="p-3 flex items-center justify-between flex-wrap gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="flex items-center gap-2 text-sm">
+              <div className="p-2.5 sm:p-3 flex items-center justify-between flex-wrap gap-2 sm:gap-3">
+                <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 sm:gap-2 text-xs sm:text-sm min-w-0">
                     <span
-                      className={`inline-flex items-center justify-center h-6 min-w-6 px-2 rounded-full text-xs font-semibold ${
+                      className={`inline-flex items-center justify-center h-6 min-w-6 px-2 rounded-full text-xs font-semibold shrink-0 ${
                         (guidedAllComplete || !hasAnyRequired)
                           ? 'bg-emerald-100 text-emerald-700'
                           : 'bg-indigo-100 text-indigo-700'
@@ -927,7 +1018,7 @@ const PublicDocumentViewEnhanced = () => {
                     >
                       {pendingCount}
                     </span>
-                    <span className="text-gray-700 font-medium truncate">
+                    <span className="text-gray-700 font-medium truncate min-w-0">
                       {!hasAnyRequired
                         ? 'No required fields — click Finish to complete'
                         : pendingCount === 0
@@ -980,34 +1071,34 @@ const PublicDocumentViewEnhanced = () => {
                     </div>
                   )}
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
+                <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 w-full sm:w-auto justify-end flex-wrap">
                   {showPrev && (
                     <button
                       onClick={goToPrevField}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors shadow-sm"
+                      className="inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors shadow-sm min-h-[40px]"
                       data-testid="guided-prev-btn"
                     >
                       <ChevronLeft className="h-4 w-4" />
-                      Previous
+                      <span>Previous</span>
                     </button>
                   )}
                   {showStart && (
                     <button
                       onClick={startGuided}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm"
+                      className="inline-flex items-center gap-1 sm:gap-1.5 px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm min-h-[40px]"
                       data-testid="guided-start-btn"
                     >
                       <Play className="h-4 w-4" />
-                      Start
+                      <span>Start</span>
                     </button>
                   )}
                   {showNext && (
                     <button
                       onClick={goToNextField}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm"
+                      className="inline-flex items-center gap-1 sm:gap-1.5 px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm min-h-[40px]"
                       data-testid="guided-next-btn"
                     >
-                      Next
+                      <span>Next</span>
                       <ChevronRight className="h-4 w-4" />
                     </button>
                   )}
@@ -1017,7 +1108,7 @@ const PublicDocumentViewEnhanced = () => {
                       await handleSign();
                     }}
                     disabled={!canFinish}
-                    className={`inline-flex items-center gap-1.5 px-5 py-2 text-sm font-semibold rounded-lg transition-all shadow-sm ${
+                    className={`inline-flex items-center gap-1 sm:gap-1.5 px-3.5 sm:px-5 py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all shadow-sm min-h-[40px] ${
                       canFinish
                         ? 'bg-indigo-600 text-white hover:bg-indigo-700'
                         : 'bg-gray-200 text-gray-400 cursor-not-allowed'
@@ -1030,7 +1121,7 @@ const PublicDocumentViewEnhanced = () => {
                     }
                   >
                     <CheckCircle className="h-4 w-4" />
-                    {signing ? 'Signing...' : 'Finish'}
+                    <span>{signing ? 'Signing...' : 'Finish'}</span>
                   </button>
                 </div>
               </div>
@@ -1069,7 +1160,10 @@ const PublicDocumentViewEnhanced = () => {
           {(() => {
             return (
           <div className="col-span-1">
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden relative" style={{ height: '800px' }}>
+            <div
+              className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden relative"
+              style={{ height: 'min(80vh, 800px)', minHeight: '520px' }}
+            >
               {/* Verification Overlay (for direct/email links that still need auth) */}
               {!isVerified && (
                 <div className="absolute inset-0 z-40 bg-gray-900/10 backdrop-blur-md flex items-center justify-center p-6">
@@ -1278,21 +1372,21 @@ const PublicDocumentViewEnhanced = () => {
                       if (fieldAssignedTo) {
                         // Field has explicit assignment — check it matches current recipient
                         isAssigned = fieldAssignedTo === activeRcpt?.template_recipient_id || fieldAssignedTo === activeRcpt?.id;
-                      } else if (hasAssignments && signingTypes.has(f.type)) {
+                      } else if (hasAssignments && interactiveTypes.has(f.type)) {
                         isAssigned = assignedIds.includes(f.id);
                       }
-                      // Backward compat: no assignment + no assigned_field_ids = visible to all
+                      
                       if (isAssigned) {
                         return { ...f, field_disabled: false, field_hint: 'Complete this field' };
                       }
-                      // Unassigned field: show as read-only if it already has a value
-                      // (from prior signer or system), otherwise hide entirely.
-                      const existing = fieldValues[f.id];
-                      const hasValue = existing !== undefined && existing !== null && existing !== '';
-                      if (hasValue) {
-                        return { ...f, readOnly: true, field_disabled: false, field_hidden: false };
+                      
+                      // Unassigned field: hide interactive fields completely from other recipients
+                      // during active signing flow, so they don't see each other's fields.
+                      if (interactiveTypes.has(f.type)) {
+                        return { ...f, field_hidden: true };
                       }
-                      return { ...f, field_hidden: true };
+
+                      return { ...f, readOnly: true };
                     })}
                     onFieldsChange={handleFieldsChange}
                     readOnly={!docData?.can_sign}

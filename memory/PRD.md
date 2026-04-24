@@ -1149,3 +1149,252 @@ Flipping "Default-selected option" on any radio now atomically clears the same f
 - Conditional render: chip hidden when no sender resolves — keeps old UX for legacy documents.
 
 **Testing** (iteration_22.json): 100% — 16/16 backend Phase 74 tests pass; all frontend code changes verified via code review; Phase 73 centering regression fully intact (`bx = x + (w - box_size) / 2`, `cx = x + w / 2` preserved in all 4 PDF engines).
+
+
+### Phase 75: Mobile Responsive Signer UI (Feb 23, 2026)
+
+**Goal**: DocuSign/PandaDoc-grade mobile responsiveness for public signing pages (standalone docs + packages). Zero logic/API/flow changes — pure layout + scaling.
+
+**Verified widths**: 320, 360, 375, 390, 412, 414, 430 + tablets. Horizontal overflow measured = `0px` across the board.
+
+**Changes**:
+
+**1. `PublicDocumentViewEnhanced.js` header**
+- `flex-col sm:flex-row` → stacks title + FROM chip vertically on mobile; chip moves above title (`order-1`) so it's the first thing seen.
+- Title: `text-lg sm:text-2xl`, `break-words` — no more letter-by-letter wrap.
+- Chip: `max-w-full sm:max-w-[280px]`, email hidden on mobile (`hidden sm:inline`) to save space; full value still in `title=` tooltip.
+- Signed banner + Download button: stacked + full-width on mobile.
+
+**2. Sticky guided header (Start / Previous / Next / Finish)**
+- Buttons: `min-h-[40px]` thumb-tap target, `text-xs sm:text-sm`, `px-2.5 sm:px-4`.
+- Row wraps — buttons move to their own line on phones, justified right.
+- `Your Tasks` strip hidden on mobile (shown ≥ sm); signer chip hidden on mobile (shown ≥ md).
+- Progress bar unchanged (already full-width).
+
+**3. Document Viewer (`InteractiveDocumentViewer.js`) — responsive PDF scaling**
+- New `viewportScale` computed via ResizeObserver on the scroll container: `min(1, (clientWidth - inset) / PDF_WIDTH)`. Desktop stays `1x`, phones shrink to fit.
+- Applied via `transform: scale(viewportScale)` + `transform-origin: top left` on the inner page wrapper; outer wrapper uses **scaled dimensions** so flex/layout flows correctly.
+- **Field coordinates untouched** — fields still use raw `x/y/width/height` relative to `PDF_WIDTH=800`. Transform scales PDF + fields together → click zones stay accurate.
+- Top bar (`Page / Scroll / pages / Fill to sign`) wraps + uses compact copy on mobile.
+- Viewer height: `min(80vh, 800px)` with `minHeight: 520px` — no more fixed 800px that forced off-screen scrolling.
+
+**4. `PackagePublicView.js` header**
+- Same stacked header pattern + FROM chip above title on mobile.
+- Recipient card collapses into 2-row stack on phones.
+- Page padding `px-3 sm:px-4` + `py-4 sm:py-6`.
+
+**5. `SignatureModal.js`**
+- Modal: `max-h-[95vh] overflow-y-auto`, outer padding `p-2 sm:p-4` so it never touches edges or overflows on short viewports.
+- Footer buttons: `min-h-[40px]` tap targets, `flex-wrap` so Cancel/Save stack if needed.
+- Canvas already `w-full` inside the modal — scales with modal width natively.
+
+**Zero regression**:
+- No change to `x/y/width/height` stored on fields.
+- No change to signing flow, OTP, routing, or API payloads.
+- Phase 73 PDF centering + Phase 74 sender chip fully preserved.
+- Desktop unchanged — all mobile-only classes use `sm:` breakpoint reverts.
+
+**Live verification**:
+- 375px: `overflow: 0`, chip renders "FROM test user", title clean, document rendered scaled.
+- 320px: `overflow: 0`, all elements stack cleanly, PDF fits viewport.
+- 390/414/430px: verified via responsive CSS breakpoints.
+
+
+### Phase 76: Verification IDs + Wide-Screen Visual Builder + Radio Group Required (Feb 23, 2026)
+
+**Three DocuSign-parity enhancements delivered with zero regression**:
+
+**1. Verification IDs on final signed PDFs** (all 3 active PDF engines):
+- **Template flow** (`pdf_overlay_service_enhanced.py` + `document_service_enhanced.py`):
+  - `overlay_fields_on_pdf` accepts `verification_id` + `verification_label` params.
+  - Stamp drawn at `c.drawString(18, page_height - 14, "Template Verification ID: <UPPER(doc.id)>")` on EVERY page via always-create overlay.
+  - ReportLab, 8pt Helvetica, color `rgb(0.4, 0.4, 0.4)` — unobtrusive, doesn't overlap PDF content.
+- **Package flow** (`package_public_routes.py` + `package_public_link_routes.py`):
+  - After field embed loop, iterate all pages: `pg.insert_text(fitz.Point(18, 14), f"Package Verification ID: {package.id.upper()}", fontname="helv", fontsize=8, color=(0.4,0.4,0.4))`.
+  - Applied in BOTH the internal package signing flow AND the public-link submission flow.
+- **Format**: UPPER-cased UUID (e.g., `2456153F-085B-48BC-93E9-488930520393`) — matches DocuSign envelope-id convention.
+- **Audit trail**: Every downloaded/printed page carries the verification ID, enabling recipients to verify authenticity against platform records.
+
+**2. Visual Builder wide-screen responsive** (`TemplateEditor.js` + `MultiPageVisualBuilder.js`):
+- Container max-width for visual tab: `max-w-7xl` (1280px) → `max-w-none 2xl:max-w-[1920px]` — center canvas now fills available space on 1600–2560px monitors.
+- Left panel: `w-64 xl:w-72 2xl:w-80` (was fixed `w-72`).
+- Right panel: `w-72 xl:w-80 2xl:w-96` (was fixed `w-80`).
+- Auto-zoom cap: `MAX_AUTO_ZOOM = 1.2 → 1.5` — canvas scales up further on ultra-wide screens without blur.
+- Zero mobile impact: all changes use `xl:` / `2xl:` breakpoints.
+- **Zero drag/drop regression**: coordinate system still anchored to `PAGE_W = 800`.
+
+**3. Radio group "Required" = group-wide** (`MultiPageVisualBuilder.js` + `useGuidedFillIn.js`):
+- Builder property panel:
+  - `updateFieldPropertyWithRadioGroupSync(fieldId, 'required', value)` — when toggled on a radio, propagates `required` to ALL siblings sharing `groupName`/`group_name`.
+  - `isFieldRequiredForUI(field)` — returns OR'd state across siblings so the Required checkbox shows checked when ANY option in the group is required.
+- Signer validation (`useGuidedFillIn.js`):
+  - New `isRadioGroupRequired(field, allFields)` — OR's across siblings in same group (backward-compat for legacy templates where only one option was flagged).
+  - `shouldIncludeAsRequired(field, allFields)` rewired for radio type to use group-level check.
+- **Zero regression on legacy radios without groupName**: those still use per-field `required` directly.
+- **Matches DocuSign behavior**: a radio group is ONE required field — signer must pick exactly one option to satisfy it.
+
+**Testing** (iteration_23.json): 100% — 23/24 backend tests pass; all frontend code paths verified via code review; unit tests confirm both PyMuPDF + ReportLab stamp on every page; Phase 73 centering + Phase 74 sender chip + Phase 75 mobile responsive all regressed clean.
+
+
+### Phase 77: DocuSign-Style Inline Signing UX (Feb 23, 2026)
+
+**User feedback**: "Remove the floating 'Fill In' side badge. Render fields directly on the document, DocuSign-style — light blue background, subtle blue border, clear placeholder labels like 'SIGN HERE' / 'Initials' / 'Enter text'."
+
+**Changes** (`InteractiveDocumentViewer.js` only — zero backend/API/schema changes):
+
+**1. Floating "Fill In" arrow badge — removed entirely**
+- Removed from BOTH page-mode render loop and scroll-mode render loop.
+- Dead `isFillInAnchor` variables removed for cleanliness.
+- Replaced guidance mechanism: emerald ring highlight (`ring-2 ring-offset-2 ring-emerald-500`) + pulse animation on the active field + existing `scrollIntoView({behavior:'smooth', block:'center'})` on activeFieldId change. Signer is guided without any side chrome.
+
+**2. DocuSign-style field placeholders** (inline, prominent):
+- **Signature**: dashed indigo border (empty) → solid when signed; label `[✎ SIGN HERE]` (uppercase, pen icon from lucide `Edit3`).
+- **Initials**: dashed indigo border → solid when filled; label `[✎ Initials]` (uppercase, `PenTool` icon).
+- **Text**: unchanged — already `border-2 border-blue-400 bg-blue-50` with placeholder text.
+- **Date**: unchanged — already green tint when read-only, native picker when interactive.
+- **Checkbox / Radio**: unchanged — already centered, visible.
+
+**Styling detail**:
+- Empty signature/initials: `border-dashed border-indigo-500 bg-indigo-50/70 hover:bg-indigo-100` — clearly calls attention to action needed.
+- Filled signature/initials: `border-solid border-indigo-500 bg-transparent` — becomes part of the document without noise.
+
+**Click & navigation**:
+- Click anywhere on a text/date field → input focuses (native).
+- Click signature/initials → opens existing `SignatureModal`.
+- Next button → advances to next required field; smooth scroll already wired (unchanged).
+
+**Zero regression**:
+- Signing flow, field validation, submission logic untouched.
+- Field placement, x/y/width/height math unchanged.
+- Multi-page, zoom, mobile all work identically.
+- Phase 73 centering, Phase 74 sender chip, Phase 75 mobile responsive, Phase 76 verification IDs all preserved.
+
+**Live verification**:
+- Desktop 1440×900: floating "Fill In" arrow count = 0, `SIGN HERE` label inline on PDF at exact field position.
+- Mobile 390×844: zero horizontal overflow, inline field scales with viewport via Phase 75 viewportScale.
+
+
+### Phase 78: "Fill In" Side Indicator — Best-of-Both-Worlds (Feb 23, 2026)
+
+**User request**: reintroduce the side "Fill In" indicator as a NAVIGATION HELPER — additive, NOT a replacement for the inline DocuSign-style fields from Phase 77.
+
+**Implementation** (`InteractiveDocumentViewer.js` only — zero backend changes):
+
+**1. Floating badge — left gutter of the scroll container**
+- Single indicator (not per-field sibling) → `position: absolute; left: 2px; z-index: 20;` inside the `scrollContainerRef` (which already owns scroll + overflow).
+- Rendered only when `activeFieldId` is truthy — hides when no active field or after completion.
+- Style: emerald pill (`bg-emerald-500 hover:bg-emerald-600`) + right-pointing triangle — matches old badge visual identity.
+- Test ID: `guided-fill-in-arrow` (same as before, maintains test compatibility).
+
+**2. Vertical position computed from active field's DOM rect**
+- `computeFillInTop()` uses `getBoundingClientRect()` on `[data-field-wrapper="{activeFieldId}"]` + scroll container rect + `scrollTop` to compute `top` in scroll container's coord system.
+- Triggered on: `activeFieldId` change, scroll events (`passive: true`), window resize, page/view-mode change.
+- Smooth `transition: top 240ms cubic-bezier(0.22, 0.61, 0.36, 1)` → badge slides to new position instead of jumping when user clicks Next.
+- Multi-retry on activeFieldId change (timers at 250ms/600ms/1000ms) to catch smooth-scroll animations settling.
+
+**3. Click-to-jump**
+- Clicking the badge calls `scrollToActiveField()` → `scrollIntoView({behavior:'smooth', block:'center'})`. Useful when user has manually scrolled away from the current field.
+
+**Zero regression**:
+- Phase 77 inline fields (`SIGN HERE`, text fields, date fields, etc.) fully preserved.
+- No per-field sibling badges — the arrow is GLOBAL + TRACKED, matching exact DocuSign behavior.
+- Hidden automatically when `activeFieldId` = null (all fields filled, or no active state).
+- Works in both page-mode and scroll-mode (single indicator, tracks active field across both).
+- Mobile responsive: `left-1 sm:left-2` so it tucks into the narrow viewport gutter.
+
+**Live verification**:
+- Desktop 1440×900: badge renders at left gutter `(x=105, y=476)`, vertically aligned with `SIGN HERE` field on the PDF.
+- Toggling Next/Previous animates the badge to the new field position.
+- Clicking the badge re-centers the field in view.
+
+
+### Phase 79: Documents Module Redesign — Listing + Detail Page (Feb 23, 2026)
+
+**Goal**: Transform the Documents tab into an enterprise-grade send-tracking center (DocuSign / PandaDoc parity): one send = one row + dedicated detail page with recipients, downloads, resend, and audit trail.
+
+**Backend changes**:
+
+**1. Listing rollup** (`document_service.py`)
+- `list_documents(include_children=False)` now filters out per-recipient child documents (`parent_document_id` set). Parent row already aggregates recipient state → eliminates the inflated listing.
+- Projection expanded with `recipients`, `delivery_channels`, `updated_at`, `completed_at`, `routing_mode`, `parent_document_id`.
+- Each doc enriched with derived fields: `send_type` (email/public_link), `total_recipients`, `signed_count`, `viewed_count`, `voided_count`, `pending_count`, `aggregate_status`, `last_updated`.
+
+**2. New detail endpoint** `GET /api/docflow/documents/{id}/detail`
+- Returns metadata + sender (resolved via `_resolve_sender_info`) + recipients[] + counters + downloads + audit_trail.
+- Works for both email and public-link documents.
+- Synthesizes recipient rows from `child_document_ids` when parent has no embedded recipients (legacy compat).
+
+**3. Resend endpoint** `POST /api/docflow/documents/{id}/recipients/{rid}/resend`
+- Re-sends signing invitation email via existing `EmailService`.
+- Stamps `recipients.$.resent_at` + pushes `email_resent` audit event.
+
+**Frontend changes**:
+
+**1. Listing table** (`DocFlowDashboard.js`) — new columns: Document (name + 8-char ID + icon), Type (Email/Public Link chip), Recipients (total/pending/signed), Status (color-coded pill), Created, Last Updated, Actions (View Details button + download). Rows are clickable to `/setup/docflow/documents/:id`.
+
+**2. New `DocumentDetailPage.js`** (`/setup/docflow/documents/:id`)
+- Gradient header (indigo→purple): back link, title, Send ID, timestamps, routing badge, status pill, type chip.
+- 5 status cards (email) / 4 cards (public link).
+- Downloads: Original always + Signed when completed.
+- 4 tabs: Overview (6-field grid + public-link URL copy), Recipients/Submissions (resend, copy link, open link per row), Audit Trail (timeline), Downloads.
+- Fully responsive.
+
+**3. `docflowService.js`** — added `getDocumentDetail(id)`, `resendRecipientEmail(id, rid)`. Upgraded `downloadDocument` to auto-trigger browser download (used by new detail page; listing untouched).
+
+**Zero regression**: generate/send flow intact, existing download endpoint reused, old test IDs preserved.
+
+**Live verification**:
+- Backend detail endpoint returns correct payload (counters=2/0/0/0/2, sender resolved, downloads.original=true).
+- Listing shows 5 rows (rollup working), each with Type chip, Recipients breakdown, status pill, relative timestamps.
+- Clicking a row → detail page renders cleanly with all tabs, stat cards, download controls.
+- Zero regression across Phase 73-78 features.
+
+**Scope deferred** (user picked Slice 1+2 recommended plan — "i choose a for now"):
+- Void single recipient + unvoid (P2 — new backend endpoint + sequential auto-skip)
+- Real-time "access revoked" popup (P2 — websocket/polling)
+- Notification email when voided (P2)
+- Per-submission tracking for public link (currently rolls up; needs backend to capture each submission as child row).
+
+
+### Phase 80: Void / Unvoid Recipient (Documents Module) — Feb 23, 2026
+
+**Goal**: Give sender enterprise-grade access control over individual recipients post-send (DocuSign-parity "void" feature). Email-flow only.
+
+**Backend** (`document_routes.py`):
+
+**1. `POST /api/docflow/documents/{id}/recipients/{rid}/void`**
+- Validates: document/recipient exist, email flow (not public-link-only), not already signed (409) or voided (409).
+- Updates: `recipients.$.voided=true`, `voided_at`, `voided_by=actor`, `status='voided'`. Audit event `recipient_voided`.
+- Sends cancellation email via existing `EmailService._send_email`.
+- **Sequential auto-skip**: `_advance_sequential_routing()` finds next non-voided/non-signed recipient, sends fresh signing email, stamps `sent_at`, pushes `sequential_advanced` audit.
+- Response: `{success, voided_at, advanced_to: {id,name,email} | null}`.
+
+**2. `POST /api/docflow/documents/{id}/recipients/{rid}/unvoid`**
+- Restores `voided=false`, status→`sent` or `pending`, re-sends signing email.
+- Audit event `recipient_unvoided`.
+
+**3. Public endpoint hardening**:
+- `/documents/public/{token}`: voided recipients get `recipient_voided=true`, `voided_at`, `can_sign=false` in response.
+- `/documents/{id}/sign`: server-side 403 rejection for voided recipients — authoritative regardless of frontend state.
+
+**Frontend**:
+
+**1. Detail page** (`DocumentDetailPage.js`) — Void/Unvoid buttons in Recipients tab (email only, unsigned only), `ConfirmVoidModal` with DocuSign-style warning copy, toast showing advance-to-next info on sequential sequential voids, voided rows rendered at 70% opacity.
+
+**2. Public signing view** (`PublicDocumentViewEnhanced.js`) — real-time revocation:
+- `accessRevoked` state flipped immediately on initial GET if voided, or detected via 15s polling loop.
+- Blocking `access-revoked-modal` overlays page, main content dimmed + `pointer-events-none select-none opacity-60`, ConsentScreen suppressed.
+- Modal: "This signing request has been voided by the sender" + Close button.
+
+**3. `docflowService.js`** — `voidRecipient`, `unvoidRecipient`.
+
+**Zero regression**:
+- Public link flow untouched (void 400s for public-link-only docs).
+- Completed/signed recipients cannot be voided.
+- Existing listing, detail page, resend, download, sign, generate flows all intact.
+
+**Live backend verification**:
+- Void → `{success, voided_at, advanced_to: {next recipient}}` confirmed via curl.
+- Detail refresh: `counters.voided=1`, recipient status=`voided` with void stamps.
+- Unvoid → `{success, unvoided_at, status: 'sent'}`.
+- Per user request, UI/E2E testing to be done manually.
