@@ -404,7 +404,9 @@ async def submit_public_link(
                         if isinstance(field_value, str) and field_value.startswith("data:image"):
                             b64_data = field_value.split(",", 1)[1]
                             img_bytes = base64.b64decode(b64_data)
-                            # Aspect-fit + align inside the author's box (Phase 56).
+                            # Render at EXACTLY the configured fontSize so
+                            # different sigs sized differently in Visual
+                            # Builder are visibly distinguishable on the PDF.
                             try:
                                 pm = fitz.Pixmap(img_bytes)
                                 img_w, img_h = pm.width, pm.height
@@ -412,13 +414,21 @@ async def submit_public_link(
                             except Exception:
                                 img_w = img_h = 0
                             align = (field.get("style") or {}).get("textAlign") or "center"
+                            try:
+                                _raw_fs = (field.get("style") or {}).get("fontSize")
+                                _fs_css = float(str(_raw_fs).replace("px", "")) if _raw_fs else 18.0
+                            except Exception:
+                                _fs_css = 18.0
+                            target_h = min(max(6.0, _fs_css * scale), h)
                             if img_w > 0 and img_h > 0:
                                 aspect = img_w / img_h
-                                fit_w, fit_h = h * aspect, h
+                                fit_h = target_h
+                                fit_w = fit_h * aspect
                                 if fit_w > w:
-                                    fit_w, fit_h = w, w / aspect
+                                    fit_w = w
+                                    fit_h = fit_w / aspect
                             else:
-                                fit_w, fit_h = w, h
+                                fit_w, fit_h = w, target_h
                             if align == "left":
                                 sub_x = x
                             elif align == "right":

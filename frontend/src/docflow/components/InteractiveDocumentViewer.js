@@ -1259,6 +1259,25 @@ const InteractiveDocumentViewer = ({
         const hasSignature = Boolean(fieldValue);
         const sigAlign = field.style?.textAlign || field.alignment || 'center';
         const sigJustify = sigAlign === 'left' ? 'justify-start' : sigAlign === 'right' ? 'justify-end' : 'justify-center';
+        // Render the rasterised signature image at EXACTLY the configured
+        // font size (CSS px). This is what makes a 24px signature visibly
+        // larger than a 12px signature — they no longer all aspect-fit
+        // into the field box.
+        const sigFs = (() => {
+          const raw = field.style?.fontSize;
+          if (raw) {
+            const n = Number(String(raw).replace('px', ''));
+            if (Number.isFinite(n) && n > 0) return n;
+          }
+          return 18; // sensible default
+        })();
+        const sigImgStyle = {
+          height: `${sigFs}px`,
+          width: 'auto',
+          maxWidth: '100%',
+          maxHeight: '100%',
+          objectFit: 'contain',
+        };
         return (
           <div
             onClick={!isDisabled ? () => showSignatureModal && showSignatureModal(field.id, false, field) : null}
@@ -1273,7 +1292,7 @@ const InteractiveDocumentViewer = ({
             data-testid={`field-${field.id}`}
           >
             {hasSignature ? (
-              <img src={fieldValue} alt="Signature" className="max-w-full max-h-full object-contain" />
+              <img src={fieldValue} alt="Signature" style={sigImgStyle} />
             ) : (
               <span 
                 className="inline-flex items-center gap-1 font-semibold text-indigo-700 truncate px-1.5 uppercase tracking-wide"
@@ -1297,6 +1316,21 @@ const InteractiveDocumentViewer = ({
         const hasInitials = Boolean(fieldValue);
         const iniAlign = field.style?.textAlign || field.alignment || 'center';
         const iniJustify = iniAlign === 'left' ? 'justify-start' : iniAlign === 'right' ? 'justify-end' : 'justify-center';
+        const iniFs = (() => {
+          const raw = field.style?.fontSize;
+          if (raw) {
+            const n = Number(String(raw).replace('px', ''));
+            if (Number.isFinite(n) && n > 0) return n;
+          }
+          return 16;
+        })();
+        const iniImgStyle = {
+          height: `${iniFs}px`,
+          width: 'auto',
+          maxWidth: '100%',
+          maxHeight: '100%',
+          objectFit: 'contain',
+        };
         return (
           <div
             onClick={!isDisabled ? () => showSignatureModal && showSignatureModal(field.id, true, field) : null}
@@ -1311,7 +1345,7 @@ const InteractiveDocumentViewer = ({
             data-testid={`field-${field.id}`}
           >
             {hasInitials ? (
-              <img src={fieldValue} alt="Initials" className="max-w-full max-h-full object-contain" />
+              <img src={fieldValue} alt="Initials" style={iniImgStyle} />
             ) : (
               <span 
                 className="inline-flex items-center gap-1 font-semibold text-indigo-700 truncate px-1.5 uppercase tracking-wide"

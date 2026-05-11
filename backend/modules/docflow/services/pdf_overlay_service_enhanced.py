@@ -168,7 +168,7 @@ class PDFOverlayService:
                 # the frontend signing UI. Without this, backend text was ~30%
                 # larger than the preview because font sizes were not scaled.
                 if field_type == 'signature':
-                    self._draw_signature_field(c, x, y_pdf, width, height, field_id, field_values, field)
+                    self._draw_signature_field(c, x, y_pdf, width, height, field_id, field_values, field, scale=scale)
                 elif field_type == 'text':
                     self._draw_text_field(c, x, y_pdf, width, height, field_id, field_values, field, scale=scale)
                 elif field_type == 'date':
@@ -178,7 +178,7 @@ class PDFOverlayService:
                 elif field_type == 'radio':
                     self._draw_radio_field(c, x, y_pdf, width, height, field, field_values, scale=scale)
                 elif field_type == 'initials':
-                    self._draw_initials_field(c, x, y_pdf, width, height, field_id, field_values, field)
+                    self._draw_initials_field(c, x, y_pdf, width, height, field_id, field_values, field, scale=scale)
                 elif field_type == 'merge' or field_type == 'dropdown':
                     self._draw_merge_field(c, x, y_pdf, width, height, field, field_values, scale=scale)
                 elif field_type == 'label':
@@ -194,8 +194,15 @@ class PDFOverlayService:
     
     def _draw_signature_field(self, c: canvas.Canvas, x: float, y: float, width: float,
                             height: float, field_id: str, field_values: Dict[str, Any],
-                            field: Optional[Dict[str, Any]] = None):
-        """Draw signature image on PDF with aspect-fit + alignment (Phase 58)."""
+                            field: Optional[Dict[str, Any]] = None,
+                            scale: float = 1.0):
+        """Draw signature image on PDF at EXACTLY the configured fontSize tall.
+
+        Previously aspect-fit to full box, which made every signature look
+        the same size regardless of the Visual Builder fontSize setting.
+        Now a 24px signature renders twice as tall as a 12px one, matching
+        the signer UI exactly.
+        """
         signature_data = field_values.get(field_id)
         if not signature_data:
             return
@@ -217,14 +224,27 @@ class PDFOverlayService:
                 except Exception:
                     iw, ih = 0, 0
 
-                align = ((field or {}).get('style') or {}).get('textAlign') or 'center'
+                fld = field or {}
+                style = fld.get('style') or {}
+                align = style.get('textAlign') or 'center'
+
+                # Resolve target height from configured fontSize × scale.
+                try:
+                    _raw_fs = style.get('fontSize')
+                    _fs_css = float(str(_raw_fs).replace('px', '')) if _raw_fs else 18.0
+                except Exception:
+                    _fs_css = 18.0
+                target_h = min(max(6.0, _fs_css * scale), height)
+
                 if iw > 0 and ih > 0:
                     aspect = iw / ih
-                    fit_w, fit_h = height * aspect, height
+                    fit_h = target_h
+                    fit_w = fit_h * aspect
                     if fit_w > width:
-                        fit_w, fit_h = width, width / aspect
+                        fit_w = width
+                        fit_h = fit_w / aspect
                 else:
-                    fit_w, fit_h = width, height
+                    fit_w, fit_h = width, target_h
 
                 if align == 'left':
                     sub_x = x
@@ -236,7 +256,7 @@ class PDFOverlayService:
 
                 c.drawImage(img_reader, sub_x, sub_y, width=fit_w, height=fit_h, mask='auto')
 
-                logger.info(f"Drew signature at ({sub_x}, {sub_y}) size={fit_w}x{fit_h} align={align}")
+                logger.info(f"Drew signature at ({sub_x}, {sub_y}) size={fit_w}x{fit_h} fs={_fs_css} align={align}")
             except Exception as e:
                 logger.error(f"Error drawing signature: {e}")
     
@@ -678,8 +698,9 @@ class PDFOverlayService:
     
     def _draw_initials_field(self, c: canvas.Canvas, x: float, y: float, width: float,
                             height: float, field_id: str, field_values: Dict[str, Any],
-                            field: Optional[Dict[str, Any]] = None):
-        """Draw initials on PDF with aspect-fit + alignment (Phase 58)."""
+                            field: Optional[Dict[str, Any]] = None,
+                            scale: float = 1.0):
+        """Draw initials on PDF at EXACTLY the configured fontSize tall."""
         initials_data = field_values.get(field_id)
         if not initials_data:
             return
@@ -699,14 +720,26 @@ class PDFOverlayService:
                 except Exception:
                     iw, ih = 0, 0
 
-                align = ((field or {}).get('style') or {}).get('textAlign') or 'center'
+                fld = field or {}
+                style = fld.get('style') or {}
+                align = style.get('textAlign') or 'center'
+
+                try:
+                    _raw_fs = style.get('fontSize')
+                    _fs_css = float(str(_raw_fs).replace('px', '')) if _raw_fs else 16.0
+                except Exception:
+                    _fs_css = 16.0
+                target_h = min(max(6.0, _fs_css * scale), height)
+
                 if iw > 0 and ih > 0:
                     aspect = iw / ih
-                    fit_w, fit_h = height * aspect, height
+                    fit_h = target_h
+                    fit_w = fit_h * aspect
                     if fit_w > width:
-                        fit_w, fit_h = width, width / aspect
+                        fit_w = width
+                        fit_h = fit_w / aspect
                 else:
-                    fit_w, fit_h = width, height
+                    fit_w, fit_h = width, target_h
 
                 if align == 'left':
                     sub_x = x
@@ -718,7 +751,7 @@ class PDFOverlayService:
 
                 c.drawImage(img_reader, sub_x, sub_y, width=fit_w, height=fit_h, mask='auto')
 
-                logger.info(f"Drew initials at ({sub_x}, {sub_y}) align={align}")
+                logger.info(f"Drew initials at ({sub_x}, {sub_y}) size={fit_w}x{fit_h} fs={_fs_css} align={align}")
             except Exception as e:
                 logger.error(f"Error drawing initials: {e}")
 

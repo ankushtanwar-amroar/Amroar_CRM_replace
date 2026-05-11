@@ -998,11 +998,12 @@ async def sign_with_fields(
                 h = field.get("height", 30) * scale
 
                 if field_type in ("signature", "initials") and field_value:
-                    # Embed base64 image as an aspect-preserving sub-rect inside
-                    # the author's bounding box, aligned per field.style.textAlign
-                    # (left/center/right). Previously `insert_image(full_rect)`
-                    # stretched the signature to fill — now it fits inside with
-                    # the correct alignment (DocuSign-style).
+                    # Embed base64 image at EXACTLY the configured fontSize
+                    # height (in PDF units), width auto by image aspect.
+                    # Previously aspect-fit to the full box made all
+                    # signatures look the same size regardless of the
+                    # Visual Builder fontSize setting. Now a 24px sig is
+                    # twice as tall as a 12px one (matching the signing UI).
                     try:
                         if isinstance(field_value, str) and field_value.startswith("data:image"):
                             b64_data = field_value.split(",", 1)[1]
@@ -1014,18 +1015,28 @@ async def sign_with_fields(
                                 pm = None
                             except Exception:
                                 img_w = img_h = 0
-                            # Compute aspect-fit rect within (w × h) — never overflow.
                             align = (field.get("style") or {}).get("textAlign") or "center"
+                            # Resolve configured fontSize → PDF height.
+                            try:
+                                _raw_fs = (field.get("style") or {}).get("fontSize")
+                                if _raw_fs:
+                                    _fs_css = float(str(_raw_fs).replace("px", ""))
+                                else:
+                                    _fs_css = 18.0
+                            except Exception:
+                                _fs_css = 18.0
+                            target_h = max(6.0, _fs_css * scale)
+                            # Cap at field box so we never overflow.
+                            target_h = min(target_h, h)
                             if img_w > 0 and img_h > 0:
                                 aspect = img_w / img_h
-                                # Height-constrained: fit to h, width = h * aspect.
-                                fit_w = h * aspect
-                                fit_h = h
+                                fit_h = target_h
+                                fit_w = fit_h * aspect
                                 if fit_w > w:
                                     fit_w = w
-                                    fit_h = w / aspect
+                                    fit_h = fit_w / aspect
                             else:
-                                fit_w, fit_h = w, h
+                                fit_w, fit_h = w, target_h
                             # Horizontal alignment
                             if align == "left":
                                 sub_x = x
@@ -1033,7 +1044,7 @@ async def sign_with_fields(
                                 sub_x = x + (w - fit_w)
                             else:
                                 sub_x = x + (w - fit_w) / 2
-                            # Vertical center
+                            # Vertical center inside field box
                             sub_y = y + (h - fit_h) / 2
                             img_rect = fitz.Rect(sub_x, sub_y, sub_x + fit_w, sub_y + fit_h)
                             page.insert_image(img_rect, stream=img_bytes)
