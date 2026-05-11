@@ -496,33 +496,17 @@ class PDFOverlayService:
         value = str(value)
 
         try:
-            from datetime import datetime
-
+            # Issue 2 fix — delegate to the shared reformatter that honors
+            # `field.dateFormat` (default MM/DD/YYYY). The previous local
+            # implementation tried `%d/%m/%Y` BEFORE `%m/%d/%Y`, which
+            # mis-parsed US-format inputs like "05/11/2026" as 5 Nov and
+            # then re-rendered them in the configured format (silently
+            # swapping day/month). The shared helper tries the target
+            # format FIRST so already-correct values pass through unchanged.
+            from .date_format_util import reformat_date_value
             fld = field or {}
             date_fmt = fld.get('dateFormat') or 'MM/DD/YYYY'
-            # Reformat the stored value to the field's chosen format.
-            parsed = None
-            for input_fmt in ("%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d", "%b %d, %Y"):
-                try:
-                    parsed = datetime.strptime(value[:20].strip(), input_fmt)
-                    break
-                except Exception:
-                    continue
-            if parsed is None:
-                try:
-                    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
-                except Exception:
-                    parsed = None
-
-            if parsed is not None:
-                if date_fmt == 'DD/MM/YYYY':
-                    value = parsed.strftime('%d/%m/%Y')
-                elif date_fmt == 'YYYY-MM-DD':
-                    value = parsed.strftime('%Y-%m-%d')
-                elif date_fmt == 'MMM DD, YYYY':
-                    value = parsed.strftime('%b %d, %Y')
-                else:  # MM/DD/YYYY — default
-                    value = parsed.strftime('%m/%d/%Y')
+            value = reformat_date_value(value, date_fmt) or value
 
             # Use the shared styled-text renderer so alignment + font work.
             if fld.get('style'):

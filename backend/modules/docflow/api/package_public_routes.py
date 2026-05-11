@@ -928,15 +928,25 @@ async def sign_with_fields(
             from ..services.s3_service import S3Service
             s3_service = S3Service()
 
-            # Get the unsigned PDF bytes
+            # Issue 3 fix — resolve a usable base PDF with legacy fallbacks.
             unsigned_key = document.get("unsigned_s3_key")
             signed_key = document.get("signed_s3_key")
-            base_key = signed_key or unsigned_key
+            base_key = (
+                signed_key
+                or unsigned_key
+                or document.get("s3_key")
+                or document.get("pdf_file_path")
+            )
             if not base_key:
+                logger.error(
+                    f"package sign-with-fields: document {doc_id} has no usable S3 key "
+                    f"(keys={list(document.keys())[:20]})"
+                )
                 continue
 
             pdf_bytes = s3_service.download_file(base_key)
             if not pdf_bytes:
+                logger.error(f"package sign-with-fields: failed to download base PDF for {doc_id} (key={base_key})")
                 continue
 
             # Embed field values into PDF using PyMuPDF
@@ -1032,6 +1042,17 @@ async def sign_with_fields(
 
                 elif field_type in ("text", "date") and field_value:
                     try:
+                        # Issue 2 fix — date values are reformatted to honor
+                        # the field's configured `dateFormat` (default
+                        # MM/DD/YYYY). This guarantees the final signed PDF
+                        # matches the Visual Builder configuration even when
+                        # the signer typed in a different format or when the
+                        # value came from a merge source / ISO timestamp.
+                        if field_type == "date":
+                            from ..services.date_format_util import reformat_date_value
+                            field_value = reformat_date_value(
+                                field_value, field.get("dateFormat")
+                            )
                         base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
                         # Phase 81.70 — mirror frontend signing-UI font math:
                         #   baseFs = css_px * scale
@@ -1542,8 +1563,11 @@ async def sign_with_fields(
                 )
                 signed_doc_count += 1
 
-        except Exception as e:
-            logger.error(f"Failed to sign document {doc_id} in package: {e}")
+        except Exception:
+            logger.exception(
+                f"package sign-with-fields: exception while processing document "
+                f"{doc_id} (template={template_id}) for package {package['id']}"
+            )
             continue
 
     # Collect signed document URLs for webhook & email

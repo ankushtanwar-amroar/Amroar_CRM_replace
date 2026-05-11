@@ -448,31 +448,41 @@ async def get_template_field_placements_public(template_id: str):
 
 
 async def _resolve_latest_field_placements(template: dict, tenant_id: str = None) -> list:
-    """Find field_placements from the latest template version that has fields."""
-    # Strategy 1: Same template_group_id, latest version
+    """Find field_placements from the latest template version that has fields.
+
+    Issue 1 fix — fields are now ONLY inherited from prior versions in the
+    SAME template_group_id (intentional version chain). The previous
+    "same name + tenant" fallback caused fresh uploads with a matching
+    filename to silently inherit fields from an unrelated older template,
+    which corrupted layouts when the new file's text positions differed.
+
+    Every fresh upload gets a unique template_id AND its own
+    template_group_id (defaulted to its own id), so it never picks up
+    another upload's placements. Only explicit "Save as New Version"
+    flows — which preserve template_group_id — will inherit fields.
+    """
     group_id = template.get("template_group_id")
     tid = template.get("tenant_id") or tenant_id
-    if group_id:
-        query = {"template_group_id": group_id, "field_placements.0": {"$exists": True}}
-        if tid:
-            query["tenant_id"] = tid
-        latest = await db.docflow_templates.find_one(
-            query, {"_id": 0, "field_placements": 1},
-            sort=[("version", -1), ("created_at", -1)]
-        )
-        if latest and latest.get("field_placements"):
-            return latest["field_placements"]
+    if not group_id:
+        return []
 
-    # Strategy 2: Same name + tenant, latest with fields
-    name = template.get("name")
-    if name and tid:
-        latest = await db.docflow_templates.find_one(
-            {"name": name, "tenant_id": tid, "field_placements.0": {"$exists": True}},
-            {"_id": 0, "field_placements": 1},
-            sort=[("created_at", -1)]
-        )
-        if latest and latest.get("field_placements"):
-            return latest["field_placements"]
+    # Restrict to the SAME template_group_id only. Different uploads
+    # (even with identical filenames) get different group ids on creation,
+    # so they remain fully isolated.
+    query = {
+        "template_group_id": group_id,
+        "id": {"$ne": template.get("id")},
+        "field_placements.0": {"$exists": True},
+    }
+    if tid:
+        query["tenant_id"] = tid
+
+    latest = await db.docflow_templates.find_one(
+        query, {"_id": 0, "field_placements": 1},
+        sort=[("version", -1), ("created_at", -1)]
+    )
+    if latest and latest.get("field_placements"):
+        return latest["field_placements"]
 
     return []
 

@@ -285,12 +285,20 @@ async def submit_public_link(
     submission_id = str(uuid4())
     now = datetime.now(timezone.utc)
     signed_documents = []
+    failed_documents = []  # Issue 3 — surface per-doc failures in response
 
     # Process each document — embed field data into PDF
     for pkg_doc in package.get("documents", []):
         doc_id = pkg_doc.get("document_id")
         template_id = pkg_doc.get("template_id")
+        doc_name_dbg = pkg_doc.get("document_name", "") or template_id or doc_id or "?"
         if not doc_id:
+            logger.error(f"public-link submit: pkg_doc missing document_id (pkg={package['id']}, tpl={template_id})")
+            failed_documents.append({
+                "document_id": None,
+                "document_name": doc_name_dbg,
+                "reason": "document_id missing on package",
+            })
             continue
 
         field_data_for_doc = req.documents_field_data.get(doc_id, {})
@@ -298,6 +306,12 @@ async def submit_public_link(
         try:
             document = await db.docflow_documents.find_one({"id": doc_id}, {"_id": 0})
             if not document:
+                logger.error(f"public-link submit: document {doc_id} not found in DB")
+                failed_documents.append({
+                    "document_id": doc_id,
+                    "document_name": doc_name_dbg,
+                    "reason": "document record not found",
+                })
                 continue
 
             # Load template field placements
@@ -314,13 +328,38 @@ async def submit_public_link(
             from ..services.s3_service import S3Service
             s3_service = S3Service()
 
-            # Get the unsigned PDF as base
-            unsigned_key = document.get("unsigned_s3_key")
+            # Issue 3 fix — resolve a usable base PDF even when some legacy /
+            # variant key names are present. Order of preference:
+            #   1. unsigned_s3_key (canonical for package-generated docs)
+            #   2. signed_s3_key   (a prior submission produced a signed copy)
+            #   3. s3_key          (legacy single-key documents)
+            #   4. pdf_file_path   (very old fallback)
+            unsigned_key = (
+                document.get("unsigned_s3_key")
+                or document.get("signed_s3_key")
+                or document.get("s3_key")
+                or document.get("pdf_file_path")
+            )
             if not unsigned_key:
+                logger.error(
+                    f"public-link submit: document {doc_id} has no usable S3 key "
+                    f"(keys={list(document.keys())[:20]})"
+                )
+                failed_documents.append({
+                    "document_id": doc_id,
+                    "document_name": doc_name_dbg,
+                    "reason": "source PDF missing in storage",
+                })
                 continue
 
             pdf_bytes = s3_service.download_file(unsigned_key)
             if not pdf_bytes:
+                logger.error(f"public-link submit: failed to download base PDF for {doc_id} (key={unsigned_key})")
+                failed_documents.append({
+                    "document_id": doc_id,
+                    "document_name": doc_name_dbg,
+                    "reason": "failed to download source PDF",
+                })
                 continue
 
             # Embed field values into PDF using PyMuPDF
@@ -393,6 +432,14 @@ async def submit_public_link(
 
                 elif field_type in ("text", "date") and field_value:
                     try:
+                        # Issue 2 fix — reformat date values to the field's
+                        # configured `dateFormat` (default MM/DD/YYYY) so the
+                        # final signed PDF matches the Visual Builder.
+                        if field_type == "date":
+                            from ..services.date_format_util import reformat_date_value
+                            field_value = reformat_date_value(
+                                field_value, field.get("dateFormat")
+                            )
                         # Phase 81.70 — mirror frontend signing-UI centered
                         # baseline: single-line uses `insert_text` at
                         # `y + h/2 + fs*0.35`; multi-line uses a centered band
@@ -631,6 +678,15 @@ async def submit_public_link(
             signed_url = ""
             if signed_key:
                 signed_url = s3_service.get_document_url(signed_key, expiration=604800)
+            else:
+                # Issue 3 — S3 upload failed; record it so the response is honest.
+                logger.error(f"public-link submit: signed PDF upload returned no key for {doc_id}")
+                failed_documents.append({
+                    "document_id": doc_id,
+                    "document_name": pkg_doc.get("document_name", ""),
+                    "reason": "failed to upload signed PDF to storage",
+                })
+                continue
 
             signed_documents.append({
                 "document_id": doc_id,
@@ -640,8 +696,31 @@ async def submit_public_link(
             })
 
         except Exception as e:
-            logger.error(f"Failed to process document {doc_id} for submission: {e}")
+            # Issue 3 — capture full traceback + the broken doc id so we can
+            # diagnose later runs, and surface the failure to the caller
+            # instead of returning a misleading "success" with empty list.
+            logger.exception(
+                f"public-link submit: exception while processing document "
+                f"{doc_id} (template={template_id}) for package {package['id']}"
+            )
+            failed_documents.append({
+                "document_id": doc_id,
+                "document_name": pkg_doc.get("document_name", "") or template_id or doc_id,
+                "reason": f"unexpected error: {type(e).__name__}: {str(e)[:200]}",
+            })
             continue
+
+    # Issue 3 — if NOTHING signed, fail fast with structured detail so the
+    # signer sees an actionable error instead of a silent empty response.
+    if not signed_documents:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "no_documents_signed",
+                "message": "No documents were generated. Please contact support.",
+                "failed_documents": failed_documents,
+            },
+        )
 
     # Create submission record
     submission = {
@@ -650,9 +729,10 @@ async def submit_public_link(
         "tenant_id": package.get("tenant_id", ""),
         "name": name,
         "email": email,
-        "status": "completed",
+        "status": "completed" if not failed_documents else "partial",
         "field_data": req.documents_field_data,
         "signed_documents": signed_documents,
+        "failed_documents": failed_documents,
         "submitted_at": now.isoformat(),
         "created_at": now.isoformat(),
         "ip_address": request.client.host if request.client else None,
@@ -672,6 +752,7 @@ async def submit_public_link(
             "signer_name": name,
             "signer_email": email,
             "documents_signed": len(signed_documents),
+            "documents_failed": len(failed_documents),
         },
     )
 
@@ -683,6 +764,7 @@ async def submit_public_link(
             {"document_id": sd["document_id"], "document_name": sd["document_name"], "signed_file_url": sd["signed_file_url"]}
             for sd in signed_documents
         ],
+        "failed_documents": failed_documents,
     }
 
 
