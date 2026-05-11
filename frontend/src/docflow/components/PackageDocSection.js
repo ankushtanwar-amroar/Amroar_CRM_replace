@@ -37,6 +37,7 @@ export default function PackageDocSection({
   showSignatureModal,
   hasSignedVersion,
   autoStartToken,
+  signatureModalOpen = false,  // Phase 82.2 — track if modal is open to prevent re-opening on close
 }) {
   const [hiddenFieldIds, setHiddenFieldIds] = useState(new Set());
 
@@ -357,6 +358,7 @@ export default function PackageDocSection({
                   onHiddenFieldsChange={setHiddenFieldIds}
                   onEnterNext={handleEnterNext}
                   scrollToken={scrollToken}
+                  signatureModalOpen={signatureModalOpen}
                 />
               </div>
             ) : (

@@ -138,10 +138,8 @@ const DateFieldInput = React.memo(function DateFieldInput({
         if (!v) {
           // Signer left the field empty (cleared or never completed) — clear stored value
           onCommit('');
-        } else if (typeof onEnterNext === 'function') {
-          // Valid date committed and focus moved away — advance to next field
-          onEnterNext();
         }
+        // Auto-advance on blur is disabled. Users must click Next button to move to the next field.
       }}
     />
   );
@@ -159,6 +157,7 @@ const InteractiveDocumentViewer = ({
   onFieldClick,              // Optional: (fieldId) => void — called when any interactive field is clicked (for guided sync)
   onEnterNext,               // Phase 81.78 — Enter key from single-line text advances to next field
   scrollToken = 0,           // Phase 81.79 — bump this from parent to trigger scroll-to-active-field on explicit Start/Next/Enter actions only
+  signatureModalOpen = false, // Phase 82.2 — track if modal is currently open to prevent re-opening on close
 }) => {
   // Normalize incoming fields so EVERY field has a fieldKey. Backward-compat:
   // legacy templates without fieldKey get a UNIQUE auto-generated key per field,
@@ -182,6 +181,23 @@ const InteractiveDocumentViewer = ({
   const [pdfPageHeights, setPdfPageHeights] = useState({});
   const containerRef = useRef(null);
   const scrollContainerRef = useRef(null);
+  const showSignatureModalRef = useRef(showSignatureModal);
+  const lastDismissedSignatureModalRef = useRef(null);
+  const prevModalOpenRef = useRef(false);
+
+  useEffect(() => {
+    showSignatureModalRef.current = showSignatureModal;
+  }, [showSignatureModal]);
+
+  useEffect(() => {
+    if (prevModalOpenRef.current && !signatureModalOpen) {
+      lastDismissedSignatureModalRef.current = {
+        fieldId: activeFieldId,
+        dismissTime: Date.now(),
+      };
+    }
+    prevModalOpenRef.current = signatureModalOpen;
+  }, [signatureModalOpen, activeFieldId]);
 
   const PDF_WIDTH = 800;
   const PAGE_GAP = 16; // gap between pages in scroll mode
@@ -555,14 +571,24 @@ const InteractiveDocumentViewer = ({
         // Then scroll inside the viewer's own scroll container if the field
         // isn't centred there yet.
         scrollFieldIntoContainer(el);
-        setTimeout(() => {
+            setTimeout(() => {
           try {
             const fieldType = (f.type || f.field_type || '').toLowerCase();
             if ((fieldType === 'signature' || fieldType === 'initials')
               && !f.readOnly && !f.field_disabled
-              && typeof showSignatureModal === 'function'
+              && typeof showSignatureModalRef.current === 'function'
               && !(fieldValues?.[f.id] || externalFieldValues?.[f.id])) {
-              showSignatureModal(f.id, fieldType === 'initials');
+              // Phase 82.2 — Skip auto-open if the modal was just manually dismissed
+              // for this field within 800ms. This prevents the modal from immediately
+              // reopening when the user clicks Cancel/X.
+              const now = Date.now();
+              const recentDismissal = lastDismissedSignatureModalRef.current;
+              if (recentDismissal
+                && recentDismissal.fieldId === f.id
+                && (now - recentDismissal.dismissTime) < 800) {
+                return;
+              }
+              showSignatureModalRef.current(f.id, fieldType === 'initials');
               return;
             }
             const focusable = el.querySelector(
@@ -585,7 +611,7 @@ const InteractiveDocumentViewer = ({
     };
     timers.push(setTimeout(attempt, 60));
     return () => timers.forEach(clearTimeout);
-  }, [scrollToken, activeFieldId, fieldsById, scrollFieldIntoContainer, fieldValues, externalFieldValues, showSignatureModal]);
+  }, [scrollToken, activeFieldId, fieldsById, scrollFieldIntoContainer, fieldValues, externalFieldValues]);
 
   // Phase 78: floating "Fill In" side indicator — DocuSign-style left-gutter
   // badge that tracks the active field vertically. Updates on active-field
@@ -664,9 +690,19 @@ const InteractiveDocumentViewer = ({
         const fieldType = (f?.type || f?.field_type || '').toLowerCase();
         if ((fieldType === 'signature' || fieldType === 'initials')
           && !f?.readOnly && !f?.field_disabled
-          && typeof showSignatureModal === 'function'
+          && typeof showSignatureModalRef.current === 'function'
           && !(fieldValues?.[activeFieldId] || externalFieldValues?.[activeFieldId])) {
-          showSignatureModal(activeFieldId, fieldType === 'initials');
+          // Phase 82.2 — Skip auto-open if the modal was just manually dismissed
+          // for this field within 800ms. This prevents the modal from immediately
+          // reopening when the user clicks Cancel/X.
+          const now = Date.now();
+          const recentDismissal = lastDismissedSignatureModalRef.current;
+          if (recentDismissal
+            && recentDismissal.fieldId === activeFieldId
+            && (now - recentDismissal.dismissTime) < 800) {
+            return;
+          }
+          showSignatureModalRef.current(activeFieldId, fieldType === 'initials');
           return;
         }
         const focusable = el.querySelector(
@@ -677,7 +713,7 @@ const InteractiveDocumentViewer = ({
         }
       } catch (_) { /* noop */ }
     }, 320);
-  }, [activeFieldId, fieldsById, scrollFieldIntoContainer, fieldValues, externalFieldValues, showSignatureModal]);
+  }, [activeFieldId, fieldsById, scrollFieldIntoContainer, fieldValues, externalFieldValues]);
 
   const renderField = (field) => {
     const fieldValue = fieldValues[field.id] !== undefined ? fieldValues[field.id] : externalFieldValues[field.id];

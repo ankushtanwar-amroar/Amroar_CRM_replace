@@ -132,11 +132,8 @@ const PackagePublicView = () => {
     setActiveDocIndex(0);
   }, [pkg, completed, activeDocIndex]);
 
-  // Auto-advance: state + refs for per-doc completion tracking
-  const [autoStartTokens, setAutoStartTokens] = useState({});
-  const _docCompletionRef = useRef({});
-  const _autoAdvanceTimerRef = useRef(null);
-  useEffect(() => () => clearTimeout(_autoAdvanceTimerRef.current), []);
+  // Auto-advance is disabled: user navigates documents using the Next button.
+  const [autoStartTokens] = useState({});
 
   // Restore session from sessionStorage on mount
   useEffect(() => {
@@ -827,34 +824,8 @@ const PackagePublicView = () => {
     return out;
   }, [pkg, docFieldValues, hiddenFieldsByDoc, getFieldsForDoc]);
 
-  // Auto-advance to next pending doc when the active doc becomes complete
-  useEffect(() => {
-    if (!pkg || activeDocIndex === null) return;
-    const ar = pkg.active_recipient;
-    if (String(ar?.role_type || ar?.role || '').toUpperCase() !== 'SIGN') return;
-    const documents = pkg.documents || [];
-    const activeDoc = documents[activeDocIndex];
-    if (!activeDoc) return;
-    const docId = activeDoc.document_id;
-    const isComplete = perDocComplete[docId] ?? false;
-    const snap = _docCompletionRef.current;
-    if (!(docId in snap)) { snap[docId] = isComplete; return; }
-    if (snap[docId] === isComplete) return;
-    snap[docId] = isComplete;
-    if (!isComplete) return;
-    let nextIdx = null;
-    for (let i = activeDocIndex + 1; i < documents.length; i++) {
-      const d = documents[i];
-      if (!d.has_signed_version && !perDocComplete[d.document_id]) { nextIdx = i; break; }
-    }
-    if (nextIdx === null) return;
-    clearTimeout(_autoAdvanceTimerRef.current);
-    _autoAdvanceTimerRef.current = setTimeout(() => {
-      setActiveDocIndex(nextIdx);
-      const nextDocId = documents[nextIdx].document_id;
-      setAutoStartTokens(prev => ({ ...prev, [nextDocId]: (prev[nextDocId] || 0) + 1 }));
-    }, 700);
-  }, [perDocComplete, activeDocIndex, pkg]);
+  // Auto-advance to next pending doc when the active doc becomes complete is disabled.
+  // Users must move to the next document explicitly using the Next button.
 
   const allRequiredFieldsComplete = useMemo(() => {
     if (!pkg || pkg.active_recipient?.role_type !== 'SIGN') return true;
@@ -1629,6 +1600,7 @@ const PackagePublicView = () => {
                     onToggle={() => { /* Phase 81.60: collapse disabled — sidebar controls active doc */ }}
                     onFieldsChange={(values) => handleDocFieldsChange(doc.document_id, values)}
                     showSignatureModal={(fieldId, isInit) => openSignatureModal(doc.document_id, fieldId, isInit)}
+                    signatureModalOpen={signatureModalOpen}
                   />
                 </div>
               );

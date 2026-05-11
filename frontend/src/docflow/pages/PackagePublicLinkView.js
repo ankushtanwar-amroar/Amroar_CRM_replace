@@ -100,11 +100,8 @@ const PackagePublicLinkView = () => {
     setActiveDocIndex(0);
   }, [flowState, pkg, activeDocIndex]);
 
-  // Auto-advance: state + refs for per-doc completion tracking
-  const [autoStartTokens, setAutoStartTokens] = useState({});
-  const _docCompletionRef = useRef({});
-  const _autoAdvanceTimerRef = useRef(null);
-  useEffect(() => () => clearTimeout(_autoAdvanceTimerRef.current), []);
+  // Auto-advance is disabled: user navigates documents using the Next button.
+  const [autoStartTokens] = useState({});
 
   // Phase 81.79 — When user switches to a different document via sidebar,
   // smoothly scroll the page so the new doc card is visible (its sticky
@@ -607,31 +604,8 @@ const PackagePublicLinkView = () => {
     return out;
   }, [pkg, docFieldValues, hiddenFieldsByDoc, getFieldsForDoc]);
 
-  useEffect(() => {
-    if (!pkg || activeDocIndex === null || flowState !== 'signing') return;
-    const documents = pkg.documents || [];
-    const activeDoc = documents[activeDocIndex];
-    if (!activeDoc) return;
-    const docId = activeDoc.document_id;
-    const isComplete = perDocComplete[docId] ?? false;
-    const snap = _docCompletionRef.current;
-    if (!(docId in snap)) { snap[docId] = isComplete; return; }
-    if (snap[docId] === isComplete) return;
-    snap[docId] = isComplete;
-    if (!isComplete) return;
-    let nextIdx = null;
-    for (let i = activeDocIndex + 1; i < documents.length; i++) {
-      const d = documents[i];
-      if (!perDocComplete[d.document_id]) { nextIdx = i; break; }
-    }
-    if (nextIdx === null) return;
-    clearTimeout(_autoAdvanceTimerRef.current);
-    _autoAdvanceTimerRef.current = setTimeout(() => {
-      setActiveDocIndex(nextIdx);
-      const nextDocId = documents[nextIdx].document_id;
-      setAutoStartTokens(prev => ({ ...prev, [nextDocId]: (prev[nextDocId] || 0) + 1 }));
-    }, 700);
-  }, [perDocComplete, activeDocIndex, pkg, flowState]);
+  // Auto-advance to next pending doc when the active doc becomes complete is disabled.
+  // Users must move to the next document explicitly using the Next button.
 
   const hasAnyFields = useMemo(() => {
     return Object.values(templateFieldsMap).some(fields => fields.length > 0);
@@ -1154,6 +1128,7 @@ const PackagePublicLinkView = () => {
                       showSignatureModal={(fieldId, isInit) => openSignatureModal(doc.document_id, fieldId, isInit)}
                       hasSignedVersion={false}
                       autoStartToken={autoStartTokens[doc.document_id] || 0}
+                      signatureModalOpen={signatureModalOpen}
                     />
                   </div>
                 );
