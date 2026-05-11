@@ -10,7 +10,7 @@ const SIGNATURE_FONTS = [
   { name: 'Smooth', family: "'Pacifico', cursive", weight: 400 },
 ];
 
-const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, assignedSignatureFieldIds = [], signerName = '', fieldStyle = null }) => {
+const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, assignedSignatureFieldIds = [], signerName = '', fieldStyle = null, fieldWidth = null, fieldHeight = null }) => {
   const [mode, setMode] = useState('type');
   const [typedText, setTypedText] = useState('');
   const [selectedFont, setSelectedFont] = useState(0);
@@ -129,29 +129,76 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, 
 
   const generateTypedSignatureImage = (text, fontIndex) => {
     const font = SIGNATURE_FONTS[fontIndex];
-    const canvas = document.createElement('canvas');
-    canvas.width = 400;
-    canvas.height = 120;
-    const ctx = canvas.getContext('2d');
 
+    // Configured (authored) font size from Visual Builder — px units.
+    // Fallback defaults match the placeholder/preview text size so signed
+    // output visually matches the unsigned preview.
+    const authoredFontSize = (() => {
+      if (fieldStyle?.fontSize) {
+        const n = Number(fieldStyle.fontSize.toString().replace('px', ''));
+        if (Number.isFinite(n) && n > 0) return n;
+      }
+      return isInitials ? 16 : 18;
+    })();
+
+    // Sharpness multiplier — render the canvas at 3x the field's CSS
+    // dimensions so the final PDF aspect-fit stays crisp on print.
+    const DPI = 3;
+
+    // The canvas dimensions MUST match the field box so aspect-fit (in
+    // both the signing UI <img> and the backend PDF overlay) does NOT
+    // shrink the text. If field dimensions are unknown (e.g., upload-pre
+    // flow), fall back to a font-sized canvas with comfortable margins.
+    const w = Number(fieldWidth) > 0 ? Number(fieldWidth) : Math.max(280, Math.ceil(authoredFontSize * 12));
+    const h = Number(fieldHeight) > 0 ? Number(fieldHeight) : Math.max(60, Math.ceil(authoredFontSize * 2.4));
+
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(w * DPI);
+    canvas.height = Math.round(h * DPI);
+    const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Use authored font size scaled to fill the canvas well, so the trimmed
-    // image contains the text at the correct proportional weight.
-    let fontSize = isInitials ? 36 : 44;
-    if (fieldStyle?.fontSize) {
-      const authored = Number(fieldStyle.fontSize.toString().replace('px', '')) || (isInitials ? 36 : 44);
-      fontSize = Math.min(72, Math.max(20, authored * 1.8));
-    }
-    ctx.font = `${font.weight} ${fontSize}px ${font.family}`;
-    ctx.fillStyle = '#1a1a2e';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+    // Render text at exactly `authoredFontSize * DPI`. Because the
+    // canvas dimensions also include the DPI factor, aspect-fit into a
+    // field box of size (w × h) renders the text at exactly
+    // `authoredFontSize` CSS pixels — matching the Visual Builder.
+    let drawFontSize = authoredFontSize * DPI;
 
-    // Trim transparent margins so object-contain fills the field at the
-    // correct visual size rather than shrinking to accommodate whitespace.
-    return trimCanvasToContent(canvas);
+    // Make sure the glyphs actually fit inside the field's CSS box. If
+    // the user typed a long name, we shrink down rather than overflow.
+    ctx.font = `${font.weight} ${drawFontSize}px ${font.family}`;
+    const padX = 8 * DPI;
+    const maxTextWidth = canvas.width - padX * 2;
+    let measured = ctx.measureText(text).width;
+    if (measured > maxTextWidth) {
+      drawFontSize = Math.max(8 * DPI, drawFontSize * (maxTextWidth / measured));
+      ctx.font = `${font.weight} ${drawFontSize}px ${font.family}`;
+    }
+
+    ctx.fillStyle = (fieldStyle?.color) || '#1a1a2e';
+
+    // Horizontal alignment matches the field's textAlign so signatures
+    // can be anchored left/center/right in the box (Visual Builder
+    // setting). Vertical baseline is centered inside the field.
+    const align = (fieldStyle?.textAlign === 'left' || fieldStyle?.textAlign === 'right')
+      ? fieldStyle.textAlign : 'center';
+    ctx.textAlign = align;
+    ctx.textBaseline = 'middle';
+
+    const cy = canvas.height / 2;
+    let cx;
+    if (align === 'left') cx = padX;
+    else if (align === 'right') cx = canvas.width - padX;
+    else cx = canvas.width / 2;
+
+    ctx.fillText(text, cx, cy);
+
+    // IMPORTANT — we deliberately do NOT trim. Trimming changes the
+    // image aspect ratio relative to the field box, which is exactly
+    // what made the configured fontSize get aspect-fit-shrunk on the
+    // final PDF. The transparent canvas margins act as the very
+    // padding required to preserve the configured font size.
+    return canvas.toDataURL('image/png');
   };
 
   const removeWhiteBackground = (canvas) => {

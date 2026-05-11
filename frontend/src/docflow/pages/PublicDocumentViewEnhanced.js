@@ -50,6 +50,9 @@ const PublicDocumentViewEnhanced = () => {
   const [signatureModalOpen, setSignatureModalOpen] = useState(false);
   const [currentFieldId, setCurrentFieldId] = useState(null);
   const [currentFieldStyle, setCurrentFieldStyle] = useState(null);
+  // Signature fontSize fix — track the active field's authored box so the
+  // typed signature image is generated at the correct resolution.
+  const [currentFieldDims, setCurrentFieldDims] = useState({ width: null, height: null });
   const [isInitialsField, setIsInitialsField] = useState(false);
   // Reuse prompt state (shows when a cached signature exists for this session)
   const [reusePrompt, setReusePrompt] = useState({ open: false, fieldId: null, isInitials: false });
@@ -463,6 +466,10 @@ const PublicDocumentViewEnhanced = () => {
     setCurrentFieldId(fieldId);
     setIsInitialsField(isInitials);
     setCurrentFieldStyle(field?.style || null);
+    setCurrentFieldDims({
+      width: Number(field?.width) || null,
+      height: Number(field?.height) || null,
+    });
     setSignatureModalOpen(true);
   };
 
@@ -475,7 +482,14 @@ const PublicDocumentViewEnhanced = () => {
     // If a cached signature exists for this type → show reuse prompt first.
     const cached = getSignature(isInitials ? 'initials' : 'signature');
     if (cached) {
-      setReusePrompt({ open: true, fieldId, isInitials, fieldStyle: field?.style });
+      setReusePrompt({
+        open: true,
+        fieldId,
+        isInitials,
+        fieldStyle: field?.style,
+        fieldWidth: Number(field?.width) || null,
+        fieldHeight: Number(field?.height) || null,
+      });
       return;
     }
     openSignatureModalDirect(fieldId, isInitials, field);
@@ -491,9 +505,13 @@ const PublicDocumentViewEnhanced = () => {
   };
 
   const handleReuseDrawNew = () => {
-    const { fieldId, isInitials, fieldStyle } = reusePrompt;
+    const { fieldId, isInitials, fieldStyle, fieldWidth, fieldHeight } = reusePrompt;
     setReusePrompt({ open: false, fieldId: null, isInitials: false });
-    openSignatureModalDirect(fieldId, isInitials, { style: fieldStyle });
+    openSignatureModalDirect(fieldId, isInitials, {
+      style: fieldStyle,
+      width: fieldWidth,
+      height: fieldHeight,
+    });
   };
 
   const handleSignatureSave = (fieldId, signatureData, applyToFieldIds) => {
@@ -1754,6 +1772,8 @@ const PublicDocumentViewEnhanced = () => {
         isInitials={isInitialsField}
         signerName={formData?.signer_name || ''}
         fieldStyle={currentFieldStyle}
+        fieldWidth={currentFieldDims.width}
+        fieldHeight={currentFieldDims.height}
         assignedSignatureFieldIds={(() => {
           // Phase 66: Correct owner-only filter.
           // Source of truth for "what's mine" is `active_recipient.assigned_field_ids`

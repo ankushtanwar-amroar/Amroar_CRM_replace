@@ -588,7 +588,7 @@ const InteractiveDocumentViewer = ({
                 && (now - recentDismissal.dismissTime) < 800) {
                 return;
               }
-              showSignatureModalRef.current(f.id, fieldType === 'initials');
+              showSignatureModalRef.current(f.id, fieldType === 'initials', f);
               return;
             }
             const focusable = el.querySelector(
@@ -702,7 +702,7 @@ const InteractiveDocumentViewer = ({
             && (now - recentDismissal.dismissTime) < 800) {
             return;
           }
-          showSignatureModalRef.current(activeFieldId, fieldType === 'initials');
+          showSignatureModalRef.current(activeFieldId, fieldType === 'initials', f);
           return;
         }
         const focusable = el.querySelector(

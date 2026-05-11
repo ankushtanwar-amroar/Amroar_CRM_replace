@@ -57,6 +57,10 @@ const PackagePublicLinkView = () => {
   const [currentSignFieldId, setCurrentSignFieldId] = useState(null);
   const [currentSignDocId, setCurrentSignDocId] = useState(null);
   const [isInitialsField, setIsInitialsField] = useState(false);
+  // Signature fontSize fix — track the active field's authored style + box
+  // so the typed signature renders at the configured size.
+  const [currentSignFieldStyle, setCurrentSignFieldStyle] = useState(null);
+  const [currentSignFieldDims, setCurrentSignFieldDims] = useState({ width: null, height: null });
   const [submitting, setSubmitting] = useState(false);
   const [reusePrompt, setReusePrompt] = useState({ open: false, docId: null, fieldId: null, isInitials: false });
 
@@ -439,10 +443,15 @@ const PackagePublicLinkView = () => {
     });
   }, [fanoutLinkedFieldValue, reverseFanoutLinkedFieldValue]);
 
-  const openSignatureModalDirect = useCallback((docId, fieldId, isInitials = false) => {
+  const openSignatureModalDirect = useCallback((docId, fieldId, isInitials = false, field = null) => {
     setCurrentSignDocId(docId);
     setCurrentSignFieldId(fieldId);
     setIsInitialsField(isInitials);
+    setCurrentSignFieldStyle(field?.style || null);
+    setCurrentSignFieldDims({
+      width: Number(field?.width) || null,
+      height: Number(field?.height) || null,
+    });
     setSignatureModalOpen(true);
   }, []);
 
@@ -450,18 +459,26 @@ const PackagePublicLinkView = () => {
   const _sigSessionKey = userEmail ? `${token}::${userEmail.toLowerCase()}` : null;
   const { getSignature: getSessionSig, setSignature: setSessionSig, clearAll: clearSessionSig } = useSessionSignature(_sigSessionKey);
 
-  const openSignatureModal = useCallback((docId, fieldId, isInitials = false) => {
+  const openSignatureModal = useCallback((docId, fieldId, isInitials = false, field = null) => {
     const existing = (docFieldValues[docId] || {})[fieldId];
     if (existing) {
-      openSignatureModalDirect(docId, fieldId, isInitials);
+      openSignatureModalDirect(docId, fieldId, isInitials, field);
       return;
     }
     const cached = getSessionSig(isInitials ? 'initials' : 'signature');
     if (cached) {
-      setReusePrompt({ open: true, docId, fieldId, isInitials });
+      setReusePrompt({
+        open: true,
+        docId,
+        fieldId,
+        isInitials,
+        fieldStyle: field?.style,
+        fieldWidth: Number(field?.width) || null,
+        fieldHeight: Number(field?.height) || null,
+      });
       return;
     }
-    openSignatureModalDirect(docId, fieldId, isInitials);
+    openSignatureModalDirect(docId, fieldId, isInitials, field);
   }, [docFieldValues, getSessionSig, openSignatureModalDirect]);
 
   const handleReuseAccept = useCallback(() => {
@@ -477,9 +494,13 @@ const PackagePublicLinkView = () => {
   }, [reusePrompt, getSessionSig]);
 
   const handleReuseDrawNew = useCallback(() => {
-    const { docId, fieldId, isInitials } = reusePrompt;
+    const { docId, fieldId, isInitials, fieldStyle, fieldWidth, fieldHeight } = reusePrompt;
     setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false });
-    openSignatureModalDirect(docId, fieldId, isInitials);
+    openSignatureModalDirect(docId, fieldId, isInitials, {
+      style: fieldStyle,
+      width: fieldWidth,
+      height: fieldHeight,
+    });
   }, [reusePrompt, openSignatureModalDirect]);
 
   const handleSignatureSave = useCallback((fieldId, sigData) => {
@@ -1125,7 +1146,7 @@ const PackagePublicLinkView = () => {
                       apiUrl={API_URL}
                       onToggle={() => { /* Phase 81.60: collapse disabled */ }}
                       onFieldsChange={(values) => handleDocFieldsChange(doc.document_id, values)}
-                      showSignatureModal={(fieldId, isInit) => openSignatureModal(doc.document_id, fieldId, isInit)}
+                      showSignatureModal={(fieldId, isInit, fieldObj) => openSignatureModal(doc.document_id, fieldId, isInit, fieldObj)}
                       hasSignedVersion={false}
                       autoStartToken={autoStartTokens[doc.document_id] || 0}
                       signatureModalOpen={signatureModalOpen}
@@ -1148,6 +1169,9 @@ const PackagePublicLinkView = () => {
           fieldId={currentSignFieldId}
           isInitials={isInitialsField}
           signerName={userName || ''}
+          fieldStyle={currentSignFieldStyle}
+          fieldWidth={currentSignFieldDims.width}
+          fieldHeight={currentSignFieldDims.height}
         />
 
         <SignatureReusePrompt

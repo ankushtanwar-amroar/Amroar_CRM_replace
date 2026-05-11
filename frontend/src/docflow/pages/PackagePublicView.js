@@ -70,6 +70,10 @@ const PackagePublicView = () => {
   const [signatureModalOpen, setSignatureModalOpen] = useState(false);
   const [currentSignFieldId, setCurrentSignFieldId] = useState(null);
   const [currentSignFieldStyle, setCurrentSignFieldStyle] = useState(null);
+  // Signature fontSize fix — track the field's pixel box so SignatureModal
+  // can render the typed signature image at exactly that size, preventing
+  // aspect-fit shrinkage when the PDF is generated.
+  const [currentSignFieldDims, setCurrentSignFieldDims] = useState({ width: null, height: null });
   const [currentSignDocId, setCurrentSignDocId] = useState(null);
   const [isInitialsField, setIsInitialsField] = useState(false);
   const [isPackageVoided, setIsPackageVoided] = useState(false);
@@ -714,6 +718,12 @@ const PackagePublicView = () => {
     setCurrentSignFieldId(fieldId);
     setIsInitialsField(isInitials);
     setCurrentSignFieldStyle(field?.style || null);
+    // Capture the field's authored box so the typed signature image
+    // ends up exactly that size on the final PDF.
+    setCurrentSignFieldDims({
+      width: Number(field?.width) || null,
+      height: Number(field?.height) || null,
+    });
     setSignatureModalOpen(true);
   }, []);
 
@@ -726,7 +736,15 @@ const PackagePublicView = () => {
     }
     const cached = getSessionSig(isInitials ? 'initials' : 'signature');
     if (cached) {
-      setReusePrompt({ open: true, docId, fieldId, isInitials, fieldStyle: field?.style });
+      setReusePrompt({
+        open: true,
+        docId,
+        fieldId,
+        isInitials,
+        fieldStyle: field?.style,
+        fieldWidth: Number(field?.width) || null,
+        fieldHeight: Number(field?.height) || null,
+      });
       return;
     }
     openSignatureModalDirect(docId, fieldId, isInitials, field);
@@ -745,10 +763,15 @@ const PackagePublicView = () => {
   }, [reusePrompt, getSessionSig]);
 
   const handleReuseDrawNew = useCallback(() => {
-    const { docId, fieldId, isInitials, fieldStyle } = reusePrompt;
+    const { docId, fieldId, isInitials, fieldStyle, fieldWidth, fieldHeight } = reusePrompt;
     setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false });
-    // Re-pack field style into a synthetic object for openSignatureModalDirect
-    openSignatureModalDirect(docId, fieldId, isInitials, { style: fieldStyle });
+    // Re-pack field style + dimensions for the modal so the regenerated
+    // typed signature still respects the configured size.
+    openSignatureModalDirect(docId, fieldId, isInitials, {
+      style: fieldStyle,
+      width: fieldWidth,
+      height: fieldHeight,
+    });
   }, [reusePrompt, openSignatureModalDirect]);
 
   const handleSignatureSave = useCallback((fieldId, sigData, applyToFieldIds) => {
@@ -1599,7 +1622,7 @@ const PackagePublicView = () => {
                     autoStartToken={autoStartTokens[doc.document_id] || 0}
                     onToggle={() => { /* Phase 81.60: collapse disabled — sidebar controls active doc */ }}
                     onFieldsChange={(values) => handleDocFieldsChange(doc.document_id, values)}
-                    showSignatureModal={(fieldId, isInit) => openSignatureModal(doc.document_id, fieldId, isInit)}
+                    showSignatureModal={(fieldId, isInit, fieldObj) => openSignatureModal(doc.document_id, fieldId, isInit, fieldObj)}
                     signatureModalOpen={signatureModalOpen}
                   />
                 </div>
@@ -1690,6 +1713,8 @@ const PackagePublicView = () => {
         isInitials={isInitialsField}
         signerName={pkg?.active_recipient?.name || ''}
         fieldStyle={currentSignFieldStyle}
+        fieldWidth={currentSignFieldDims.width}
+        fieldHeight={currentSignFieldDims.height}
         assignedSignatureFieldIds={(() => {
           if (!currentSignDocId || !pkg) return [];
           const fieldType = isInitialsField ? 'initials' : 'signature';
