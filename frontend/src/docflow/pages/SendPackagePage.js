@@ -3,8 +3,9 @@ import { useNavigate, useParams } from 'react-router-dom';
 import {
   ArrowLeft, ArrowRight, Plus, Trash2, FileText, Users, Send,
   Package, CheckCircle, Loader2, ChevronDown,
-  GitBranch, Layers, ArrowDownUp, Link2, Mail, AlertCircle, Shield
+  GitBranch, Layers, ArrowDownUp, Link2, Mail, AlertCircle, Shield, MessageSquare
 } from 'lucide-react';
+import ReminderConfigPicker from '../components/ReminderConfigPicker';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import { Badge } from '../../components/ui/badge';
@@ -39,6 +40,116 @@ const RECIPIENT_COLORS = [
   { bg: 'bg-cyan-100', text: 'text-cyan-700', border: 'border-cyan-300', dot: 'bg-cyan-500' },
 ];
 
+// Phase 81.18 — see GenerateDocumentWizard for the full rationale. Plain
+// merge fields are CRM-populated, read-only, and visible to all recipients;
+// they MUST NOT appear in the Assign Fields panel. Only merge fields with
+// `fallbackToInput=true` are interactive inputs and assignable.
+// Phase 81.30 — checkbox + radio are now assignable per-recipient (parity
+// with signatures/text/date). Multi-signer flows can now require Recipient 1
+// to tick checkbox A while Recipient 2 ticks checkbox B; previously the only
+// way to have a per-signer checkbox was to template-pre-assign it (rare).
+const ASSIGNABLE_FIELD_TYPES = ['signature', 'initials', 'text', 'date', 'checkbox', 'radio'];
+const isAssignableField = (f) => {
+  if (!f) return false;
+  const t = (f.type || f.field_type || '').toLowerCase();
+  if (ASSIGNABLE_FIELD_TYPES.includes(t)) return true;
+  if (t === 'merge' && f.fallbackToInput === true) return true;
+  return false;
+};
+const fieldDisplayType = (f) => {
+  const t = (f.type || f.field_type || '').toLowerCase();
+  if (t === 'merge' && f.fallbackToInput) {
+    const input = (f.fallbackInputType || 'text').toLowerCase();
+    return `merge → ${input}`;
+  }
+  // Phase 81.30 — radio fields with the new groupName model display the
+  // group label so senders can tell options apart in the Assign panel.
+  if (t === 'radio' && (f.groupName || f.group_name)) {
+    return `radio · ${f.groupName || f.group_name}`;
+  }
+  return t;
+};
+
+const fieldDisplayLabel = (f) => {
+  const t = (f.type || f.field_type || '').toLowerCase();
+  if (t === 'radio') {
+    // Radio groups display by groupName at the panel level (see groupAssignableFields).
+    // Individual fallback uses the option label.
+    return f.optionLabel || f.option_label || f.label || 'Radio option';
+  }
+  if (t === 'checkbox') {
+    // Phase 81.31 — prefer the user-customised `label` over the default
+    // `checkboxLabel` ("Check to agree") so the Assign panel shows
+    // "All of my medical records" instead of generic placeholder text.
+    return f.label || f.checkboxLabel || 'Checkbox';
+  }
+  return f.label || t || 'Unnamed';
+};
+
+// Phase 81.31 — Group sibling radio fields (same `groupName`) into ONE
+// virtual row in the Assign Fields panel. DocuSign-style: a radio group
+// is owned by a single recipient — assigning the group writes to every
+// option's `assigned_field_ids` together. Returns either the original
+// field (non-radio / orphan radio) or a synthetic group row:
+//   { __isRadioGroup: true, id: 'group::<groupName>', groupName, label,
+//     fieldIds: [...], type: 'radio', page, sample }
+// Phase 81.32 — `displayLabel` prefers the FIRST non-empty `field.label`
+// among the group's siblings (set in the Visual Builder's "Label" input);
+// falls back to `groupName` only when no friendly label was customised.
+const groupAssignableFields = (fields) => {
+  const seenGroups = new Map(); // groupName → group row
+  const result = [];
+  const isFriendlyLabel = (s, groupName) => {
+    if (!s || typeof s !== 'string') return false;
+    const trimmed = s.trim();
+    if (!trimmed) return false;
+    // Reject the internal id used as a placeholder.
+    if (trimmed === groupName) return false;
+    return true;
+  };
+  for (const f of fields) {
+    const t = (f.type || f.field_type || '').toLowerCase();
+    const groupName = f.groupName || f.group_name;
+    if (t === 'radio' && groupName) {
+      const existing = seenGroups.get(groupName);
+      if (existing) {
+        existing.fieldIds.push(f.id);
+        existing.optionLabels.push(f.optionLabel || f.option_label || f.label || '');
+        if (!existing.displayLabel && isFriendlyLabel(f.label, groupName)) {
+          existing.displayLabel = f.label;
+        }
+        continue;
+      }
+      const friendly = isFriendlyLabel(f.label, groupName) ? f.label : '';
+      const row = {
+        __isRadioGroup: true,
+        id: `group::${groupName}`,
+        groupName,
+        displayLabel: friendly,  // populated as we discover siblings
+        label: friendly || groupName,
+        type: 'radio',
+        field_type: 'radio',
+        page: f.page,
+        fieldIds: [f.id],
+        optionLabels: [f.optionLabel || f.option_label || f.label || ''],
+        sample: f,
+      };
+      seenGroups.set(groupName, row);
+      result.push(row);
+    } else {
+      result.push(f);
+    }
+  }
+  // Finalise label per row (in case the friendly label was discovered later
+  // in the field list than the first sibling).
+  for (const row of result) {
+    if (row.__isRadioGroup) {
+      row.label = row.displayLabel || row.groupName;
+    }
+  }
+  return result;
+};
+
 const detectRoutingMode = (recipients) => {
   const orders = recipients.filter(r => r.role_type !== 'RECEIVE_COPY').map(r => r.routing_order);
   if (orders.length <= 1) return 'sequential';
@@ -69,15 +180,101 @@ const SendPackagePage = () => {
   const [loading, setLoading] = useState(true);
 
   const [recipients, setRecipients] = useState([
-    { id: '1', name: '', email: '', role_type: 'SIGN', routing_order: 1, email_template_id: '' },
+    { id: '1', name: '', email: '', phone: '', role_type: 'SIGN', routing_order: 1, email_template_id: '', reminder_config: null },
   ]);
   const [deliveryMode, setDeliveryMode] = useState('email');
   const [otpEnabled, setOtpEnabled] = useState(false);
+  // smsMode: controls whether SMS is sent to recipients (phone required when true).
+  const [smsMode, setSmsMode] = useState(false);
+  // smsConsent: controls whether the SMS disclaimer popup is shown in the signing flow.
+  const [smsConsent, setSmsConsent] = useState(false);
 
   // Field assignment
   const [templateFields, setTemplateFields] = useState({});
   const [fieldAssignments, setFieldAssignments] = useState({});
   const [loadingFields, setLoadingFields] = useState(false);
+  // Phase 81.89 — Interlink uses ONLY the explicit `linked_to` config saved
+  // from the Visual Builder. Removed all label / id / type / name auto-
+  // matching from Phase 81.88 — those produced false-positive links and
+  // caused unintended cross-template syncing.
+  //
+  // Field shape (saved by Visual Builder):
+  //   field.linked_to = {
+  //     enabled: bool,
+  //     field_id: string,            // target field id
+  //     template_id: string,         // target template id
+  //     direction: 'one_way' | 'two_way',
+  //   }
+  //
+  // ON  → assigning a recipient to a field propagates to:
+  //         - the explicit `linked_to.field_id` in `linked_to.template_id`
+  //           (always, regardless of direction — assignment routing is
+  //           inherently bidirectional even for one_way value sync, since
+  //           a one_way data link still requires the same signer to fill
+  //           both fields)
+  //         - the reverse: any field whose `linked_to.field_id === this.id`
+  //           and `linked_to.template_id === this.template_id`
+  // OFF → no cross-doc propagation. Each field independent.
+  const [interlinkOn, setInterlinkOn] = useState(true);
+
+  // Build a lookup index across all docs in this package: from a key
+  // `${docIdx}::${fieldId}` to all (docIdx, fieldId) tuples it is explicitly
+  // linked to via `linked_to`. Indexes both outgoing AND incoming links so
+  // either side of the relation can drive a propagation.
+  const explicitLinkIndex = useMemo(() => {
+    const docs = pkg?.documents || [];
+    const idx = new Map(); // sourceKey → Set<targetKey>
+    const addEdge = (a, b) => {
+      if (a === b) return;
+      if (!idx.has(a)) idx.set(a, new Set());
+      idx.get(a).add(b);
+    };
+    docs.forEach((srcDoc, srcDocIdx) => {
+      const srcFields = templateFields[srcDoc.template_id] || [];
+      srcFields.forEach(srcField => {
+        const link = srcField?.linked_to;
+        if (!link || !link.enabled || !link.field_id) return;
+        const targetTemplateId = link.template_id;
+        const targetFieldId = link.field_id;
+        // Find every doc in this package that uses the link's target template.
+        // (A package can include the same template more than once; in
+        // practice it's usually unique. We sync to every match.)
+        docs.forEach((dstDoc, dstDocIdx) => {
+          if (dstDoc.template_id !== targetTemplateId) return;
+          const dstFields = templateFields[dstDoc.template_id] || [];
+          if (!dstFields.some(f => f.id === targetFieldId)) return;
+          const a = `${srcDocIdx}::${srcField.id}`;
+          const b = `${dstDocIdx}::${targetFieldId}`;
+          addEdge(a, b);
+          addEdge(b, a); // assignment routing is always bidirectional
+        });
+      });
+    });
+    return idx;
+  }, [pkg, templateFields]);
+
+  // Resolve the full transitive link cluster for a starting field using BFS.
+  // (Handles A↔B and B→C chains so all related fields get the same recipient.)
+  const getLinkedTargets = useCallback((docIdx, fieldId) => {
+    const start = `${docIdx}::${fieldId}`;
+    const visited = new Set([start]);
+    const queue = [start];
+    while (queue.length) {
+      const cur = queue.shift();
+      const next = explicitLinkIndex.get(cur);
+      if (!next) continue;
+      next.forEach(k => {
+        if (!visited.has(k)) {
+          visited.add(k);
+          queue.push(k);
+        }
+      });
+    }
+    return Array.from(visited).map(k => {
+      const sep = k.indexOf('::');
+      return { docIdx: parseInt(k.slice(0, sep), 10), fieldId: k.slice(sep + 2) };
+    });
+  }, [explicitLinkIndex]);
 
   // Email templates
   const [emailTemplates, setEmailTemplates] = useState([]);
@@ -151,13 +348,13 @@ const SendPackagePage = () => {
   const addRecipient = () => {
     const maxOrder = recipients.length > 0 ? Math.max(...recipients.map(r => r.routing_order)) : 0;
     setRecipients([...recipients, {
-      id: String(Date.now()), name: '', email: '', role_type: 'SIGN', routing_order: maxOrder + 1, email_template_id: '',
+      id: String(Date.now()), name: '', email: '', phone: '', role_type: 'SIGN', routing_order: maxOrder + 1, email_template_id: '', reminder_config: null,
     }]);
   };
 
   const addParallelRecipient = (order) => {
     setRecipients([...recipients, {
-      id: String(Date.now()), name: '', email: '', role_type: 'SIGN', routing_order: order, email_template_id: '',
+      id: String(Date.now()), name: '', email: '', phone: '', role_type: 'SIGN', routing_order: order, email_template_id: '', reminder_config: null,
     }]);
   };
 
@@ -176,12 +373,51 @@ const SendPackagePage = () => {
     });
   };
 
-  const assignField = (fieldId, recipientId) => {
+  // Phase 81.85 — Per-document independence. Assignments are keyed by
+  // `${docIdx}::${fieldId}` so two documents maintain INDEPENDENT recipient
+  // assignments when Interlink is OFF.
+  const fieldKey = (docIdx, fieldId) => `${docIdx}::${fieldId}`;
+
+  const assignField = (docIdx, fieldId, recipientId) => {
+    const targets = interlinkOn
+      ? getLinkedTargets(docIdx, fieldId)
+      : [{ docIdx, fieldId }];
     setFieldAssignments(prev => {
       const next = { ...prev };
-      if (!recipientId) delete next[fieldId]; else next[fieldId] = recipientId;
+      targets.forEach(({ docIdx: di, fieldId: fi }) => {
+        const k = fieldKey(di, fi);
+        if (!recipientId) delete next[k]; else next[k] = recipientId;
+      });
       return next;
     });
+  };
+
+  // Assigning a radio GROUP writes the same recipient to every option's id
+  // so the entire group routes to one signer. When Interlink is ON, ALSO
+  // propagates to every sibling group in other documents that shares the
+  // same groupName (the linkKey for radio groups is `radio::<groupName>`).
+  const assignRadioGroup = (docIdx, fieldIds, recipientId) => {
+    setFieldAssignments(prev => {
+      const next = { ...prev };
+      fieldIds.forEach(fid => {
+        const targets = interlinkOn
+          ? getLinkedTargets(docIdx, fid)
+          : [{ docIdx, fieldId: fid }];
+        targets.forEach(({ docIdx: di, fieldId: fi }) => {
+          const k = fieldKey(di, fi);
+          if (!recipientId) delete next[k]; else next[k] = recipientId;
+        });
+      });
+      return next;
+    });
+  };
+
+  // Returns the consolidated recipient for a radio group: the recipient id
+  // shared by all sibling options, or '' if mixed/empty.
+  const radioGroupAssignment = (docIdx, fieldIds) => {
+    const set = new Set(fieldIds.map(fid => fieldAssignments[fieldKey(docIdx, fid)] || ''));
+    if (set.size === 1) return [...set][0];
+    return '';  // mixed or any unassigned → treat as unassigned
   };
 
   const getRecipientColor = (recipientId) => {
@@ -189,16 +425,111 @@ const SendPackagePage = () => {
     return RECIPIENT_COLORS[idx % RECIPIENT_COLORS.length] || RECIPIENT_COLORS[0];
   };
 
-  const ASSIGNABLE_FIELD_TYPES = ['signature', 'initials', 'text', 'date'];
+  const ASSIGNABLE_FIELD_TYPES = ['signature', 'initials', 'text', 'date', 'checkbox', 'radio'];
+  // Phase 81.31 — assignment stats count radio groups as ONE row each (not
+  // per option) so the "X of Y assigned" badge stays meaningful.
+  // Phase 81.85 — Iterate over each document independently (by index) so
+  // identical field ids across cloned docs are counted twice (once per doc)
+  // and assignments from one doc don't bleed into the other's count.
   const assignmentStats = useMemo(() => {
     let totalFields = 0, assignedFields = 0;
-    Object.values(templateFields).forEach(fields => {
-      const assignable = fields.filter(f => ASSIGNABLE_FIELD_TYPES.includes(f.type));
-      totalFields += assignable.length;
-      assignable.forEach(f => { if (fieldAssignments[f.id]) assignedFields++; });
+    const docs = pkg?.documents || [];
+    docs.forEach((doc, docIdx) => {
+      const fields = (templateFields[doc.template_id] || []).filter(isAssignableField);
+      const grouped = groupAssignableFields(fields);
+      totalFields += grouped.length;
+      grouped.forEach(row => {
+        if (row.__isRadioGroup) {
+          if (radioGroupAssignment(docIdx, row.fieldIds)) assignedFields++;
+        } else if (fieldAssignments[fieldKey(docIdx, row.id)]) {
+          assignedFields++;
+        }
+      });
     });
     return { totalFields, assignedFields, unassigned: totalFields - assignedFields };
-  }, [templateFields, fieldAssignments]);
+  }, [pkg, templateFields, fieldAssignments]);
+
+  // Phase 81.18 — Auto-default converted merge fields (merge with
+  // `fallbackToInput=true`) to recipient #1 across all package documents.
+  // Plain merges are excluded from the assignment panel (read-only / visible
+  // to all). Other assignable types remain manual.
+  // Phase 81.44 — When there's EXACTLY one signer recipient, all other
+  // assignable field types (signature/initials/text/date/checkbox/radio)
+  // are also auto-assigned to that signer since there's no ambiguity.
+  // With 2+ signers, only converted merges auto-assign; everything else
+  // stays unassigned so the sender must explicitly pick who signs what.
+  // Phase 81.85 — auto-assign per docIdx so each document gets its own keys.
+  useEffect(() => {
+    const signerRecipients = recipients.filter(r => r.role_type === 'SIGN');
+    const docs = pkg?.documents || [];
+    if (!signerRecipients.length || !docs.length) return;
+    const firstSignerId = signerRecipients[0]?.id;
+    if (!firstSignerId) return;
+    const autoAssignAll = signerRecipients.length === 1;
+    setFieldAssignments(prev => {
+      let changed = false;
+      const next = { ...prev };
+      docs.forEach((doc, docIdx) => {
+        const fields = (templateFields[doc.template_id] || []).filter(isAssignableField);
+        fields.forEach(f => {
+          const t = (f.type || f.field_type || '').toLowerCase();
+          const isConvertedMerge = t === 'merge' && f.fallbackToInput;
+          if (!isConvertedMerge && !autoAssignAll) return;
+          const k = fieldKey(docIdx, f.id);
+          if (next[k]) return;
+          if (f.assigned_to || f.recipient_id) return;
+          next[k] = firstSignerId;
+          changed = true;
+        });
+      });
+      return changed ? next : prev;
+    });
+  }, [pkg, templateFields, recipients]);
+
+  // Phase 81.89 — Reconciliation. When Interlink is ON, sync existing
+  // assignments across all EXPLICIT link clusters (groups of fields connected
+  // via the `linked_to` config saved from Visual Builder). Other fields are
+  // never touched. The latest non-empty assignment in a cluster wins and is
+  // propagated to every member. Runs on toggle / new docs / new linkage.
+  // Intentionally excludes `fieldAssignments` from deps to avoid feedback.
+  useEffect(() => {
+    if (!interlinkOn) return;
+    if ((pkg?.documents || []).length < 2) return;
+    setFieldAssignments(prev => {
+      const next = { ...prev };
+      let changed = false;
+      // Build clusters from the explicit link index.
+      const seen = new Set();
+      explicitLinkIndex.forEach((_targets, sourceKey) => {
+        if (seen.has(sourceKey)) return;
+        // BFS to materialise the connected component containing sourceKey.
+        const cluster = [];
+        const queue = [sourceKey];
+        seen.add(sourceKey);
+        while (queue.length) {
+          const cur = queue.shift();
+          cluster.push(cur);
+          const nb = explicitLinkIndex.get(cur);
+          if (!nb) continue;
+          nb.forEach(k => {
+            if (!seen.has(k)) { seen.add(k); queue.push(k); }
+          });
+        }
+        if (cluster.length < 2) return;
+        // Pick the first non-empty assignment among members.
+        let source = '';
+        for (const k of cluster) {
+          const v = next[k];
+          if (v) { source = v; break; }
+        }
+        if (!source) return;
+        cluster.forEach(k => {
+          if (next[k] !== source) { next[k] = source; changed = true; }
+        });
+      });
+      return changed ? next : prev;
+    });
+  }, [interlinkOn, explicitLinkIndex, pkg]);
 
   const isPublicLinkMode = deliveryMode === 'public_link';
   const needsRecipientStep = deliveryMode !== 'public_link'; // email, both, public_recipients all need recipients
@@ -207,6 +538,16 @@ const SendPackagePage = () => {
     if (step === 0) return true; // Delivery mode — always can proceed
     if (step === 1) {
       if (!needsRecipientStep) return true; // skipped
+      // Phase 81.12 — when SMS Disclaimer is ON, every actionable recipient
+      // (signer / approver) must have a phone number. RECEIVE_COPY is exempt.
+      const ACTIONABLE = new Set(['SIGN', 'SIGNER', 'APPROVE_REJECT', 'APPROVER']);
+      if (smsMode) {
+        const phonesOk = recipients.every(r => {
+          if (!ACTIONABLE.has(String(r.role_type || 'SIGN').toUpperCase())) return true;
+          return (r.phone || '').trim().length > 0;
+        });
+        if (!phonesOk) return false;
+      }
       if (deliveryMode === 'public_recipients') {
         // For public_recipients, email is optional since we generate links
         return recipients.every(r => r.name.trim());
@@ -227,27 +568,47 @@ const SendPackagePage = () => {
 
   const handleSend = async () => {
     try {
+      // Phase 81.12 — final SMS mode phone guard. Mirrors backend validation.
+      if (smsMode) {
+        const ACTIONABLE = new Set(['SIGN', 'SIGNER', 'APPROVE_REJECT', 'APPROVER']);
+        const missing = recipients
+          .filter(r => ACTIONABLE.has(String(r.role_type || 'SIGN').toUpperCase()))
+          .filter(r => !((r.phone || '').trim()))
+          .map(r => r.name || r.email || 'Unnamed');
+        if (missing.length > 0) {
+          toast.error(`SMS Disclaimer is ON — phone required for: ${missing.join(', ')}`);
+          return;
+        }
+      }
       setSending(true);
       const recipientsPayload = recipients.map(r => {
+        // Phase 81.85 — fieldAssignments keys are `${docIdx}::${fieldId}`.
+        // Resolve docIdx → template_id via the documents array, and merge
+        // duplicates if multiple docs share the same template_id.
         const compMap = {};
-        Object.entries(fieldAssignments).forEach(([fieldId, recipientId]) => {
-          if (recipientId === r.id) {
-            for (const [tmplId, fields] of Object.entries(templateFields)) {
-              if (fields.some(f => f.id === fieldId)) {
-                if (!compMap[tmplId]) compMap[tmplId] = [];
-                compMap[tmplId].push(fieldId);
-                break;
-              }
-            }
-          }
+        const docs = pkg?.documents || [];
+        Object.entries(fieldAssignments).forEach(([key, recipientId]) => {
+          if (recipientId !== r.id) return;
+          const sep = key.indexOf('::');
+          if (sep < 0) return;
+          const docIdx = parseInt(key.slice(0, sep), 10);
+          const fieldId = key.slice(sep + 2);
+          const doc = docs[docIdx];
+          if (!doc) return;
+          const tid = doc.template_id;
+          if (!compMap[tid]) compMap[tid] = [];
+          if (!compMap[tid].includes(fieldId)) compMap[tid].push(fieldId);
         });
         return {
           name: r.name,
           email: r.email,
+          phone: (r.phone || '').trim(),
           role_type: r.role_type,
           routing_order: r.routing_order,
           assigned_components_map: Object.keys(compMap).length > 0 ? compMap : undefined,
           email_template_id: r.email_template_id || undefined,
+          // Phase 81.24 — surface the per-recipient reminder schedule.
+          reminder_config: (r.reminder_config && r.reminder_config.enabled) ? r.reminder_config : undefined,
         };
       });
 
@@ -256,6 +617,8 @@ const SendPackagePage = () => {
         delivery_mode: deliveryMode,
         routing_config: { mode: routingMode, on_reject: 'void' },
         security: { require_auth: otpEnabled, session_timeout_minutes: 15 },
+        sms_mode: !!smsMode,
+        sms_consent: !!smsConsent,
       };
 
       const res = await docflowService.sendPackage(packageId, payload);
@@ -362,6 +725,60 @@ const SendPackagePage = () => {
               <strong>Tip:</strong> Recipients with the <em>same routing order</em> run in parallel. Different orders run sequentially.
             </div>
 
+            {/* SMS Mode — controls whether SMS is sent to recipients */}
+            <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between" data-testid="sms-mode-section">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50">
+                  <MessageSquare className="h-4 w-4 text-indigo-600" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-gray-800">SMS Mode</p>
+                  <p className="text-[11px] text-gray-500">
+                    {smsMode
+                      ? 'SMS will be sent to recipients. Phone is required for all signers.'
+                      : 'No SMS sent — email delivery only.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSmsMode(!smsMode)}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${smsMode ? 'bg-indigo-500' : 'bg-gray-200'}`}
+                data-testid="sms-mode-toggle"
+                aria-pressed={smsMode}
+                aria-label="Toggle SMS Mode"
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${smsMode ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+
+            {/* SMS Disclaimer Popup — controls whether the consent popup is shown */}
+            <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between" data-testid="sms-disclaimer-section">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50">
+                  <MessageSquare className="h-4 w-4 text-indigo-600" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-gray-800">SMS Disclaimer Popup</p>
+                  <p className="text-[11px] text-gray-500">
+                    {smsConsent
+                      ? 'Recipients see an SMS disclaimer page before signing.'
+                      : 'No disclaimer popup — signing flow opens directly.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSmsConsent(!smsConsent)}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${smsConsent ? 'bg-indigo-500' : 'bg-gray-200'}`}
+                data-testid="sms-disclaimer-toggle"
+                aria-pressed={smsConsent}
+                aria-label="Toggle SMS Disclaimer Popup"
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${smsConsent ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+
             {/* Wave-grouped recipients */}
             <div className="space-y-4">
               {waveGroups.map((wave, waveIdx) => (
@@ -417,6 +834,19 @@ const SendPackagePage = () => {
                               </select>
                             </div>
                             <div>
+                              <label className="block text-xs text-gray-500 mb-1">
+                                Phone {smsMode ? <span className="text-rose-500">*</span> : <span className="text-gray-400">(optional)</span>}
+                              </label>
+                              <input
+                                value={r.phone || ''}
+                                onChange={(e) => updateRecipient(idx, 'phone', e.target.value)}
+                                placeholder="+1 555 0100"
+                                type="tel"
+                                className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${smsMode && !((r.phone || '').trim()) ? 'border-rose-300 bg-rose-50/40' : 'border-gray-300'}`}
+                                data-testid={`recipient-phone-${idx}`}
+                              />
+                            </div>
+                            <div>
                               <label className="block text-xs text-gray-500 mb-1">Routing Order</label>
                               <input type="number" min={1} value={r.routing_order} onChange={(e) => updateRecipient(idx, 'routing_order', parseInt(e.target.value) || 1)}
                                 className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" data-testid={`recipient-order-${idx}`} />
@@ -433,6 +863,15 @@ const SendPackagePage = () => {
                                 </select>
                               </div>
                             )}
+                          </div>
+                          {/* Phase 81.24 — Per-recipient pending-signature reminder schedule */}
+                          <div className="mt-3">
+                            <ReminderConfigPicker
+                              idx={idx}
+                              dataTestPrefix="package-reminder"
+                              value={r.reminder_config || null}
+                              onChange={(cfg) => updateRecipient(idx, 'reminder_config', cfg)}
+                            />
                           </div>
                         </div>
                       );
@@ -463,6 +902,43 @@ const SendPackagePage = () => {
                   )}
                 </div>
 
+                {/* Phase 81.89 — Binary Interlink toggle (ON / OFF). Only
+                    syncs fields that were EXPLICITLY linked in the Visual
+                    Builder (`linked_to.enabled = true` with a target field
+                    selected). Fields without explicit links remain
+                    independent. */}
+                {documents.length > 1 && (
+                  <div className="mb-4 px-3 py-2.5 bg-indigo-50 border border-indigo-100 rounded-lg flex items-center gap-3 flex-wrap" data-testid="interlink-toggle">
+                    <div className="flex-1 min-w-[180px]">
+                      <p className="text-xs font-semibold text-indigo-900">Interlink field assignments</p>
+                      <p className="text-[11px] text-indigo-700/80 leading-tight">
+                        {interlinkOn
+                          ? 'Fields explicitly linked in Visual Builder sync recipient assignments. Other fields stay independent.'
+                          : 'Each field routes independently — explicit links are ignored.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setInterlinkOn(v => !v)}
+                      className={`relative inline-flex items-center h-7 w-14 rounded-full transition-colors shrink-0 ${
+                        interlinkOn ? 'bg-indigo-600' : 'bg-gray-300'
+                      }`}
+                      role="switch"
+                      aria-checked={interlinkOn}
+                      data-testid="interlink-switch"
+                    >
+                      <span
+                        className={`inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform ${
+                          interlinkOn ? 'translate-x-8' : 'translate-x-1'
+                        }`}
+                      />
+                      <span className={`absolute text-[10px] font-bold ${interlinkOn ? 'left-2 text-white' : 'right-2 text-gray-600'}`}>
+                        {interlinkOn ? 'ON' : 'OFF'}
+                      </span>
+                    </button>
+                  </div>
+                )}
+
                 {loadingFields ? (
                   <div className="flex items-center justify-center py-8">
                     <Loader2 className="h-5 w-5 animate-spin text-indigo-500" />
@@ -470,13 +946,16 @@ const SendPackagePage = () => {
                   </div>
                 ) : (
                   <div className="space-y-5">
-                    {documents.map((doc) => {
+                    {documents.map((doc, docIdx) => {
                       const allFields = templateFields[doc.template_id] || [];
-                      // Only show signer-dependent fields for assignment (not merge, checkbox, radio)
-                      const ASSIGNABLE_TYPES = ['signature', 'initials', 'text', 'date'];
-                      const fields = allFields.filter(f => ASSIGNABLE_TYPES.includes(f.type));
+                      // Phase 81.18 — show converted merge (merge→input) here,
+                      // but exclude plain merges + checkbox/radio (CRM-populated
+                      // / shared, never per-recipient).
+                      const fields = allFields.filter(isAssignableField);
+                      // Phase 81.31 — Collapse sibling radio fields into one row.
+                      const rows = groupAssignableFields(fields);
                       if (fields.length === 0) return (
-                        <div key={doc.template_id} className="border border-dashed border-gray-200 rounded-lg p-4">
+                        <div key={`${docIdx}::${doc.template_id}`} className="border border-dashed border-gray-200 rounded-lg p-4">
                           <p className="text-xs text-gray-400 flex items-center gap-2">
                             <FileText className="h-4 w-4" />
                             <span><strong>{doc.document_name}</strong> &mdash; No fields configured</span>
@@ -484,32 +963,44 @@ const SendPackagePage = () => {
                         </div>
                       );
                       return (
-                        <div key={doc.template_id} className="border border-gray-200 rounded-lg overflow-hidden">
+                        <div key={`${docIdx}::${doc.template_id}`} className="border border-gray-200 rounded-lg overflow-hidden">
                           <div className="bg-gray-50 px-4 py-2.5 border-b border-gray-200">
                             <div className="flex items-center gap-2">
                               <FileText className="h-4 w-4 text-indigo-500" />
                               <span className="text-sm font-medium text-gray-700">{doc.document_name}</span>
-                              <span className="text-[10px] text-gray-400 ml-auto">{fields.length} field{fields.length !== 1 ? 's' : ''}</span>
+                              <span className="text-[10px] text-gray-400 ml-auto">{rows.length} field{rows.length !== 1 ? 's' : ''}</span>
                             </div>
                           </div>
                           <div className="divide-y divide-gray-100">
-                            {fields.map((field) => {
-                              const assignedTo = fieldAssignments[field.id] || '';
+                            {rows.map((row) => {
+                              const isGroup = row.__isRadioGroup;
+                              const assignedTo = isGroup
+                                ? radioGroupAssignment(docIdx, row.fieldIds)
+                                : (fieldAssignments[fieldKey(docIdx, row.id)] || '');
                               const color = assignedTo ? getRecipientColor(assignedTo) : null;
+                              const onChange = (e) => isGroup
+                                ? assignRadioGroup(docIdx, row.fieldIds, e.target.value)
+                                : assignField(docIdx, row.id, e.target.value);
+                              const displayLabel = isGroup
+                                ? `Radio Group: ${row.label}`
+                                : fieldDisplayLabel(row);
+                              const displayType = isGroup
+                                ? `radio group · ${row.fieldIds.length} options`
+                                : fieldDisplayType(row);
                               return (
-                                <div key={field.id} className={`flex items-center gap-3 px-4 py-3 ${assignedTo ? color?.bg + '/30' : ''}`}>
+                                <div key={`${docIdx}::${row.id}`} className={`flex items-center gap-3 px-4 py-3 ${assignedTo ? color?.bg + '/30' : ''}`}>
                                   <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2">
                                       {color && <span className={`h-2 w-2 rounded-full ${color.dot}`} />}
-                                      <span className="text-sm text-gray-800 font-medium truncate">{field.label || field.type || 'Unnamed'}</span>
-                                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 uppercase font-mono">{field.type}</span>
+                                      <span className="text-sm text-gray-800 font-medium truncate">{displayLabel}</span>
+                                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 uppercase font-mono">{displayType}</span>
                                     </div>
                                   </div>
                                   <div className="shrink-0 w-48">
-                                    <select value={assignedTo} onChange={(e) => assignField(field.id, e.target.value)}
+                                    <select value={assignedTo} onChange={onChange}
                                       className={`w-full px-2.5 py-1.5 text-xs border rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
                                         assignedTo ? `${color?.border} ${color?.bg} ${color?.text}` : 'border-gray-300 bg-white text-gray-600'
-                                      }`} data-testid={`field-assign-${field.id}`}>
+                                      }`} data-testid={`field-assign-${docIdx}-${row.id}`}>
                                       <option value="">-- Unassigned --</option>
                                       {signerRecipients.map((r) => (
                                         <option key={r.id} value={r.id}>{r.name || `Recipient ${recipients.indexOf(r) + 1}`}</option>

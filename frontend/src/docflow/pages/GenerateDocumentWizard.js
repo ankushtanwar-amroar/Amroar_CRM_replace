@@ -3,13 +3,14 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   ArrowLeft, ArrowRight, Plus, Trash2, FileText, Users, Send, CheckCircle,
   Loader2, ChevronDown, GitBranch, Layers, ArrowDownUp, Link2, Mail,
-  AlertCircle, Shield, CalendarClock, Copy, ExternalLink, X,
+  AlertCircle, Shield, CalendarClock, Copy, ExternalLink, X, MessageSquare,
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import { Badge } from '../../components/ui/badge';
 // eslint-disable-next-line no-unused-vars
 import TriggerConfiguration from '../components/TriggerConfiguration';  // Phase 63: imported so the Setup-Trigger code path stays fully wired up even though the Template UI currently hides the mode selector.
+import ReminderConfigPicker from '../components/ReminderConfigPicker';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
@@ -40,8 +41,108 @@ const RECIPIENT_COLORS = [
   { bg: 'bg-cyan-100', text: 'text-cyan-700', border: 'border-cyan-300', dot: 'bg-cyan-500' },
 ];
 
-// Field types that a SIGN recipient actually fills — matches SendPackagePage.
-const ASSIGNABLE_FIELD_TYPES = ['signature', 'initials', 'text', 'date'];
+// Phase 81.18 — Field types eligible for per-recipient assignment.
+// Plain `text/date/signature/initials` are always assignable. `merge` is
+// included ONLY when `fallbackToInput` is true (the author flipped
+// "Convert to Input" — the field is now an interactive input). Plain
+// merges are CRM-populated, read-only, and visible to all recipients,
+// so they MUST NOT appear in the Assign Fields panel.
+// Phase 81.30 — `checkbox` + `radio` are now assignable for parity with
+// signatures/text/date. Each radio "option" field is assigned individually
+// (the Visual Builder stores radio groups as N sibling fields with the same
+// `groupName`); senders can put each option under a different recipient if
+// the legal flow requires it.
+const ASSIGNABLE_FIELD_TYPES = ['signature', 'initials', 'text', 'date', 'checkbox', 'radio'];
+const isAssignableField = (f) => {
+  if (!f) return false;
+  const t = (f.type || f.field_type || '').toLowerCase();
+  if (ASSIGNABLE_FIELD_TYPES.includes(t)) return true;
+  if (t === 'merge' && f.fallbackToInput === true) return true;
+  return false;
+};
+const fieldDisplayType = (f) => {
+  const t = (f.type || f.field_type || '').toLowerCase();
+  if (t === 'merge' && f.fallbackToInput) {
+    const input = (f.fallbackInputType || 'text').toLowerCase();
+    return `merge → ${input}`;
+  }
+  if (t === 'radio' && (f.groupName || f.group_name)) {
+    return `radio · ${f.groupName || f.group_name}`;
+  }
+  return t;
+};
+
+const fieldDisplayLabel = (f) => {
+  const t = (f.type || f.field_type || '').toLowerCase();
+  if (t === 'radio') {
+    return f.optionLabel || f.option_label || f.label || 'Radio option';
+  }
+  if (t === 'checkbox') {
+    // Phase 81.31 — prefer the user-customised `label` over the default
+    // `checkboxLabel` ("Check to agree") so the Assign panel shows the
+    // form-builder name instead of generic placeholder text.
+    return f.label || f.checkboxLabel || 'Checkbox';
+  }
+  return f.label || t || 'Unnamed';
+};
+
+// Phase 81.31 — Group sibling radio fields (same `groupName`) into ONE
+// virtual row in the Assign Fields panel. A radio group is always owned
+// by a single recipient; assigning the group writes to every option's
+// `assigned_field_ids` together.
+// Phase 81.32 — `displayLabel` prefers the FIRST non-empty `field.label`
+// among the group's siblings (Visual Builder's "Label" input); falls back
+// to `groupName` only when no friendly label was customised.
+const groupAssignableFields = (fields) => {
+  const seenGroups = new Map();
+  const result = [];
+  const isFriendlyLabel = (s, groupName) => {
+    if (!s || typeof s !== 'string') return false;
+    const trimmed = s.trim();
+    if (!trimmed) return false;
+    if (trimmed === groupName) return false;
+    return true;
+  };
+  for (const f of fields) {
+    const t = (f.type || f.field_type || '').toLowerCase();
+    const groupName = f.groupName || f.group_name;
+    if (t === 'radio' && groupName) {
+      const existing = seenGroups.get(groupName);
+      if (existing) {
+        existing.fieldIds.push(f.id);
+        existing.optionLabels.push(f.optionLabel || f.option_label || f.label || '');
+        if (!existing.displayLabel && isFriendlyLabel(f.label, groupName)) {
+          existing.displayLabel = f.label;
+        }
+        continue;
+      }
+      const friendly = isFriendlyLabel(f.label, groupName) ? f.label : '';
+      const row = {
+        __isRadioGroup: true,
+        id: `group::${groupName}`,
+        groupName,
+        displayLabel: friendly,
+        label: friendly || groupName,
+        type: 'radio',
+        field_type: 'radio',
+        page: f.page,
+        fieldIds: [f.id],
+        optionLabels: [f.optionLabel || f.option_label || f.label || ''],
+        sample: f,
+      };
+      seenGroups.set(groupName, row);
+      result.push(row);
+    } else {
+      result.push(f);
+    }
+  }
+  for (const row of result) {
+    if (row.__isRadioGroup) {
+      row.label = row.displayLabel || row.groupName;
+    }
+  }
+  return result;
+};
 
 // Backend role mapping (matches existing generateLinks contract).
 const ROLE_TO_API = (roleType) => {
@@ -110,10 +211,14 @@ const GenerateDocumentWizard = () => {
 
   // Recipients + routing (package-style)
   const [recipients, setRecipients] = useState([
-    { id: '1', name: '', email: '', role_type: 'SIGN', routing_order: 1, email_template_id: '' },
+    { id: '1', name: '', email: '', role_type: 'SIGN', routing_order: 1, email_template_id: '', reminder_config: null },
   ]);
   const [deliveryMode, setDeliveryMode] = useState('email');
   const [otpEnabled, setOtpEnabled] = useState(false);
+  // Phase 81 — SMS verification mode. When ON, every recipient must have a
+  // phone number; the signing page presents an OTP "Security Check" before
+  // allowing the recipient to view/sign the document.
+  const [smsMode, setSmsMode] = useState(false);
 
   // Field assignment map: fieldId → recipientId
   const [fieldAssignments, setFieldAssignments] = useState({});
@@ -204,6 +309,8 @@ const GenerateDocumentWizard = () => {
         role_type: 'SIGN',
         routing_order: r.routing_order || (i + 1),
         email_template_id: '',
+        // Phase 81.24
+        reminder_config: null,
         _placeholder: r.placeholder_name,
       }));
       setRecipients(seeded);
@@ -240,14 +347,14 @@ const GenerateDocumentWizard = () => {
     const maxOrder = recipients.length > 0 ? Math.max(...recipients.map(r => r.routing_order)) : 0;
     setRecipients([...recipients, {
       id: String(Date.now()), name: '', email: '', role_type: 'SIGN',
-      routing_order: maxOrder + 1, email_template_id: '',
+      routing_order: maxOrder + 1, email_template_id: '', reminder_config: null,
     }]);
   };
 
   const addParallelRecipient = (order) => {
     setRecipients([...recipients, {
       id: String(Date.now()), name: '', email: '', role_type: 'SIGN',
-      routing_order: order, email_template_id: '',
+      routing_order: order, email_template_id: '', reminder_config: null,
     }]);
   };
 
@@ -274,6 +381,24 @@ const GenerateDocumentWizard = () => {
     });
   };
 
+  // Phase 81.31 — Assigning a radio GROUP writes the same recipient to every
+  // option's id so the entire group routes to one signer.
+  const assignRadioGroup = (fieldIds, recipientId) => {
+    setFieldAssignments(prev => {
+      const next = { ...prev };
+      fieldIds.forEach(fid => {
+        if (!recipientId) delete next[fid]; else next[fid] = recipientId;
+      });
+      return next;
+    });
+  };
+
+  const radioGroupAssignment = (fieldIds) => {
+    const set = new Set(fieldIds.map(fid => fieldAssignments[fid] || ''));
+    if (set.size === 1) return [...set][0];
+    return '';
+  };
+
   const getRecipientColor = (recipientId) => {
     const idx = recipients.findIndex(r => r.id === recipientId);
     return RECIPIENT_COLORS[idx % RECIPIENT_COLORS.length] || RECIPIENT_COLORS[0];
@@ -281,8 +406,41 @@ const GenerateDocumentWizard = () => {
 
   const assignableFields = useMemo(() => {
     const all = template?.field_placements || [];
-    return all.filter(f => ASSIGNABLE_FIELD_TYPES.includes(f.type));
+    return all.filter(isAssignableField);
   }, [template]);
+
+  // Phase 81.31 — Group sibling radio fields into one row per groupName.
+  const assignableRows = useMemo(() => groupAssignableFields(assignableFields), [assignableFields]);
+
+  // Phase 81.18 — Auto-default converted merge fields (merge with
+  // `fallbackToInput=true`) to recipient #1 when first surfaced. Plain
+  // text/signature/etc. assignments remain manual. Skip if user already
+  // set a value, or if the field already has a backend assigned_to.
+  // Phase 81.44 — When there's EXACTLY one signer recipient, all other
+  // assignable field types (signature/initials/text/date/checkbox/radio)
+  // are also auto-assigned to that signer since there's no ambiguity.
+  // With 2+ signers, only converted merges auto-assign; everything else
+  // stays unassigned so the sender must explicitly pick who signs what.
+  useEffect(() => {
+    if (!signerRecipients.length || !assignableFields.length) return;
+    const firstSignerId = signerRecipients[0]?.id;
+    if (!firstSignerId) return;
+    const autoAssignAll = signerRecipients.length === 1;
+    setFieldAssignments(prev => {
+      let changed = false;
+      const next = { ...prev };
+      assignableFields.forEach(f => {
+        const t = (f.type || f.field_type || '').toLowerCase();
+        const isConvertedMerge = t === 'merge' && f.fallbackToInput;
+        if (!isConvertedMerge && !autoAssignAll) return;
+        if (next[f.id]) return;          // already assigned
+        if (f.assigned_to || f.recipient_id) return; // backend pre-assigned
+        next[f.id] = firstSignerId;
+        changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [assignableFields, signerRecipients]);
 
   // Phase 70: Surface template issues BEFORE the user clicks Send. We
   // inspect merge-type placements and flag any that weren't bound to a
@@ -302,17 +460,34 @@ const GenerateDocumentWizard = () => {
   }, [template]);
 
   const assignmentStats = useMemo(() => {
-    const total = assignableFields.length;
+    // Phase 81.31 — count radio groups as ONE row each.
+    const total = assignableRows.length;
     let assigned = 0;
-    assignableFields.forEach(f => { if (fieldAssignments[f.id]) assigned += 1; });
+    assignableRows.forEach(row => {
+      if (row.__isRadioGroup) {
+        if (radioGroupAssignment(row.fieldIds)) assigned += 1;
+      } else if (fieldAssignments[row.id]) {
+        assigned += 1;
+      }
+    });
     return { totalFields: total, assignedFields: assigned, unassigned: total - assigned };
-  }, [assignableFields, fieldAssignments]);
+  }, [assignableRows, fieldAssignments]);
 
   const canProceed = () => {
     if (step === 0) return true;
     if (step === 1) {
       if (!needsRecipientStep) return true;
-      return recipients.every(r => r.name.trim() && r.email.trim());
+      const baseOk = recipients.every(r => r.name.trim() && r.email.trim());
+      if (!baseOk) return false;
+      // Phase 81.12 — SMS Disclaimer ON ⇒ phone required for actionable recipients.
+      if (smsMode) {
+        const ACTIONABLE = new Set(['SIGN', 'SIGNER', 'APPROVE_REJECT', 'APPROVER']);
+        return recipients.every(r => {
+          if (!ACTIONABLE.has(String(r.role_type || 'SIGN').toUpperCase())) return true;
+          return (r.phone || '').trim().length > 0;
+        });
+      }
+      return true;
     }
     return true;
   };
@@ -347,10 +522,15 @@ const GenerateDocumentWizard = () => {
           return {
             name: r.name || '',
             email: r.email || '',
+            // Phase 81.13 — propagate phone so the backend SMS guard sees it.
+            // Trim spaces so accidental whitespace doesn't bypass validation.
+            phone: (r.phone || '').trim(),
             role: ROLE_TO_API(r.role_type),
             routing_order: r.routing_order || 1,
             assigned_components: assignedFieldIds,  // backend contract preserved
             email_template_id: r.email_template_id || undefined,
+            // Phase 81.24 — per-recipient pending-signature reminder schedule.
+            reminder_config: (r.reminder_config && r.reminder_config.enabled) ? r.reminder_config : undefined,
           };
         });
 
@@ -365,6 +545,22 @@ const GenerateDocumentWizard = () => {
 
       const apiRoutingMode = routingMode === 'mixed' ? 'sequential' : routingMode;
 
+      // Phase 81.13 — when SMS Disclaimer is on, every actionable recipient
+      // (signer / approver) must have a phone. Validate against the UI form
+      // state (`recipients`) so the check always reflects the latest values
+      // typed by the user. Receive-copy roles are exempt.
+      if (smsMode && !isPublicLinkMode) {
+        const ACTIONABLE = new Set(['SIGN', 'SIGNER', 'APPROVE_REJECT', 'APPROVER']);
+        const missingPhones = recipients
+          .filter(r => ACTIONABLE.has(String(r.role_type || 'SIGN').toUpperCase()))
+          .filter(r => !((r.phone || '').trim()))
+          .map(r => r.name || r.email || 'Unnamed');
+        if (missingPhones.length > 0) {
+          toast.error(`SMS Disclaimer is ON — phone required for: ${missingPhones.join(', ')}`);
+          return;
+        }
+      }
+
       const result = await docflowService.generateLinks({
         template_id: selectedVersionId || templateId,
         document_name: template?.name || '',
@@ -378,6 +574,7 @@ const GenerateDocumentWizard = () => {
           ? new Date(expiryDate).toISOString()
           : null,
         require_auth: otpEnabled,
+        sms_mode: !!smsMode && !isPublicLinkMode,
       });
 
       if (!result.success) {
@@ -568,6 +765,36 @@ const GenerateDocumentWizard = () => {
               <strong>Tip:</strong> Recipients with the <em>same routing order</em> run in parallel. Different orders run sequentially.
             </div>
 
+            {/* Phase 81.12 — SMS Disclaimer toggle. Default OFF. When ON, the
+                public signing flow shows an SMS disclaimer page before the
+                consent popup, and phone becomes required for actionable
+                recipients. Moved here from the Review step per spec. */}
+            <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between" data-testid="sms-disclaimer-section">
+              <div className="flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50">
+                  <MessageSquare className="h-4 w-4 text-indigo-600" />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-gray-800">SMS Disclaimer</p>
+                  <p className="text-[11px] text-gray-500">
+                    {smsMode
+                      ? 'Recipients see an SMS disclaimer page before the consent popup. Phone is required.'
+                      : 'Open normal flow directly — no disclaimer page is shown.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSmsMode(!smsMode)}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${smsMode ? 'bg-indigo-500' : 'bg-gray-200'}`}
+                data-testid="sms-disclaimer-toggle"
+                aria-pressed={smsMode}
+                aria-label="Toggle SMS Disclaimer"
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${smsMode ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+            </div>
+
             {/* Wave-grouped recipients */}
             <div className="space-y-4">
               {waveGroups.map((wave, waveIdx) => (
@@ -654,6 +881,19 @@ const GenerateDocumentWizard = () => {
                               </select>
                             </div>
                             <div>
+                              <label className="block text-xs text-gray-500 mb-1">
+                                Phone {smsMode ? <span className="text-rose-500">*</span> : <span className="text-gray-400">(optional)</span>}
+                              </label>
+                              <input
+                                value={r.phone || ''}
+                                onChange={(e) => updateRecipient(idx, 'phone', e.target.value)}
+                                placeholder="+1 555 0100"
+                                type="tel"
+                                className={`w-full px-3 py-2 border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 ${smsMode && !r.phone ? 'border-rose-300 bg-rose-50/40' : 'border-gray-300'}`}
+                                data-testid={`recipient-phone-${idx}`}
+                              />
+                            </div>
+                            <div>
                               <label className="block text-xs text-gray-500 mb-1">Routing Order</label>
                               <input
                                 type="number"
@@ -684,6 +924,15 @@ const GenerateDocumentWizard = () => {
                                 </select>
                               </div>
                             )}
+                          </div>
+                          {/* Phase 81.24 — Per-recipient pending-signature reminder schedule */}
+                          <div className="mt-3">
+                            <ReminderConfigPicker
+                              idx={idx}
+                              dataTestPrefix="template-reminder"
+                              value={r.reminder_config || null}
+                              onChange={(cfg) => updateRecipient(idx, 'reminder_config', cfg)}
+                            />
                           </div>
                         </div>
                       );
@@ -725,43 +974,55 @@ const GenerateDocumentWizard = () => {
                       <FileText className="h-4 w-4 text-indigo-500" />
                       <span className="text-sm font-medium text-gray-700">{template?.name || 'Document'}</span>
                       <span className="text-[10px] text-gray-400 ml-auto">
-                        {assignableFields.length} field{assignableFields.length !== 1 ? 's' : ''}
+                        {assignableRows.length} field{assignableRows.length !== 1 ? 's' : ''}
                       </span>
                     </div>
                   </div>
                   <div className="divide-y divide-gray-100">
-                    {assignableFields.map((field) => {
-                      const assignedTo = fieldAssignments[field.id] || '';
+                    {assignableRows.map((row) => {
+                      const isGroup = row.__isRadioGroup;
+                      const assignedTo = isGroup
+                        ? radioGroupAssignment(row.fieldIds)
+                        : (fieldAssignments[row.id] || '');
                       const color = assignedTo ? getRecipientColor(assignedTo) : null;
+                      const onChange = (e) => isGroup
+                        ? assignRadioGroup(row.fieldIds, e.target.value)
+                        : assignField(row.id, e.target.value);
+                      const displayLabel = isGroup
+                        ? `Radio Group: ${row.label}`
+                        : fieldDisplayLabel(row);
+                      const displayType = isGroup
+                        ? `radio group · ${row.fieldIds.length} options`
+                        : fieldDisplayType(row);
                       return (
                         <div
-                          key={field.id}
+                          key={row.id}
                           className={`flex items-center gap-3 px-4 py-3 ${assignedTo ? (color?.bg || '') + '/30' : ''}`}
                         >
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
                               {color && <span className={`h-2 w-2 rounded-full ${color.dot}`} />}
                               <span className="text-sm text-gray-800 font-medium truncate">
-                                {field.label || field.name || field.type || 'Unnamed'}
+                                {displayLabel}
                               </span>
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 uppercase font-mono">
-                                {field.type}
+                                {displayType}
                               </span>
-                              {field.page && (
-                                <span className="text-[10px] text-gray-400">Page {field.page}</span>
+                              {row.page && (
+                                <span className="text-[10px] text-gray-400">Page {row.page}</span>
                               )}
                             </div>
                           </div>
                           <div className="shrink-0 w-48">
                             <select
                               value={assignedTo}
-                              onChange={(e) => assignField(field.id, e.target.value)}
+                              onChange={onChange}
                               className={`w-full px-2.5 py-1.5 text-xs border rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
                                 assignedTo
                                   ? `${color?.border} ${color?.bg} ${color?.text}`
                                   : 'border-gray-300 bg-white text-gray-600'
                               }`}
-                              data-testid={`field-assign-${field.id}`}
+                              data-testid={`field-assign-${row.id}`}
                             >
                               <option value="">-- Unassigned --</option>
                               {signerRecipients.map((r) => (
@@ -857,6 +1118,7 @@ const GenerateDocumentWizard = () => {
                 <div><dt className="text-gray-500">Delivery</dt><dd className="font-medium">{deliveryModeLabel}</dd></div>
                 <div><dt className="text-gray-500">Routing</dt><dd className="font-medium capitalize">{routingMode}</dd></div>
                 <div><dt className="text-gray-500">OTP</dt><dd className="font-medium">{otpEnabled ? 'Enabled' : 'Disabled'}</dd></div>
+                <div><dt className="text-gray-500">SMS Disclaimer</dt><dd className="font-medium">{smsMode ? 'Enabled' : 'Disabled'}</dd></div>
                 <div><dt className="text-gray-500">Expiry</dt><dd className="font-medium">{expiryMode === 'custom' && expiryDate ? new Date(expiryDate).toLocaleString() : 'Never'}</dd></div>
               </dl>
             </div>
@@ -979,13 +1241,6 @@ const GenerateDocumentWizard = () => {
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${otpEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
               </button>
             </div>
-
-            {!otpEnabled && (
-              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700 flex items-start gap-2">
-                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5 text-amber-500" />
-                <span>Authentication is disabled. Anyone with the link can access and sign the document without OTP verification.</span>
-              </div>
-            )}
           </div>
         )}
 

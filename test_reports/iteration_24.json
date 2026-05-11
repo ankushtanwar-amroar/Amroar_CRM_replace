@@ -1,0 +1,108 @@
+{
+  "summary": "Phase 81 Final Readiness Testing completed. All 5 production-ready fixes verified: (1) DOC/DOCX upload working, (2) SMS mode validation fixed and working, (3) SMS OTP endpoints working in stub mode, (4) SMS verification required before signing (428 status), (5) Webhook payload enrichment with merge_fields verified. Fixed 2 bugs in document_routes.py: missing sms_mode validation and HTTPException handling.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase81_final_readiness.py",
+    "/app/test_reports/pytest/phase81_results.xml",
+    "/app/backend/tests/test_phase76_verification_id.py"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "FIXED: document_routes.py was missing sms_mode validation - added Phase 81 validation at line 67-85",
+    "FIXED: document_routes.py was missing sms_mode parameter in generate_document call - added at line 99",
+    "FIXED: document_routes.py sign_document was catching HTTPException and wrapping in 500 - added re-raise at line 640",
+    "VERIFIED: DOC/DOCX upload working via /api/docflow/templates/upload-pdf endpoint",
+    "VERIFIED: SMS mode validation rejects recipients without phone numbers (400 status)",
+    "VERIFIED: SMS OTP send-otp returns stubbed:true when Twilio not configured",
+    "VERIFIED: SMS OTP verify-otp returns 400 'Incorrect code' for wrong OTP",
+    "VERIFIED: Sign endpoint returns 428 when SMS verification required but not done",
+    "VERIFIED: Public endpoint returns sms_required:true and recipient_phone_masked for SMS mode docs",
+    "VERIFIED: Webhook payload includes field_data and merge_fields keys",
+    "VERIFIED: Verification ID stamping on LAST page only (bottom-right)",
+    "VERIFIED: Checkbox/radio centering formulas intact (Phase 73 regression)"
+  ],
+  "updated_files": [
+    "/app/backend/modules/docflow/api/document_routes.py",
+    "/app/backend/tests/test_phase81_final_readiness.py",
+    "/app/backend/tests/test_phase76_verification_id.py"
+  ],
+  "success_rate": {
+    "backend": "100% (22/23 passed, 1 skipped - async MongoDB access in test)",
+    "frontend": "N/A - backend only testing requested"
+  },
+  "test_credentials": "test@gmail.com / test123",
+  "seed_data_creation": "Created test templates and documents with sms_mode=true for OTP testing",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 81 SMS mode is fully functional in stub mode. Twilio credentials (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER) are NOT set - this is intentional for testing. When set, real SMS will be sent. OTP is stored in recipient.sms_otp field in MongoDB. Verification ID stamping changed from every-page to last-page-only in Phase 81.",
+  "bugs_fixed": [
+    {
+      "file": "/app/backend/modules/docflow/api/document_routes.py",
+      "issue": "Missing sms_mode validation in generate_document endpoint",
+      "fix": "Added Phase 81 validation to check recipients have phone numbers when sms_mode=true",
+      "lines": "67-85"
+    },
+    {
+      "file": "/app/backend/modules/docflow/api/document_routes.py",
+      "issue": "Missing sms_mode parameter passed to service",
+      "fix": "Added sms_mode=bool(doc_data.sms_mode) to generate_document call",
+      "lines": "99"
+    },
+    {
+      "file": "/app/backend/modules/docflow/api/document_routes.py",
+      "issue": "HTTPException caught by generic exception handler, returning 500 instead of proper status",
+      "fix": "Added 'except HTTPException: raise' before generic exception handler",
+      "lines": "640"
+    }
+  ],
+  "phase_81_verification": {
+    "docx_upload": {
+      "status": "VERIFIED",
+      "endpoint": "POST /api/docflow/templates/upload-pdf",
+      "tests": ["test_01_docx_upload_success", "test_02_doc_upload_success", "test_03_txt_upload_rejected", "test_04_png_upload_rejected"]
+    },
+    "sms_mode_validation": {
+      "status": "VERIFIED (after fix)",
+      "endpoint": "POST /api/docflow/documents/generate",
+      "tests": ["test_05_sms_mode_missing_phone_rejected", "test_06_sms_mode_with_valid_phones_accepted"]
+    },
+    "sms_otp_endpoints": {
+      "status": "VERIFIED",
+      "endpoints": [
+        "POST /api/docflow/documents/public/{token}/sms/send-otp",
+        "POST /api/docflow/documents/public/{token}/sms/verify-otp"
+      ],
+      "tests": ["test_07_send_otp_stub_mode", "test_08_verify_otp_wrong_code", "test_10_public_endpoint_shows_sms_required"],
+      "note": "Running in stub mode - stubbed:true returned"
+    },
+    "sms_verification_required": {
+      "status": "VERIFIED (after fix)",
+      "endpoint": "POST /api/docflow/documents/{id}/sign",
+      "tests": ["test_11_sign_blocked_without_sms_verification"],
+      "note": "Returns 428 when SMS verification required but not done"
+    },
+    "webhook_merge_fields": {
+      "status": "VERIFIED",
+      "file": "webhook_service.py",
+      "tests": ["test_12_webhook_service_derives_merge_fields", "test_13_webhook_payload_structure"]
+    },
+    "verification_id_stamping": {
+      "status": "VERIFIED",
+      "file": "pdf_overlay_service_enhanced.py",
+      "tests": ["test_14_verification_id_last_page_only", "test_15_verification_id_unit_test"],
+      "note": "Changed from every-page to last-page-only in Phase 81"
+    },
+    "checkbox_radio_centering": {
+      "status": "VERIFIED (regression)",
+      "tests": ["test_16_checkbox_centering_formula", "test_17_radio_centering_formula"]
+    }
+  }
+}

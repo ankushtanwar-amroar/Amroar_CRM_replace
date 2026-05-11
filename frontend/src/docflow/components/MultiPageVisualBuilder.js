@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { ZoomIn, ZoomOut, Type, Edit3, Calendar, CheckSquare, FileText, BracesIcon, AlignLeft, Trash2, Copy, X, Grid, Maximize2, Sparkles, Send, Loader2, CircleDot, ChevronLeft, ChevronRight, Users, Lock } from 'lucide-react';
+import { ZoomIn, ZoomOut, Type, Edit3, Calendar, CheckSquare, FileText, BracesIcon, AlignLeft, Trash2, Copy, X, Grid, Maximize2, Sparkles, Send, Loader2, CircleDot, ChevronLeft, ChevronRight, Users, Lock, Link2 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import DocumentContentEditor from './DocumentContentEditor';
@@ -26,7 +26,7 @@ const GRID_SIZE = 10;
 
 const snapToGrid = (value) => Math.round(value / GRID_SIZE) * GRID_SIZE;
 
-const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, crmConnection, templateRecipients = [], contentBlocks = [], onContentBlocksChange, onTextSelect, highlightBlockId = null, onConvertToEditable }) => {
+const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, crmConnection, templateRecipients = [], contentBlocks = [], onContentBlocksChange, onTextSelect, highlightBlockId = null, onConvertToEditable, currentTemplateId = null, serverFieldsVersion = 0 }) => {
   // Color palette for recipient assignment badges
   const RECIPIENT_COLORS = useMemo(() => [
     { bg: 'bg-blue-100', border: 'border-blue-400', text: 'text-blue-700', dot: 'bg-blue-500' },
@@ -76,6 +76,145 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   // Track whether zoom was manually set by user (skip auto-fit overrides)
   const isManualZoom = useRef(false);
   const lastAutoFitWidth = useRef(0);
+
+  // Phase 81.49 — Interlinked Fields (Package-only). Load other active
+  // templates in the tenant so authors can pick a link target from the
+  // Properties panel. Loaded lazily when the user actually opens the
+  // Interlink section (avoids a heavy up-front fetch for every editor open).
+  const [interlinkTemplates, setInterlinkTemplates] = useState([]);
+  const [interlinkTemplatesLoading, setInterlinkTemplatesLoading] = useState(false);
+  const [interlinkTargetFields, setInterlinkTargetFields] = useState({});  // { [template_id]: [{id,label,type}] }
+  // Phase 81.54 — Incoming links cache, keyed by THIS template's field id.
+  // { [fieldId]: { loading: bool, items: [...] } }
+  const [incomingLinks, setIncomingLinks] = useState({});
+  // Phase 81.55 — Aggregate map across ALL fields on this template, used by
+  // the canvas/preview to render colored link badges without per-field
+  // requests. { [fieldId]: [ { source_template_id, ..., direction }, ... ] }
+  const [incomingLinksMap, setIncomingLinksMap] = useState({});
+
+  const loadInterlinkTemplates = useCallback(async () => {
+    if (interlinkTemplates.length > 0 || interlinkTemplatesLoading) return;
+    setInterlinkTemplatesLoading(true);
+    try {
+      // Phase 81.50 — drop the status='active' filter. For link picking we
+      // want every latest template in the tenant regardless of publish
+      // state so authors can pair drafts together (common workflow:
+      // configure links while BOTH templates are still being built).
+      const resp = await docflowService.getTemplates('', '', 1, 200);
+      const list = (resp?.templates || resp?.data || resp || [])
+        .filter(t => t.id && t.id !== currentTemplateId)
+        .map(t => ({ id: t.id, name: t.name, version: t.version, status: t.status }));
+      setInterlinkTemplates(list);
+    } catch (e) {
+      console.error('Failed to load interlink templates', e);
+    } finally {
+      setInterlinkTemplatesLoading(false);
+    }
+  }, [currentTemplateId, interlinkTemplates.length, interlinkTemplatesLoading]);
+
+  const loadInterlinkTargetFields = useCallback(async (tplId) => {
+    if (!tplId || interlinkTargetFields[tplId]) return;
+    try {
+      const tpl = await docflowService.getTemplate(tplId);
+      const allFields = tpl?.field_placements || [];
+      // Phase 2 — Interlinked Fields supports: text, date, checkbox, radio.
+      const supportedTypes = ['text', 'date', 'checkbox', 'radio'];
+      const filtered = allFields
+        .filter(f => supportedTypes.includes(f.type || f.field_type))
+        .map(f => ({
+          id: f.id,
+          label: f.label || f.name || `${f.type} field`,
+          type: f.type || f.field_type,
+          fieldSubType: f.fieldSubType,
+          groupName: f.groupName || f.group_name || null,
+          optionLabel: f.optionLabel || f.option_label || null,
+          optionValue: f.optionValue || f.option_value || null,
+        }));
+
+      // Phase 2 — Radio fields are part of a GROUP. Linking an entire group
+      // is what authors want (not a single option). We dedupe by groupName
+      // and show "Group: {groupName}" so the user picks a group; the stored
+      // field_id is one option in that group and at runtime the system uses
+      // the option's groupName for value routing.
+      const seen = new Set();
+      const result = [];
+      for (const f of filtered) {
+        if (f.type === 'radio') {
+          const key = f.groupName || f.id;
+          if (seen.has(`radio:${key}`)) continue;
+          seen.add(`radio:${key}`);
+          result.push({ ...f, label: `Group: ${key}` });
+        } else {
+          result.push(f);
+        }
+      }
+      setInterlinkTargetFields(prev => ({ ...prev, [tplId]: result }));
+    } catch (e) {
+      console.error('Failed to load target fields', e);
+    }
+  }, [interlinkTargetFields]);
+
+  // Phase 81.54 — Load incoming interlinks for a given local field id. Returns
+  // every other template whose field_placements declare a linked_to pointing
+  // at this field. Cached per-field-id so re-selection is instant.
+  const loadIncomingLinks = useCallback(async (fieldId, { force = false } = {}) => {
+    if (!fieldId) return;
+    if (!force && incomingLinks[fieldId]) return;
+    setIncomingLinks(prev => ({ ...prev, [fieldId]: { ...(prev[fieldId] || {}), loading: true } }));
+    try {
+      const resp = await docflowService.getIncomingLinks(fieldId, currentTemplateId);
+      const items = resp?.incoming_links || [];
+      setIncomingLinks(prev => ({ ...prev, [fieldId]: { loading: false, items } }));
+    } catch (e) {
+      console.error('Failed to load incoming links', e);
+      setIncomingLinks(prev => ({ ...prev, [fieldId]: { loading: false, items: [] } }));
+    }
+  }, [incomingLinks, currentTemplateId]);
+
+  // Phase 81.54 — Patch a remote field's linked_to (used by Edit Direction
+  // / Remove on the incoming-links list). On success, refresh that field's
+  // incoming-links cache so the UI reflects the change without a reload.
+  const patchRemoteFieldLink = useCallback(async (sourceTemplateId, sourceFieldId, linkedTo, fieldIdRefresh) => {
+    try {
+      await docflowService.updateFieldLinkedTo(sourceTemplateId, sourceFieldId, linkedTo);
+      if (fieldIdRefresh) await loadIncomingLinks(fieldIdRefresh, { force: true });
+      // Phase 81.55 — also refresh the bulk map so the canvas badge
+      // recolors / disappears immediately after Edit / Remove.
+      if (currentTemplateId) {
+        try {
+          const resp = await docflowService.getAllIncomingLinks(currentTemplateId);
+          setIncomingLinksMap(resp?.incoming_links_map || {});
+        } catch (_e) { /* non-fatal */ }
+      }
+      return true;
+    } catch (e) {
+      console.error('Failed to update incoming link', e);
+      alert(`Failed to update link: ${e.message || e}`);
+      return false;
+    }
+  }, [loadIncomingLinks, currentTemplateId]);
+
+  // Phase 81.55 — Bulk-load incoming links for ALL fields on this template
+  // so the canvas can render badges. Runs whenever the active template id
+  // changes (open / switch / version) and after explicit save events that
+  // might have changed cross-template links.
+  const refreshIncomingLinksMap = useCallback(async () => {
+    if (!currentTemplateId) {
+      setIncomingLinksMap({});
+      return;
+    }
+    try {
+      const resp = await docflowService.getAllIncomingLinks(currentTemplateId);
+      setIncomingLinksMap(resp?.incoming_links_map || {});
+    } catch (e) {
+      console.warn('Failed to load incoming links map', e);
+      setIncomingLinksMap({});
+    }
+  }, [currentTemplateId]);
+
+  useEffect(() => {
+    refreshIncomingLinksMap();
+  }, [refreshIncomingLinksMap]);
 
   // Determine rendering mode:
   // - PDF view: show react-pdf canvas (pixel-perfect, non-editable)
@@ -138,16 +277,25 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   // Track actual rendered PDF page heights in continuous mode
   const [pdfPageHeights, setPdfPageHeights] = useState({});
   const pdfPageHeightsRef = useRef({});
-  const PDF_PAGE_GAP = 32; // mt-4 (16px) + pt-4 (16px) gap between pages in continuous mode
 
-  // Calculate cumulative offsets from actual measured PDF page heights
+  // Phase 81.84.1 — Deterministic cumulative page offsets (NO DOM measurement).
+  // The actual rendered gap between two PDF page wrappers is:
+  //   mt-4 (16px) + border-t (1px) + pt-4 (16px) = 33px
+  // The original code used 32 — off-by-one per page break, compounding to
+  // ~14px drift on page 15. Using 33 here makes the formula match what the
+  // browser actually paints.
+  const PDF_PAGE_GAP = 33;
+  // Pages 2+ in continuous mode have border-t (1px) + pt-4 (16px) ABOVE the
+  // PDF content in their wrapper div. pageRelativeY must start from the PDF
+  // content edge, not from the wrapper border edge (which is 17px higher).
+  const PDF_WRAPPER_TOP_OFFSET = 17; // border-t (1px) + pt-4 (16px)
+  const PDF_PAGE_HEIGHT_FALLBACK = 1035; // Letter @ width=800 (8.5x11 → 800x1035)
   const pdfPageOffsets = useMemo(() => {
     if (!numPages) return [0];
     const offsets = [0];
     for (let i = 0; i < numPages - 1; i++) {
-      const prevHeight = pdfPageHeights[i + 1] || 1035; // fallback for letter-size at width=800
-      const gap = i < numPages - 1 ? PDF_PAGE_GAP : 0;
-      offsets.push(offsets[i] + prevHeight + gap);
+      const prevHeight = pdfPageHeights[i + 1] || PDF_PAGE_HEIGHT_FALLBACK;
+      offsets.push(offsets[i] + prevHeight + PDF_PAGE_GAP);
     }
     return offsets;
   }, [numPages, pdfPageHeights]);
@@ -197,6 +345,54 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     const idx = recipientOptions.findIndex(x => x.id === recipientId);
     const colors = ['#3B82F6', '#6366F1', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#14B8A6'];
     return colors[idx % colors.length];
+  };
+
+  // Phase 81.51 — Interlink badge helpers. A field is "interlinked" when its
+  // linked_to.enabled flag is true AND a target field has been picked. Tooltip
+  // text is resolved against the lazily-loaded interlinkTemplates / target
+  // fields cache so we only show resolved names when the data is in memory.
+  // Phase 81.55 — Extended to also reflect INCOMING links via incomingLinksMap.
+  const isInterlinked = (f) => {
+    const out = Boolean(f?.linked_to?.enabled && f?.linked_to?.field_id);
+    const inc = (incomingLinksMap[f?.id] || []).length > 0;
+    return out || inc;
+  };
+  const getInterlinkTooltip = (f) => {
+    if (!isInterlinked(f)) return '';
+    const lines = [];
+    if (f?.linked_to?.enabled && f?.linked_to?.field_id) {
+      const tplId = f.linked_to.template_id;
+      const fieldId = f.linked_to.field_id;
+      const tplName = (interlinkTemplates.find(t => t.id === tplId) || {}).name || 'Linked Template';
+      const fieldLabel = ((interlinkTargetFields[tplId] || []).find(x => x.id === fieldId) || {}).label || 'Linked Field';
+      const dir = f.linked_to.direction || 'one_way';
+      const sep = dir === 'two_way' ? '↔' : '→';
+      const prefix = dir === 'two_way' ? 'Two-Way Link:' : 'Linked to:';
+      lines.push(`${prefix} ${tplName} ${sep} ${fieldLabel}`);
+    }
+    for (const it of (incomingLinksMap[f?.id] || [])) {
+      const sep = it.direction === 'two_way' ? '↔' : '→';
+      const prefix = it.direction === 'two_way' ? 'Two-Way Link:' : 'Linked from:';
+      lines.push(`${prefix} ${it.source_template_name} ${sep} ${it.source_field_label}`);
+    }
+    return lines.join('\n');
+  };
+  // Phase 81.55 — Pick a badge color based on link mix. Two-way ANY → purple.
+  // Else outgoing-only → blue. Else incoming-only → green. Mixed one-way →
+  // blue (outgoing wins for primary). Returns hex; consumed by canvas + list.
+  const getInterlinkBadgeColor = (f) => {
+    const outDir = f?.linked_to?.enabled && f?.linked_to?.field_id ? (f.linked_to.direction || 'one_way') : null;
+    const incoming = incomingLinksMap[f?.id] || [];
+    const hasTwoWay = outDir === 'two_way' || incoming.some(it => it.direction === 'two_way');
+    if (hasTwoWay) return '#8B5CF6';  // purple
+    if (outDir && incoming.length === 0) return '#3B82F6';  // blue
+    if (!outDir && incoming.length > 0) return '#10B981';  // green
+    return '#3B82F6';  // mixed one-way
+  };
+  const getInterlinkLinkCount = (f) => {
+    const out = f?.linked_to?.enabled && f?.linked_to?.field_id ? 1 : 0;
+    const inc = (incomingLinksMap[f?.id] || []).length;
+    return out + inc;
   };
 
   // Mouse-based drag state
@@ -250,7 +446,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
         const y = Number(f.y) || 0;
         // Derive page index from cumulative Y. Fields already in page-relative
         // coordinates (y < first page height) stay on `f.page` if valid.
-        const firstPageH = pdfPageHeights[0] || 1035;
+        const firstPageH = pdfPageHeights[1] || 1035; // pdfPageHeights uses 1-based keys
         const isPageRelative = y >= 0 && y <= firstPageH && (f.page || 1) >= 1;
         if (isPageRelative && f.page) return f;
         // Cumulative-Y → (page, pageRelativeY) lookup
@@ -290,7 +486,13 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       // Use object from Connection tab if not set on field
       const obj = selectedField.mergeObject || crmConnection?.object_name;
       
-      if (obj && !dynamicFields[obj]) {
+      if (obj && !(obj in dynamicFields)) {
+        // Phase 81.74 — cache `obj` key with EMPTY array immediately so a
+        // failed fetch doesn't retry on every re-render (the previous
+        // `!dynamicFields[obj]` guard failed because the key never landed in
+        // the cache on error, producing the /fields 404 storm in the network
+        // tab). `obj in dynamicFields` checks the KEY, not the value.
+        setDynamicFields(prev => ({ ...prev, [obj]: prev[obj] ?? [] }));
         setLoadingDynamicFields(true);
         const fetchPromise = crmConnection?.provider === 'salesforce' 
           ? docflowService.getSalesforceFields(obj)
@@ -310,7 +512,10 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
             }
             setDynamicFields(prev => ({ ...prev, [obj]: flds }));
           })
-          .catch(err => console.error('Error fetching fields for', obj, err))
+          .catch(err => {
+            console.error('Error fetching fields for', obj, err);
+            // Keep empty array cached so we don't re-fetch on failure.
+          })
           .finally(() => setLoadingDynamicFields(false));
       }
     }
@@ -319,18 +524,18 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   const containerRef = useRef(null);
   const pdfCanvasRef = useRef(null);
 
-  // Sync incoming fields from parent (ClueBot updates)
+  // Sync incoming fields from parent (ClueBot updates / add-remove operations)
   useEffect(() => {
     console.log('[VisualBuilder] fields prop changed:', fields?.length, 'fields');
     if (fields) {
       // Always update if field count changed or any field ID is different
       const currentIds = new Set(droppedFields.map(f => f.id));
       const newIds = new Set(fields.map(f => f.id));
-      
+
       const hasNewFields = fields.some(f => !currentIds.has(f.id));
       const hasRemovedFields = droppedFields.some(f => !newIds.has(f.id));
       const countChanged = fields.length !== droppedFields.length;
-      
+
       if (hasNewFields || hasRemovedFields || countChanged) {
         console.log('[VisualBuilder] Syncing fields - new:', hasNewFields, 'removed:', hasRemovedFields, 'count:', countChanged);
         const normalized = _ensureFieldKeys(fields);
@@ -340,12 +545,52 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     }
   }, [fields]);
 
+  // Force-sync droppedFields when the parent signals fresh data from the server.
+  // The fields-only effect above only catches count/ID changes; this catches
+  // property updates (position, size, font, validation, etc.) that arrive after
+  // a save+reopen cycle where field IDs stay the same.
+  useEffect(() => {
+    if (serverFieldsVersion > 0 && fields) {
+      console.log('[VisualBuilder] Server fields version', serverFieldsVersion, '— force-syncing', fields.length, 'fields');
+      const normalized = _ensureFieldKeys(fields);
+      setDroppedFields(normalized);
+      droppedFieldsRef.current = normalized;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serverFieldsVersion]);
+
   const onDocumentLoadSuccess = ({ numPages }) => {
     setNumPages(numPages);
   };
 
   // Get selected field
   const selectedField = droppedFields.find(f => f.id === selectedFieldId);
+
+  // Phase 81.52 — Hydrate interlink dropdowns on field reselect / template
+  // reopen. The Linked Template + Linked Field options are loaded lazily
+  // (loadInterlinkTemplates / loadInterlinkTargetFields) so they're empty
+  // when the user reopens a template or clicks a previously-saved linked
+  // field. Without this effect the saved template_id / field_id can't
+  // resolve to an <option> and the dropdowns appear blank even though the
+  // values are persisted. Whenever a field with `linked_to.enabled` becomes
+  // the active selection, kick off both loaders so the saved values
+  // immediately render in their dropdowns.
+  useEffect(() => {
+    if (!selectedField?.linked_to?.enabled) return;
+    loadInterlinkTemplates();
+    const tplId = selectedField.linked_to.template_id;
+    if (tplId) loadInterlinkTargetFields(tplId);
+  }, [selectedField?.id, selectedField?.linked_to?.enabled, selectedField?.linked_to?.template_id, loadInterlinkTemplates, loadInterlinkTargetFields]);
+
+  // Phase 81.54 — Auto-load INCOMING interlinks for the currently-selected
+  // field. Triggers whenever the active field changes — interlink-supported
+  // types only — so the Properties panel can surface "Linked from" chips
+  // without manual user action.
+  useEffect(() => {
+    if (!selectedField?.id) return;
+    if (!['text', 'date', 'checkbox', 'radio'].includes(selectedField.type)) return;
+    loadIncomingLinks(selectedField.id);
+  }, [selectedField?.id, selectedField?.type, loadIncomingLinks]);
 
   // Get field type config
   const getFieldTypeConfig = (type) => FIELD_TYPES.find(ft => ft.id === type) || FIELD_TYPES[0];
@@ -395,9 +640,15 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
         const r = pageNodes[i].getBoundingClientRect();
         if (clientY >= r.top && clientY <= r.bottom) {
           const pageNum = parseInt(pageNodes[i].getAttribute('data-pdf-page'), 10) || (i + 1);
+          // Pages 2+ wrappers have border-t (1px) + pt-4 (16px) above the PDF
+          // content. Subtract this so pageRelativeY is measured from the PDF
+          // content edge — matching pagination mode and the viewer's coordinate
+          // system. Drops in the gap area (clientY < r.top + offset*zoom) clamp
+          // to 0 = top of PDF content on that page.
+          const wrapperOffset = i > 0 ? PDF_WRAPPER_TOP_OFFSET : 0;
           return {
             page: pageNum,
-            pageRelativeY: Math.max(0, (clientY - r.top) / zoom),
+            pageRelativeY: Math.max(0, (clientY - r.top) / zoom - wrapperOffset),
           };
         }
       }
@@ -411,9 +662,10 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       const lastIdx = pageNodes.length - 1;
       const lastR = pageNodes[lastIdx].getBoundingClientRect();
       const lastNum = parseInt(pageNodes[lastIdx].getAttribute('data-pdf-page'), 10) || (lastIdx + 1);
+      const lastWrapperOffset = lastIdx > 0 ? PDF_WRAPPER_TOP_OFFSET : 0;
       return {
         page: lastNum,
-        pageRelativeY: Math.max(0, (lastR.bottom - lastR.top) / zoom),
+        pageRelativeY: Math.max(0, (lastR.bottom - lastR.top) / zoom - lastWrapperOffset),
       };
     }
 
@@ -458,9 +710,6 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
     const newField = {
       id: `${draggingFromPalette.id}_${Date.now()}`,
-      // fieldKey: internal binding key. Fields sharing the same key auto-sync values
-      // at signing time (DocuSign-style). Each new field gets a UNIQUE key so it's
-      // independent by default. Duplicate/copy preserves the key → linked.
       fieldKey: `fk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       type: draggingFromPalette.id,
       label: generatedLabel,
@@ -471,6 +720,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       width: draggingFromPalette.width || 150,
       height: draggingFromPalette.height || 40,
       required: false,
+      showLabelInPreview: false,
       placeholder: '',
       helpText: '',
       validation: 'none',
@@ -490,20 +740,14 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       ...(draggingFromPalette.id === 'date' && {
         dateMode: 'auto',
         dateFormat: 'MM/DD/YYYY',
-        // Friendlier default label per Phase 53 — surfaces as tooltip / a11y name
         label: 'Date Signed',
       }),
       ...(draggingFromPalette.id === 'text' && { fieldSubType: 'single-line', defaultValue: '', characterLimit: 100 }),
       ...(draggingFromPalette.id === 'checkbox' && { checkboxLabel: 'Check to agree', checked: false }),
       ...(draggingFromPalette.id === 'radio' && {
-        // New single-option-per-field model. Multiple radio fields sharing
-        // the same `groupName` behave as a single-select group. Users drag
-        // multiple radio fields onto the canvas and place them anywhere.
         groupName: `group_${Date.now()}`,
         optionLabel: 'Option 1',
         optionValue: 'option_1',
-        // Phase 64: Compact default size for radio buttons — matches checkbox
-        // for consistent DocuSign-like UX (no manual resize needed).
         width: 30,
         height: 20
       })
@@ -550,7 +794,10 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       const pageNode = pdfCanvasRef.current.querySelector(`[data-pdf-page="${field.page}"]`);
       if (pageNode) {
         const pageRect = pageNode.getBoundingClientRect();
-        const cursorPageRelY = (e.clientY - pageRect.top) / zoom;
+        // Subtract PDF_WRAPPER_TOP_OFFSET for page 2+ to align with the PDF
+        // content edge, matching resolvePageFromPoint's coordinate system.
+        const wrapperOffset = (field.page || 1) > 1 ? PDF_WRAPPER_TOP_OFFSET : 0;
+        const cursorPageRelY = (e.clientY - pageRect.top) / zoom - wrapperOffset;
         offsetY = cursorPageRelY - field.y;
       } else {
         // HTML continuous — use measured page offsets
@@ -634,7 +881,10 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
               const off = offsets[resolved.page - 1] || 0;
               pageTopClientY = canvasRect.top + off * zoom;
             }
-            const relY = (e.clientY - pageTopClientY) / zoom - dragOffsetRef.current.y;
+            // Subtract PDF_WRAPPER_TOP_OFFSET for page 2+ so relY is measured
+            // from the PDF content edge, matching resolvePageFromPoint.
+            const dragWrapperOffset = resolved.page > 1 ? PDF_WRAPPER_TOP_OFFSET : 0;
+            const relY = (e.clientY - pageTopClientY) / zoom - dragWrapperOffset - dragOffsetRef.current.y;
             return { ...f, x: newX, y: relY, page: resolved.page };
           }
           // Pagination (page) mode: pin to currently viewed page.
@@ -959,8 +1209,29 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                     selectedFieldId === field.id ? 'bg-indigo-50 border-indigo-300 shadow-sm' : 'bg-white border-gray-200 hover:border-gray-300 hover:bg-gray-50'
                   }`}
                 >
-                  <span className="truncate flex-1 font-medium" style={{ color: config.color }}>
-                    {field.type === 'label' ? (field.text || 'Label') : field.label} <span className="text-gray-400 font-normal ml-1">Pg {field.page}</span>
+                  <span className="truncate flex-1 font-medium flex items-center gap-1.5" style={{ color: config.color }}>
+                    <span className="truncate">
+                      {field.type === 'label' ? (field.text || 'Label') : field.label}
+                    </span>
+                    {isInterlinked(field) && (
+                      <span className="inline-flex items-center gap-0.5 flex-shrink-0">
+                        <Link2
+                          className="h-3 w-3"
+                          style={{ color: getInterlinkBadgeColor(field) }}
+                          data-testid={`placed-list-interlink-${field.id}`}
+                          title={getInterlinkTooltip(field)}
+                        />
+                        {getInterlinkLinkCount(field) > 1 && (
+                          <span
+                            className="text-[9px] font-semibold leading-none"
+                            style={{ color: getInterlinkBadgeColor(field) }}
+                          >
+                            {getInterlinkLinkCount(field)}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    <span className="text-gray-400 font-normal ml-1">Pg {field.page}</span>
                   </span>
                   <button
                     onClick={(e) => { e.stopPropagation(); handleDeleteField(field.id); }}
@@ -1308,8 +1579,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       //
                       // Applies to input-capable field types only.
                       // merge / label / signing-type fields use their own paths.
+                      // Phase 81.52 — When `showLabelInPreview === false`, the
+                      // author has chosen to hide the label visually. We
+                      // suppress the label fallback (Priority 3) AND the
+                      // signing-type label suffix so the canvas mirrors what
+                      // the signer will actually see. Default value /
+                      // placeholder still render (those are content, not the
+                      // label). Static "label" type is exempt — its `text`
+                      // IS the visible content, controlled separately.
                       const inputTypes = ['text', 'date', 'signature', 'initials'];
                       const isInputType = inputTypes.includes(field.type);
+                      const hideLabelInPreview = field.showLabelInPreview === false;
 
                       const hasDefault = isInputType && !!field.defaultValue;
                       const hasPlaceholder = isInputType && !hasDefault && !!field.placeholder;
@@ -1318,7 +1598,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       let previewMode; // 'default' | 'placeholder' | 'label' | 'standard'
 
                       if (field.type === 'merge') {
-                        displayText = field.mergePattern || '{{Object.Field}}';
+                        displayText = field.showLabelInPreview === false ? '' : (field.mergePattern || '{{Object.Field}}');
                         previewMode = 'standard';
                       } else if (field.type === 'label') {
                         displayText = field.text || 'Label';
@@ -1334,8 +1614,19 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       } else if (signingTypes.has(field.type)) {
                         // Signing types (signature / initials / date) with no default/placeholder
                         const recipientLabel = getRecipientLabel(field.assigned_to || field.recipient_id);
-                        displayText = `${field.label}${recipientLabel ? ` • ${recipientLabel}` : ''}`;
+                        if (hideLabelInPreview) {
+                          // Hide the field's label; keep the recipient suffix
+                          // (it identifies WHO signs, not the label itself).
+                          displayText = recipientLabel || '';
+                        } else {
+                          displayText = `${field.label}${recipientLabel ? ` • ${recipientLabel}` : ''}`;
+                        }
                         previewMode = 'standard';
+                      } else if (hideLabelInPreview) {
+                        // Author chose to hide label in preview/signing —
+                        // render an empty box to match what the signer sees.
+                        displayText = '';
+                        previewMode = 'label';
                       } else {
                         // Priority 3: Label fallback
                         displayText = field.label;
@@ -1352,9 +1643,20 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         titleTip = parts.join('  |  ');
                       }
 
+                      // Phase 81.23 — Multi-line text rendering. When the
+                      // author picks "Multi-Line Text" in the Field Type
+                      // dropdown (`fieldSubType === 'multi-line'`), the preview
+                      // must wrap text and grow line-by-line — never truncate
+                      // to one row. Single-line text keeps the truncated 1-row
+                      // layout it had before.
+                      const isMultiLineText = field.type === 'text'
+                        && field.fieldSubType === 'multi-line';
+
                       return (
                         <div
-                          className="truncate text-xs font-medium w-full px-1"
+                          className={isMultiLineText
+                            ? 'text-xs font-medium w-full px-1 whitespace-pre-wrap break-words leading-tight overflow-hidden'
+                            : 'truncate text-xs font-medium w-full px-1'}
                           style={{
                             // Default value → normal/styled (looks like real data)
                             // Placeholder  → muted gray italic
@@ -1365,11 +1667,20 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                             fontStyle: previewMode === 'placeholder'
                               ? 'italic'
                               : (field.style?.fontStyle || undefined),
-                            textAlign: field.style?.textAlign || 'center',
-                            // Apply full custom styling for default-value and label modes
+                            textAlign: isMultiLineText
+                              ? (field.style?.textAlign || 'left')
+                              : (field.style?.textAlign || 'center'),
+                            // Apply full custom styling for default-value and label modes.
+                            // Cap the preview font size to match what resolveResponsiveFontSize
+                            // returns in the signer view so the builder preview is WYSIWYG.
                             ...(field.style && previewMode !== 'placeholder' ? {
                               fontFamily: field.style.fontFamily || undefined,
-                              fontSize: field.style.fontSize ? `${field.style.fontSize}px` : undefined,
+                              fontSize: field.style.fontSize ? (() => {
+                                const base = parseInt(field.style.fontSize) || 12;
+                                const hCap = Math.max(6, Math.floor((field.height - 2) * 0.85));
+                                const wCap = Math.max(6, Math.floor(field.width / 2.5));
+                                return `${Math.min(base, hCap, wCap)}px`;
+                              })() : undefined,
                               fontWeight: field.style.fontWeight || undefined,
                               textDecoration: field.style.textDecoration || undefined,
                             } : {})
@@ -1407,6 +1718,37 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       <span style={{ fontWeight: 600, letterSpacing: '0.02em' }}>Read Only</span>
                     </div>
                   )}
+
+                  {/* Phase 81.51 / 81.55 — Interlink indicator with color
+                      coding & count. Color: blue=outgoing only,
+                      green=incoming only, purple=any two-way. Count badge
+                      shown when total links > 1. Sits at top-left so it
+                      never collides with Read-Only badge (top-right) or
+                      Required asterisk (outside top-left). */}
+                  {isInterlinked(field) && (() => {
+                    const linkColor = getInterlinkBadgeColor(field);
+                    const linkCount = getInterlinkLinkCount(field);
+                    return (
+                      <div
+                        className="absolute top-0.5 left-0.5 flex items-center justify-center text-white rounded-full pointer-events-none select-none shadow-sm font-semibold"
+                        style={{
+                          minWidth: '14px',
+                          height: '14px',
+                          padding: linkCount > 1 ? '0 4px' : 0,
+                          backgroundColor: linkColor,
+                          zIndex: 14,
+                          fontSize: '8px',
+                          lineHeight: '14px',
+                          gap: linkCount > 1 ? '2px' : 0,
+                        }}
+                        title={getInterlinkTooltip(field)}
+                        data-testid={`canvas-interlink-${field.id}`}
+                      >
+                        <Link2 style={{ width: '8px', height: '8px' }} />
+                        {linkCount > 1 && <span>{linkCount}</span>}
+                      </div>
+                    );
+                  })()}
 
                   {/* Recipient assignment badge */}
                   {field.assigned_to && (() => {
@@ -1521,6 +1863,29 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 </div>
               )}
 
+              {/* Phase 81.51 — Show Label in Preview / Signing. Default true.
+                  When unchecked, the recipient-facing UI (preview + signing)
+                  hides the label fallback so signers see a clean field box.
+                  The label is still kept in DB / Admin Builder / Assigned
+                  Fields panel / API / logs for internal references.
+                  Available for every field type except the static "label"
+                  field whose label IS its visible content. */}
+              {selectedField.type !== 'label' && (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="field-show-label-preview"
+                    checked={selectedField.showLabelInPreview !== false}
+                    onChange={(e) => updateFieldProperty(selectedField.id, 'showLabelInPreview', e.target.checked)}
+                    className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                    data-testid="field-show-label-checkbox"
+                  />
+                  <label htmlFor="field-show-label-preview" className="text-sm font-medium text-gray-700">
+                    Show Label in Preview / Signing
+                  </label>
+                </div>
+              )}
+
               {/* Assign to Recipient */}
               {selectedField.type !== 'label' && selectedField.type !== 'merge' && templateRecipients.length > 0 && (
                 <div className="border-t border-gray-100 pt-3 mt-1" data-testid="field-assignment-section">
@@ -1588,7 +1953,15 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       <label className="block text-[10px] font-medium text-gray-500 mb-1">Font Size</label>
                       <select
                         value={selectedField.style?.fontSize || '12'}
-                        onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), fontSize: e.target.value })}
+                        onChange={(e) => {
+                          const newFs = parseInt(e.target.value) || 12;
+                          const newStyle = { ...(selectedField.style || {}), fontSize: e.target.value };
+                          // Auto-grow field height to fit the new font (py-1=8px + border-2=4px = 12px overhead in signer view).
+                          const minH = newFs + 12;
+                          const updates = { style: newStyle };
+                          if ((selectedField.height || 40) < minH) updates.height = minH;
+                          updateFieldProperties(selectedField.id, updates);
+                        }}
                         className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded-md focus:ring-1 focus:ring-indigo-500"
                         data-testid="field-font-size"
                       >
@@ -1686,6 +2059,299 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   </select>
                 </div>
               )}
+
+              {/* Phase 81.49 / Phase 2 — Interlinked Fields (Package flow).
+                  Supported field types: text, date, checkbox, radio. */}
+              {(['text', 'date', 'checkbox', 'radio'].includes(selectedField.type)) && (
+                <div className="border-t border-gray-200 pt-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs font-semibold text-gray-700 uppercase tracking-wide flex items-center gap-1.5">
+                      <span className="text-indigo-500">🔗</span> Interlinked Field
+                    </label>
+                    <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(selectedField.linked_to?.enabled)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            loadInterlinkTemplates();
+                            updateFieldProperty(selectedField.id, 'linked_to', {
+                              enabled: true,
+                              template_id: '',
+                              field_id: '',
+                              sync_scope: 'same_recipient_only',
+                              direction: 'one_way',
+                              read_only_target: true,
+                            });
+                          } else {
+                            updateFieldProperty(selectedField.id, 'linked_to', null);
+                          }
+                        }}
+                        className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                        data-testid="field-interlink-toggle"
+                      />
+                      <span className="text-xs font-medium text-gray-600">Enable</span>
+                    </label>
+                  </div>
+                  {selectedField.linked_to?.enabled && (
+                    <div className="space-y-2 bg-indigo-50/40 border border-indigo-100 rounded-md p-2.5">
+                      <p className="text-[10px] text-gray-600 leading-tight">
+                        Sync this field's value to a matching field in another template. Active only when both templates ship in the same package and are assigned to the same recipient.
+                      </p>
+                      <div>
+                        <label className="block text-[10px] font-semibold text-gray-600 mb-0.5">Linked Template</label>
+                        <select
+                          value={selectedField.linked_to?.template_id || ''}
+                          onChange={(e) => {
+                            const tplId = e.target.value;
+                            loadInterlinkTargetFields(tplId);
+                            updateFieldProperty(selectedField.id, 'linked_to', {
+                              ...(selectedField.linked_to || {}),
+                              template_id: tplId,
+                              field_id: '',
+                            });
+                          }}
+                          onFocus={loadInterlinkTemplates}
+                          className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 bg-white"
+                          data-testid="field-interlink-template"
+                        >
+                          <option value="">{interlinkTemplatesLoading ? 'Loading...' : '-- Select template --'}</option>
+                          {interlinkTemplates.map(t => (
+                            <option key={t.id} value={t.id}>{t.name} {t.version ? `(v${t.version})` : ''}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {selectedField.linked_to?.template_id && (
+                        <div>
+                          <label className="block text-[10px] font-semibold text-gray-600 mb-0.5">
+                            {selectedField.type === 'radio' ? 'Linked Group' : 'Linked Field'}
+                          </label>
+                          <select
+                            value={selectedField.linked_to?.field_id || ''}
+                            onChange={(e) => updateFieldProperty(selectedField.id, 'linked_to', {
+                              ...(selectedField.linked_to || {}),
+                              field_id: e.target.value,
+                            })}
+                            onFocus={() => loadInterlinkTargetFields(selectedField.linked_to?.template_id)}
+                            className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 bg-white"
+                            data-testid="field-interlink-field"
+                          >
+                            <option value="">-- Select {selectedField.type === 'radio' ? 'group' : 'field'} --</option>
+                            {(interlinkTargetFields[selectedField.linked_to.template_id] || [])
+                              .filter(f => f.type === selectedField.type)
+                              .map(f => (
+                                <option key={f.id} value={f.id}>{f.label}{f.type !== 'radio' ? ` (${f.type})` : ''}</option>
+                              ))}
+                          </select>
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] text-gray-500">Sync Scope</span>
+                        <span className="text-[10px] font-semibold text-indigo-700 bg-white border border-indigo-200 rounded px-1.5 py-0.5">Same Recipient Only</span>
+                      </div>
+
+                      {/* Phase 2 — Direction toggle. One-Way is default; Two-Way
+                          enables bidirectional sync. Mutually exclusive with
+                          "Lock linked target" — picking Two-Way auto-clears
+                          the lock, picking Lock auto-resets to one-way.
+                          Conflict rule: last-saved change wins. */}
+                      <div>
+                        <label className="block text-[10px] font-semibold text-gray-600 mb-1">Direction</label>
+                        <div className="flex gap-1" data-testid="field-interlink-direction">
+                          {[
+                            { id: 'one_way', label: 'One-Way' },
+                            { id: 'two_way', label: 'Two-Way' },
+                          ].map(d => {
+                            const active = (selectedField.linked_to?.direction || 'one_way') === d.id;
+                            return (
+                              <button
+                                key={d.id}
+                                type="button"
+                                onClick={() => {
+                                  // Picking Two-Way force-clears read_only_target.
+                                  const patch = { direction: d.id };
+                                  if (d.id === 'two_way') patch.read_only_target = false;
+                                  updateFieldProperty(selectedField.id, 'linked_to', {
+                                    ...(selectedField.linked_to || {}),
+                                    ...patch,
+                                  });
+                                }}
+                                className={`flex-1 px-2 py-1 text-[10px] font-semibold rounded border transition-colors ${
+                                  active
+                                    ? 'bg-indigo-600 text-white border-indigo-600'
+                                    : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-300'
+                                }`}
+                                data-testid={`field-interlink-direction-${d.id}`}
+                              >
+                                {d.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {(selectedField.linked_to?.direction || 'one_way') === 'two_way' && (
+                          <p className="text-[10px] text-gray-500 mt-1 leading-tight">
+                            Two-Way: editing either side updates the other. Last save wins on conflicts.
+                          </p>
+                        )}
+                      </div>
+
+                      <label
+                        className={`flex items-center gap-1.5 ${
+                          (selectedField.linked_to?.direction || 'one_way') === 'two_way'
+                            ? 'opacity-50 cursor-not-allowed'
+                            : 'cursor-pointer'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={Boolean(selectedField.linked_to?.read_only_target)}
+                          disabled={(selectedField.linked_to?.direction || 'one_way') === 'two_way'}
+                          onChange={(e) => updateFieldProperty(selectedField.id, 'linked_to', {
+                            ...(selectedField.linked_to || {}),
+                            read_only_target: e.target.checked,
+                            // If user re-locks, force direction back to one_way.
+                            ...(e.target.checked ? { direction: 'one_way' } : {}),
+                          })}
+                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                          data-testid="field-interlink-readonly"
+                        />
+                        <span className="text-[10px] font-medium text-gray-600">
+                          Lock linked target (read-only during signing)
+                          {(selectedField.linked_to?.direction || 'one_way') === 'two_way' && (
+                            <span className="text-gray-400"> — disabled in Two-Way mode</span>
+                          )}
+                        </span>
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Phase 81.54 — Linked from OTHER templates (incoming links).
+                  Surfaces every other template whose field_placements
+                  declare a `linked_to.field_id == this.id`. Shown as a
+                  read-only list with inline Direction toggle + Remove. */}
+              {(['text', 'date', 'checkbox', 'radio'].includes(selectedField.type)) && (() => {
+                const cache = incomingLinks[selectedField.id] || {};
+                const items = cache.items || [];
+                if (cache.loading) {
+                  return (
+                    <div className="border-t border-gray-200 pt-3">
+                      <label className="text-xs font-semibold text-gray-700 uppercase tracking-wide flex items-center gap-1.5">
+                        <span className="text-indigo-500">🔗</span> Linked from other templates
+                      </label>
+                      <p className="text-[10px] text-gray-400 mt-1">Loading…</p>
+                    </div>
+                  );
+                }
+                if (items.length === 0) return null;
+                return (
+                  <div className="border-t border-gray-200 pt-3" data-testid="field-incoming-links">
+                    <div className="flex items-center justify-between mb-2">
+                      <label className="text-xs font-semibold text-gray-700 uppercase tracking-wide flex items-center gap-1.5">
+                        <span className="text-indigo-500">🔗</span> Linked from other templates
+                      </label>
+                      <span className="text-[10px] font-medium text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5">
+                        {items.length} {items.length === 1 ? 'link' : 'links'}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-gray-500 mb-2 leading-tight">
+                      These templates' fields point INTO this one. Edit direction or remove the link without leaving this template.
+                    </p>
+                    <ul className="space-y-1.5" data-testid="field-incoming-links-list">
+                      {items.map((it, idx) => (
+                        <li
+                          key={`${it.source_template_id}_${it.source_field_id}_${idx}`}
+                          className="bg-indigo-50/40 border border-indigo-100 rounded-md p-2 text-[11px]"
+                          data-testid={`incoming-link-item-${idx}`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="font-semibold text-gray-800 truncate">
+                                {it.source_template_name}
+                                {it.source_template_version ? ` (v${it.source_template_version})` : ''}
+                              </div>
+                              <div className="text-gray-600 truncate">
+                                → {it.source_field_label}
+                                <span className="text-gray-400"> · {it.source_field_type}</span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                if (!window.confirm(`Remove the link from "${it.source_template_name} → ${it.source_field_label}"? This will not delete the field — it will only clear the interlink config on the source template.`)) return;
+                                await patchRemoteFieldLink(
+                                  it.source_template_id,
+                                  it.source_field_id,
+                                  null,
+                                  selectedField.id,
+                                );
+                              }}
+                              className="text-[10px] font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 rounded px-1.5 py-0.5 border border-red-200 flex-shrink-0"
+                              data-testid={`incoming-link-remove-${idx}`}
+                              title="Remove this incoming link"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                          <div className="mt-1.5 flex items-center gap-1" data-testid={`incoming-link-direction-${idx}`}>
+                            {[
+                              { id: 'one_way', label: 'One-Way' },
+                              { id: 'two_way', label: 'Two-Way' },
+                            ].map(d => {
+                              const active = (it.direction || 'one_way') === d.id;
+                              return (
+                                <button
+                                  key={d.id}
+                                  type="button"
+                                  onClick={async () => {
+                                    if (active) return;
+                                    await patchRemoteFieldLink(
+                                      it.source_template_id,
+                                      it.source_field_id,
+                                      { direction: d.id },
+                                      selectedField.id,
+                                    );
+                                  }}
+                                  className={`flex-1 px-2 py-0.5 text-[10px] font-semibold rounded border transition-colors ${
+                                    active
+                                      ? 'bg-indigo-600 text-white border-indigo-600'
+                                      : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-300'
+                                  }`}
+                                  data-testid={`incoming-link-direction-${idx}-${d.id}`}
+                                >
+                                  {d.label}
+                                </button>
+                              );
+                            })}
+                            <label
+                              className="ml-1.5 inline-flex items-center gap-1 cursor-pointer"
+                              title="Lock target as read-only during signing"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={Boolean(it.read_only_target)}
+                                disabled={it.direction === 'two_way'}
+                                onChange={async (e) => {
+                                  await patchRemoteFieldLink(
+                                    it.source_template_id,
+                                    it.source_field_id,
+                                    { read_only_target: e.target.checked },
+                                    selectedField.id,
+                                  );
+                                }}
+                                className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 h-3 w-3"
+                                data-testid={`incoming-link-lock-${idx}`}
+                              />
+                              <span className="text-[10px] text-gray-600">Lock</span>
+                            </label>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })()}
 
               {/* Signature Size */}
               {selectedField.type === 'signature' && (
@@ -1794,20 +2460,51 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       <span className="text-xs font-medium text-gray-700">Convert to input if value is empty</span>
                     </label>
                     {selectedField.fallbackToInput && (
-                      <div className="mt-2">
-                        <label className="block text-[10px] font-medium text-gray-500 mb-1">Input Type</label>
-                        <SearchableSelect
-                          options={[
-                            { label: 'Text Field', value: 'text' },
-                            { label: 'Date Picker', value: 'date' },
-                            { label: 'Number Input', value: 'number' },
-                            { label: 'Checkbox', value: 'checkbox' }
-                          ]}
-                          value={selectedField.fallbackInputType || 'text'}
-                          onChange={(val) => updateFieldProperty(selectedField.id, 'fallbackInputType', val)}
-                          placeholder="Select type..."
-                          data-testid="merge-fallback-type"
-                        />
+                      <div className="mt-2 space-y-2">
+                        <div>
+                          <label className="block text-[10px] font-medium text-gray-500 mb-1">Input Type</label>
+                          <SearchableSelect
+                            options={[
+                              { label: 'Text Field', value: 'text' },
+                              { label: 'Date Picker', value: 'date' },
+                              { label: 'Number Input', value: 'number' },
+                              { label: 'Checkbox', value: 'checkbox' }
+                            ]}
+                            value={selectedField.fallbackInputType || 'text'}
+                            onChange={(val) => {
+                              updateFieldProperty(selectedField.id, 'fallbackInputType', val);
+                              // Phase 81.10 — when Date Picker is selected for
+                              // the first time, auto-default the date format
+                              // to MM/DD/YYYY so the right-panel shows a valid
+                              // value and signers see a consistent placeholder.
+                              if (val === 'date' && !selectedField.dateFormat) {
+                                updateFieldProperty(selectedField.id, 'dateFormat', 'MM/DD/YYYY');
+                              }
+                            }}
+                            placeholder="Select type..."
+                            data-testid="merge-fallback-type"
+                          />
+                        </div>
+                        {(selectedField.fallbackInputType || 'text') === 'date' && (
+                          <div data-testid="merge-fallback-date-format-row">
+                            <label className="block text-[10px] font-medium text-gray-500 mb-1">Date Format</label>
+                            <select
+                              data-testid="merge-fallback-date-format"
+                              value={selectedField.dateFormat || 'MM/DD/YYYY'}
+                              onChange={(e) => updateFieldProperty(selectedField.id, 'dateFormat', e.target.value)}
+                              className="w-full px-2.5 py-1.5 text-xs border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                            >
+                              <option value="MM/DD/YYYY">MM/DD/YYYY</option>
+                              <option value="DD/MM/YYYY">DD/MM/YYYY</option>
+                              <option value="YYYY/MM/DD">YYYY/MM/DD</option>
+                              <option value="MM-DD-YYYY">MM-DD-YYYY</option>
+                              <option value="DD-MM-YYYY">DD-MM-YYYY</option>
+                              <option value="YYYY-MM-DD">YYYY-MM-DD</option>
+                              <option value="MM/DD/YY">MM/DD/YY</option>
+                              <option value="DD/MM/YY">DD/MM/YY</option>
+                            </select>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>

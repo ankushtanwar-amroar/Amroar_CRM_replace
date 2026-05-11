@@ -35,28 +35,65 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _convert_docx_to_pdf(docx_bytes: bytes) -> bytes:
-    """Convert DOCX to PDF using LibreOffice headless. Returns PDF bytes or None."""
+def _convert_doc_to_pdf(doc_bytes: bytes, file_extension: str = "docx") -> Optional[bytes]:
+    """
+    Phase 81.19 — Convert DOC/DOCX to PDF using LibreOffice headless.
+
+    Returns PDF bytes on success, None on failure. Raises nothing — caller
+    decides how to surface the error to the user.
+
+    LibreOffice is now an installed system dependency (high-fidelity
+    rendering preserves fonts, embedded images/logos, tables, margins,
+    headers/footers, page breaks). Each invocation runs in its own
+    user-profile so concurrent conversions don't collide.
+    """
+    file_extension = (file_extension or "docx").lstrip(".").lower()
+    if file_extension not in ("doc", "docx"):
+        return None
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        docx_path = os.path.join(tmpdir, "input.docx")
-        with open(docx_path, "wb") as f:
-            f.write(docx_bytes)
-
-        result = subprocess.run(
-            ["/usr/bin/libreoffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, docx_path],
-            capture_output=True, timeout=60
-        )
-        if result.returncode != 0:
-            logger.warning(f"LibreOffice conversion failed: {result.stderr.decode()}")
+        in_name = f"input.{file_extension}"
+        in_path = os.path.join(tmpdir, in_name)
+        with open(in_path, "wb") as f:
+            f.write(doc_bytes)
+        # Per-call user profile to avoid concurrency issues + a pinned binary path.
+        profile_dir = os.path.join(tmpdir, "lo-profile")
+        try:
+            result = subprocess.run(
+                [
+                    "/usr/bin/libreoffice",
+                    f"-env:UserInstallation=file://{profile_dir}",
+                    "--headless",
+                    "--norestore",
+                    "--nologo",
+                    "--nofirststartwizard",
+                    "--convert-to", "pdf",
+                    "--outdir", tmpdir,
+                    in_path,
+                ],
+                capture_output=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("LibreOffice DOC/DOCX→PDF conversion timed out (>120s)")
             return None
-
+        if result.returncode != 0:
+            try:
+                stderr = result.stderr.decode(errors="ignore")
+            except Exception:
+                stderr = "<undecodable>"
+            logger.warning(f"LibreOffice conversion failed (rc={result.returncode}): {stderr}")
+            return None
         pdf_path = os.path.join(tmpdir, "input.pdf")
         if not os.path.exists(pdf_path):
-            logger.warning("LibreOffice did not produce a PDF output")
+            logger.warning("LibreOffice conversion produced no PDF")
             return None
-
         with open(pdf_path, "rb") as f:
             return f.read()
+
+
+# Back-compat alias — older callers passed only DOCX bytes.
+def _convert_docx_to_pdf(docx_bytes: bytes) -> Optional[bytes]:
+    return _convert_doc_to_pdf(docx_bytes, "docx")
 
 
 
@@ -214,6 +251,223 @@ async def list_latest_active_templates(
     return result
 
 
+
+
+@router.get("/templates-incoming-links")
+async def list_incoming_links(
+    field_id: str,
+    exclude_template_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Phase 81.54 — List every other template (in the same tenant) whose
+    field_placements contain a `linked_to.field_id == field_id`.
+    Used by the Visual Builder Properties panel so the author of the
+    *target* template can see ALL templates linking INTO this field
+    without leaving the builder.
+
+    Returns:
+      {
+        "incoming_links": [
+          {
+            "source_template_id": str,
+            "source_template_name": str,
+            "source_template_version": int,
+            "source_field_id": str,
+            "source_field_label": str,
+            "source_field_type": str,
+            "direction": "one_way" | "two_way",
+            "read_only_target": bool,
+            "sync_scope": str,
+          }, ...
+        ]
+      }
+    """
+    if not field_id:
+        raise HTTPException(status_code=400, detail="field_id is required")
+
+    # Mongo query: tenant-scoped, with at least one placement that
+    # references this field_id via linked_to.field_id. We use
+    # $elemMatch so we only retrieve templates that actually contain
+    # such a placement.
+    query = {
+        "tenant_id": current_user.tenant_id,
+        "field_placements": {
+            "$elemMatch": {
+                "linked_to.enabled": True,
+                "linked_to.field_id": field_id,
+            }
+        },
+    }
+    if exclude_template_id:
+        query["id"] = {"$ne": exclude_template_id}
+
+    cursor = db.docflow_templates.find(
+        query,
+        {
+            "_id": 0,
+            "id": 1,
+            "name": 1,
+            "version": 1,
+            "field_placements": 1,
+        },
+    )
+    templates = await cursor.to_list(length=500)
+
+    out = []
+    for tpl in templates:
+        for p in (tpl.get("field_placements") or []):
+            link = p.get("linked_to") or {}
+            if not (link.get("enabled") and link.get("field_id") == field_id):
+                continue
+            out.append({
+                "source_template_id": tpl.get("id"),
+                "source_template_name": tpl.get("name"),
+                "source_template_version": tpl.get("version", 1),
+                "source_field_id": p.get("id"),
+                "source_field_label": p.get("label") or p.get("name") or "Untitled",
+                "source_field_type": (p.get("type") or p.get("field_type") or "").lower(),
+                "direction": link.get("direction", "one_way"),
+                "read_only_target": bool(link.get("read_only_target", False)),
+                "sync_scope": link.get("sync_scope", "same_recipient_only"),
+            })
+
+    return {"incoming_links": out}
+
+
+@router.patch("/templates/{template_id}/fields/{field_id}/linked-to")
+async def update_field_linked_to(
+    template_id: str,
+    field_id: str,
+    payload: dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Phase 81.54 — Surgical update of a single field's `linked_to`
+    config. Used by the "Linked from" UI in Template B (the target)
+    to edit/remove the link declared on Template A's (the source)
+    field without round-tripping the entire template payload.
+
+    payload:
+      {
+        "linked_to": null            // remove the link
+        OR
+        "linked_to": { ...partial }  // shallow-merge into existing
+      }
+    """
+    template = await template_service.get_template(template_id, current_user.tenant_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    placements = template.get("field_placements") or []
+    target_idx = next((i for i, p in enumerate(placements) if p.get("id") == field_id), -1)
+    if target_idx < 0:
+        raise HTTPException(status_code=404, detail="Field not found on template")
+
+    raw_link = payload.get("linked_to", "__missing__")
+    if raw_link == "__missing__":
+        raise HTTPException(status_code=400, detail="payload.linked_to is required (use null to remove)")
+
+    if raw_link is None:
+        # Clear the link entirely.
+        if "linked_to" in placements[target_idx]:
+            placements[target_idx]["linked_to"] = None
+    else:
+        # Shallow-merge so callers can patch e.g. only `direction`.
+        existing = placements[target_idx].get("linked_to") or {}
+        merged = {**existing, **raw_link}
+        # Mutual exclusivity: Two-Way clears read_only_target;
+        # read_only_target=True forces direction=one_way.
+        if merged.get("direction") == "two_way":
+            merged["read_only_target"] = False
+        if merged.get("read_only_target") is True:
+            merged["direction"] = "one_way"
+        placements[target_idx]["linked_to"] = merged
+
+    await db.docflow_templates.update_one(
+        {"id": template_id, "tenant_id": current_user.tenant_id},
+        {
+            "$set": {
+                "field_placements": placements,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+    )
+
+    return {
+        "id": template_id,
+        "field_id": field_id,
+        "linked_to": placements[target_idx].get("linked_to"),
+    }
+
+
+@router.get("/templates/{template_id}/all-incoming-links")
+async def list_template_incoming_links(
+    template_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Phase 81.55 — Bulk version of /templates-incoming-links. Returns a
+    field-id-keyed map of incoming links for EVERY field on the given
+    template, in a single round-trip. Used by the Visual Builder canvas
+    to render link badges on every field without N+1 queries.
+
+    Returns:
+      {
+        "incoming_links_map": {
+          "<field_id>": [ { source_template_id, ..., direction, ... }, ... ],
+          ...
+        }
+      }
+    """
+    template = await template_service.get_template(template_id, current_user.tenant_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Field ids on THIS template — only these can be link targets.
+    field_ids = [
+        p.get("id") for p in (template.get("field_placements") or [])
+        if p.get("id")
+    ]
+    if not field_ids:
+        return {"incoming_links_map": {}}
+
+    cursor = db.docflow_templates.find(
+        {
+            "tenant_id": current_user.tenant_id,
+            "id": {"$ne": template_id},
+            "field_placements": {
+                "$elemMatch": {
+                    "linked_to.enabled": True,
+                    "linked_to.field_id": {"$in": field_ids},
+                }
+            },
+        },
+        {"_id": 0, "id": 1, "name": 1, "version": 1, "field_placements": 1},
+    )
+    other_templates = await cursor.to_list(length=500)
+
+    target_set = set(field_ids)
+    out = {fid: [] for fid in field_ids}
+    for tpl in other_templates:
+        for p in (tpl.get("field_placements") or []):
+            link = p.get("linked_to") or {}
+            tgt_fid = link.get("field_id")
+            if not (link.get("enabled") and tgt_fid in target_set):
+                continue
+            out[tgt_fid].append({
+                "source_template_id": tpl.get("id"),
+                "source_template_name": tpl.get("name"),
+                "source_template_version": tpl.get("version", 1),
+                "source_field_id": p.get("id"),
+                "source_field_label": p.get("label") or p.get("name") or "Untitled",
+                "source_field_type": (p.get("type") or p.get("field_type") or "").lower(),
+                "direction": link.get("direction", "one_way"),
+                "read_only_target": bool(link.get("read_only_target", False)),
+                "sync_scope": link.get("sync_scope", "same_recipient_only"),
+            })
+
+    return {"incoming_links_map": out}
 
 
 @router.get("/templates/{template_id}")
@@ -486,7 +740,43 @@ async def parse_template_fields(
 
     pdf_url = template.get("file_url")
     if not pdf_url:
-        raise HTTPException(status_code=400, detail="Template does not contain a PDF URL")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "template_file_not_ready",
+                "message": "Template has no PDF file URL. Re-upload the source document before parsing.",
+                "template_id": template_id,
+            },
+        )
+
+    # Phase 81.74 — fast-fail guard: verify the underlying S3 file actually
+    # exists BEFORE calling pdf_url_to_html, which otherwise raises a 500
+    # on missing/403/404 URLs and sends the frontend into a retry loop.
+    # Phase 81.75 — also try the converted-PDF fallback key before giving up.
+    s3_key = template.get("s3_key")
+    if s3_key:
+        try:
+            from ..services.s3_service import S3Service
+            _s3 = S3Service()
+            alive = _s3.object_exists(s3_key)
+            if not alive:
+                fb = template.get("uploaded_pdf_s3_key") or template.get("pdf_s3_key")
+                if fb and fb != s3_key and _s3.object_exists(fb):
+                    # Use the converted-PDF's presigned URL for parsing.
+                    pdf_url = _s3.get_file_url(fb, expiration=3600) or pdf_url
+                else:
+                    raise HTTPException(
+                        status_code=410,
+                        detail={
+                            "code": "template_file_missing",
+                            "message": "Template PDF file is missing from storage. Merge field parsing unavailable.",
+                            "template_id": template_id,
+                        },
+                    )
+        except HTTPException:
+            raise
+        except Exception as _probe_err:
+            logger.warning(f"parse-fields: S3 probe failed for {template_id}: {_probe_err}")
 
     try:
         # Step 1 — Convert PDF → HTML
@@ -522,8 +812,11 @@ async def upload_template_file(
     current_user: User = Depends(get_current_user)
 ):
     """Upload PDF or DOCX file as template"""
-    # Validate file type
-    allowed_extensions = ['.pdf', '.docx']
+    # Phase 81.19 — also accept legacy .doc in addition to .pdf and .docx.
+    # Both .doc and .docx are converted to PDF server-side via LibreOffice
+    # headless for high-fidelity rendering (fonts, logos, tables, margins,
+    # headers/footers, page breaks all preserved).
+    allowed_extensions = ['.pdf', '.docx', '.doc']
     file_ext = os.path.splitext(file.filename)[1].lower()
 
     if file_ext not in allowed_extensions:
@@ -589,11 +882,13 @@ async def upload_template_file(
         if html_content and len(html_content) < 5 * 1024 * 1024:
             template_data["html_content"] = html_content
 
-        # For DOCX uploads, convert to PDF using LibreOffice for pixel-perfect rendering
+        # For DOC and DOCX uploads, convert to PDF using LibreOffice for
+        # pixel-perfect high-fidelity rendering. Phase 81.19 — same converter
+        # path now handles legacy .doc files too.
         uploaded_pdf_s3_key = None
-        if file_ext == '.docx':
+        if file_ext in ('.docx', '.doc'):
             try:
-                pdf_bytes = _convert_docx_to_pdf(content)
+                pdf_bytes = _convert_doc_to_pdf(content, file_ext.lstrip('.'))
                 if pdf_bytes:
                     pdf_filename = os.path.splitext(file.filename)[0] + '.pdf'
                     uploaded_pdf_s3_key = s3_service.upload_template_file(
@@ -611,7 +906,19 @@ async def upload_template_file(
                             template_data["page_count"] = len(reader.pages)
                         except Exception:
                             pass
-                        logger.info(f"DOCX converted to PDF and uploaded: {uploaded_pdf_s3_key}")
+                        logger.info(f"{file_ext.upper()} converted to PDF and uploaded: {uploaded_pdf_s3_key}")
+                else:
+                    # Phase 81.19 — surface the failure so the UI can show a
+                    # clear actionable message instead of silently rendering a
+                    # broken layout.
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"Failed to convert {file_ext.upper().lstrip('.')} to PDF. "
+                            "The file may be corrupted, password-protected, or contain "
+                            "unsupported content. Try opening it in Word and re-saving as PDF."
+                        ),
+                    )
             except Exception as e:
                 logger.warning(f"DOCX to PDF conversion failed (non-critical): {e}")
 
@@ -665,21 +972,21 @@ async def generate_pdf_from_docx(
         pdf_url = s3_service.get_template_url(template["uploaded_pdf_s3_key"], expiration=604800)
         return {"success": True, "pdf_url": pdf_url, "uploaded_pdf_s3_key": template["uploaded_pdf_s3_key"]}
 
-    if template.get("file_type") != "docx" or not template.get("s3_key"):
-        raise HTTPException(status_code=400, detail="Template is not a DOCX file or has no S3 key")
+    if template.get("file_type") not in ("docx", "doc") or not template.get("s3_key"):
+        raise HTTPException(status_code=400, detail="Template is not a DOC/DOCX file or has no S3 key")
 
     from ..services.s3_service import S3Service
     s3_service = S3Service()
 
-    # Download DOCX from S3
+    # Download DOCX/DOC from S3
     docx_bytes = s3_service.download_file(template["s3_key"])
     if not docx_bytes:
         raise HTTPException(status_code=500, detail="Failed to download DOCX from storage")
 
     # Convert to PDF
-    pdf_bytes = _convert_docx_to_pdf(docx_bytes)
+    pdf_bytes = _convert_doc_to_pdf(docx_bytes, template.get("file_type", "docx"))
     if not pdf_bytes:
-        raise HTTPException(status_code=500, detail="DOCX to PDF conversion failed")
+        raise HTTPException(status_code=500, detail="DOC/DOCX to PDF conversion failed")
 
     # Upload PDF to S3
     pdf_filename = os.path.splitext(template.get("original_filename", "document.docx"))[0] + ".pdf"

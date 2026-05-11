@@ -3,11 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, Send, Clock, CheckCircle2, XCircle, AlertTriangle,
   Mail, Link2, Users, Download, Activity, Loader2, FileText,
-  Copy, ExternalLink, ChevronDown, Layers, ArrowDownUp, Ban, Eye
+  Copy, ExternalLink, ChevronDown, Layers, ArrowDownUp, Ban, Eye, RotateCcw
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import { Badge } from '../../components/ui/badge';
+import ConfirmDialog from '../components/ConfirmDialog';
+import SubmissionDocumentsModal from '../components/SubmissionDocumentsModal';
 
 const STATUS_CFG = {
   draft: { bg: 'bg-slate-100', text: 'text-slate-700', dot: 'bg-slate-400', label: 'Draft' },
@@ -63,6 +65,43 @@ const RunDetailPage = () => {
   const [downloadingCombined, setDownloadingCombined] = useState(false);
   const [downloadingDoc, setDownloadingDoc] = useState(null);
   const [templateNames, setTemplateNames] = useState({});
+  // Phase 81.42 — per-recipient action loading flags so buttons disable while
+  // their specific operation is in-flight (prevents double-clicks).
+  const [resendingId, setResendingId] = useState(null);
+  const [voidingId, setVoidingId] = useState(null);
+  const [unvoidingId, setUnvoidingId] = useState(null);
+
+  // Phase 81.43 — Custom confirmation dialog state (replaces window.confirm).
+  // `action` is one of 'resend' | 'void' | 'unvoid'; `recipient` is the row
+  // the user clicked. `loading` is toggled while the API call is in-flight.
+  const [confirmState, setConfirmState] = useState({
+    open: false, action: null, recipient: null, loading: false,
+  });
+
+  // Phase 81.77 — Submission documents modal (View + individual downloads).
+  const [submissionModal, setSubmissionModal] = useState({ open: false, submission: null });
+  const [downloadingSubCombined, setDownloadingSubCombined] = useState(null); // submission id
+
+  const handleSubmissionCombinedDownload = async (sub) => {
+    try {
+      setDownloadingSubCombined(sub.id);
+      const blob = await docflowService.downloadSubmissionCombined(packageId, runId, sub.id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safe = (sub.name || 'submission').replace(/\s+/g, '_');
+      a.download = `${safe}_combined_signed.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success('Combined PDF downloaded');
+    } catch (e) {
+      toast.error(e.message || 'Failed to download combined PDF');
+    } finally {
+      setDownloadingSubCombined(null);
+    }
+  };
 
   useEffect(() => { loadRun(); }, [packageId, runId]);
 
@@ -103,6 +142,64 @@ const RunDetailPage = () => {
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
     toast.success('Copied!');
+  };
+
+  // Phase 81.42/81.43 — Package RUN recipient actions. Each handler simply
+  // opens the ConfirmDialog; `handleConfirmExecute()` fires the API call
+  // once the user confirms.
+  const handleResendRecipient = (recipient) => {
+    if (!recipient?.id) return;
+    setConfirmState({ open: true, action: 'resend', recipient, loading: false });
+  };
+
+  const handleVoidRecipient = (recipient) => {
+    if (!recipient?.id) return;
+    setConfirmState({ open: true, action: 'void', recipient, loading: false });
+  };
+
+  const handleUnvoidRecipient = (recipient) => {
+    if (!recipient?.id) return;
+    setConfirmState({ open: true, action: 'unvoid', recipient, loading: false });
+  };
+
+  const handleConfirmClose = () => {
+    if (confirmState.loading) return;  // don't dismiss mid-flight
+    setConfirmState({ open: false, action: null, recipient: null, loading: false });
+  };
+
+  const handleConfirmExecute = async () => {
+    const { action, recipient } = confirmState;
+    if (!action || !recipient) return;
+    setConfirmState(prev => ({ ...prev, loading: true }));
+    try {
+      if (action === 'resend') {
+        setResendingId(recipient.id);
+        await docflowService.resendRunRecipientEmail(run.id, recipient.id);
+        toast.success('Signing email resent');
+      } else if (action === 'void') {
+        setVoidingId(recipient.id);
+        await docflowService.voidRunRecipient(run.id, recipient.id);
+        toast.success('Recipient voided');
+      } else if (action === 'unvoid') {
+        setUnvoidingId(recipient.id);
+        await docflowService.unvoidRunRecipient(run.id, recipient.id);
+        toast.success('Recipient restored');
+      }
+      setConfirmState({ open: false, action: null, recipient: null, loading: false });
+      await loadRun(true);
+    } catch (e) {
+      const fallback = {
+        resend: 'Failed to resend email',
+        void: 'Failed to void recipient',
+        unvoid: 'Failed to unvoid recipient',
+      }[action] || 'Action failed';
+      toast.error(e?.response?.data?.detail || fallback);
+      setConfirmState(prev => ({ ...prev, loading: false }));
+    } finally {
+      setResendingId(null);
+      setVoidingId(null);
+      setUnvoidingId(null);
+    }
   };
 
   const handleDownloadCombined = async () => {
@@ -354,14 +451,15 @@ const RunDetailPage = () => {
                       <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Email</th>
                       <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Submitted</th>
                       <th className="text-left px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Status</th>
-                      <th className="text-right px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Document</th>
+                      <th className="text-right px-5 py-3 text-xs font-semibold text-gray-500 uppercase">Documents</th>
                     </tr>
                   </thead>
                   <tbody>
                     {submissions.map((sub, i) => {
-                      const hasSignedDocs = sub.signed_documents?.length > 0;
-                      const signedUrl = hasSignedDocs ? sub.signed_documents[0]?.signed_file_url : null;
+                      const hasSignedDocs = (sub.signed_documents?.length || 0) > 0;
+                      const docCount = sub.signed_documents?.length || 0;
                       const subStatus = sub.status === 'completed' ? 'completed' : (sub.submitted_at ? 'completed' : 'pending');
+                      const isDownloadingThis = downloadingSubCombined === sub.id;
                       return (
                         <tr key={sub.id || sub.session_id || i} className="border-b border-gray-50 hover:bg-gray-50/50" data-testid={`submission-row-${i}`}>
                           <td className="px-5 py-3.5 text-sm font-medium text-gray-800">{sub.name || sub.user_name || '—'}</td>
@@ -369,11 +467,28 @@ const RunDetailPage = () => {
                           <td className="px-5 py-3.5 text-xs text-gray-500">{fmt(sub.submitted_at || sub.signed_at)}</td>
                           <td className="px-5 py-3.5"><StatusBadge status={subStatus} /></td>
                           <td className="px-5 py-3.5 text-right">
-                            {signedUrl ? (
-                              <a href={signedUrl} target="_blank" rel="noopener noreferrer"
-                                className="inline-flex items-center gap-1 text-xs text-indigo-600 font-medium hover:text-indigo-700" data-testid={`download-signed-${i}`}>
-                                <Download className="h-3 w-3" /> Download
-                              </a>
+                            {hasSignedDocs ? (
+                              <div className="inline-flex items-center gap-2" data-testid={`submission-actions-${i}`}>
+                                <button
+                                  onClick={() => setSubmissionModal({ open: true, submission: sub })}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-gray-100 rounded-lg hover:bg-gray-200"
+                                  data-testid={`view-submission-${i}`}
+                                  title={`View ${docCount} document${docCount !== 1 ? 's' : ''}`}
+                                >
+                                  <Eye className="h-3.5 w-3.5" /> View
+                                  {docCount > 1 && <span className="ml-0.5 text-[10px] text-gray-500">({docCount})</span>}
+                                </button>
+                                <button
+                                  onClick={() => handleSubmissionCombinedDownload(sub)}
+                                  disabled={isDownloadingThis}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+                                  data-testid={`download-submission-combined-${i}`}
+                                  title="Download combined PDF of all documents"
+                                >
+                                  {isDownloadingThis ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                                  Download
+                                </button>
+                              </div>
                             ) : (
                               <span className="text-xs text-gray-400">—</span>
                             )}
@@ -423,6 +538,7 @@ const RunDetailPage = () => {
                             <th className="text-left px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase">Email</th>
                             <th className="text-left px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase">Role</th>
                             <th className="text-left px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase">Status</th>
+                            <th className="text-left px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase">Actions</th>
                             <th className="text-right px-5 py-2.5 text-xs font-semibold text-gray-500 uppercase">Document</th>
                           </tr>
                         </thead>
@@ -435,12 +551,65 @@ const RunDetailPage = () => {
                               'RECEIVE_COPY': { label: 'CC', color: 'bg-gray-50 text-gray-600' },
                             };
                             const rc = roleCfg[r.role_type] || roleCfg['SIGN'];
+                            // Phase 81.42 — Recipient-action visibility rules:
+                            //   - Voided recipient → show Unvoid only.
+                            //   - Terminal statuses (signed/approved/reviewed/declined/completed)
+                            //     → show no actions.
+                            //   - Otherwise (pending, notified, viewed, in_progress, sent) →
+                            //     show Resend + Void.
+                            const rStatus = r.status || 'pending';
+                            const isVoided = r.voided === true || rStatus === 'voided';
+                            const isTerminal = ['signed', 'completed', 'approved', 'rejected', 'reviewed', 'declined'].includes(rStatus) || !!r.signed_at;
                             return (
                               <tr key={r.id || rIdx} className="border-b border-gray-50 hover:bg-gray-50/50" data-testid={`recipient-row-${wIdx}-${rIdx}`}>
                                 <td className="px-5 py-3 text-sm font-medium text-gray-800">{r.name}</td>
                                 <td className="px-5 py-3 text-sm text-gray-600">{r.email}</td>
                                 <td className="px-5 py-3"><span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${rc.color}`}>{rc.label}</span></td>
-                                <td className="px-5 py-3"><StatusBadge status={r.status || 'pending'} /></td>
+                                <td className="px-5 py-3"><StatusBadge status={rStatus} /></td>
+                                <td className="px-5 py-3">
+                                  {isEmail && !isPublicRecipients && !isTerminal && (
+                                    <div className="flex items-center gap-1.5">
+                                      {isVoided ? (
+                                        <button
+                                          onClick={() => handleUnvoidRecipient(r)}
+                                          disabled={unvoidingId === r.id}
+                                          className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-md bg-emerald-50 text-emerald-700 hover:bg-emerald-100 disabled:opacity-60"
+                                          data-testid={`recipient-unvoid-${wIdx}-${rIdx}`}
+                                          title="Restore recipient access"
+                                        >
+                                          {unvoidingId === r.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+                                          Unvoid
+                                        </button>
+                                      ) : (
+                                        <>
+                                          <button
+                                            onClick={() => handleResendRecipient(r)}
+                                            disabled={resendingId === r.id || !r.email}
+                                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-md bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-60"
+                                            data-testid={`recipient-resend-${wIdx}-${rIdx}`}
+                                            title="Resend signing email"
+                                          >
+                                            {resendingId === r.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
+                                            Resend
+                                          </button>
+                                          <button
+                                            onClick={() => handleVoidRecipient(r)}
+                                            disabled={voidingId === r.id}
+                                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold rounded-md bg-red-50 text-red-700 hover:bg-red-100 disabled:opacity-60"
+                                            data-testid={`recipient-void-${wIdx}-${rIdx}`}
+                                            title="Void recipient and stop reminders"
+                                          >
+                                            {voidingId === r.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Ban className="h-3 w-3" />}
+                                            Void
+                                          </button>
+                                        </>
+                                      )}
+                                    </div>
+                                  )}
+                                  {(isTerminal || !isEmail || isPublicRecipients) && (
+                                    <span className="text-xs text-gray-400">—</span>
+                                  )}
+                                </td>
                                 <td className="px-5 py-3 text-right">
                                   {r.status === 'completed' && getSignedDocUrl() ? (
                                     <a href={getSignedDocUrl()} target="_blank" rel="noopener noreferrer"
@@ -632,6 +801,50 @@ const RunDetailPage = () => {
           </div>
         )}
       </div>
+
+      {/* Phase 81.43 — Confirm dialog for Resend/Void/Unvoid actions. */}
+      <ConfirmDialog
+        open={confirmState.open}
+        loading={confirmState.loading}
+        title={
+          confirmState.action === 'resend' ? 'Resend signing email?'
+          : confirmState.action === 'void' ? 'Void recipient?'
+          : confirmState.action === 'unvoid' ? 'Restore recipient access?'
+          : ''
+        }
+        description={
+          confirmState.action === 'resend'
+            ? `A fresh signing email will be sent to ${confirmState.recipient?.email || 'the recipient'}.`
+          : confirmState.action === 'void'
+            ? `${confirmState.recipient?.email || 'The recipient'} will no longer be able to open the package, sign, approve or review. Any scheduled email reminders for this recipient will stop. This cannot be undone silently — the sender will see a "Voided" status on the recipient row.`
+          : confirmState.action === 'unvoid'
+            ? `${confirmState.recipient?.email || 'The recipient'} will regain access to the package. A fresh signing email will be sent and any reminders will resume.`
+          : ''
+        }
+        variant={
+          confirmState.action === 'void' ? 'danger'
+          : confirmState.action === 'unvoid' ? 'success'
+          : 'primary'
+        }
+        confirmLabel={
+          confirmState.action === 'resend' ? 'Resend Email'
+          : confirmState.action === 'void' ? 'Void Recipient'
+          : confirmState.action === 'unvoid' ? 'Restore Access'
+          : 'Confirm'
+        }
+        cancelLabel="Cancel"
+        onConfirm={handleConfirmExecute}
+        onClose={handleConfirmClose}
+      />
+
+      {/* Phase 81.77 — Submission documents modal (View + individual downloads). */}
+      <SubmissionDocumentsModal
+        open={submissionModal.open}
+        onClose={() => setSubmissionModal({ open: false, submission: null })}
+        packageId={packageId}
+        runId={runId}
+        submission={submissionModal.submission}
+      />
     </div>
   );
 };

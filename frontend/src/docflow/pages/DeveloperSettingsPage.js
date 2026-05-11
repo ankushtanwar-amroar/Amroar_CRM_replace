@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Key, Plus, Copy, Trash2, Shield, Eye, EyeOff, Loader2, CheckCircle, AlertCircle, Code, ChevronDown, ChevronRight, Clock, BookOpen } from 'lucide-react';
+import { Key, Plus, Copy, Trash2, Shield, Eye, EyeOff, Loader2, CheckCircle, AlertCircle, Code, ChevronDown, ChevronRight, Clock, BookOpen, Check } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || '';
@@ -229,11 +229,6 @@ const ApiDocumentation = () => {
 
   const toggle = (id) => setExpandedApi(expandedApi === id ? null : id);
 
-  const copyJson = (obj) => {
-    navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
-    toast.success('Copied JSON');
-  };
-
   const apis = [
     {
       id: 'list-packages',
@@ -339,11 +334,13 @@ const ApiDocumentation = () => {
       queryParams: [],
       requestBody: {
         package_id: "uuid-of-existing-package",
+        sms_mode: false,
         recipients: [
           {
             id: "signer_1",
             name: "John Doe",
             email: "john@example.com",
+            phone: "+12025551234",
             role: "signer",
             routing_order: 1,
             wave: null
@@ -352,6 +349,7 @@ const ApiDocumentation = () => {
             id: "approver_1",
             name: "Jane Manager",
             email: "jane@example.com",
+            phone: "+12025557788",
             role: "approver",
             routing_order: 2,
             wave: null
@@ -393,6 +391,7 @@ const ApiDocumentation = () => {
         package_id: "uuid",
         status: "in_progress",
         delivery_mode: "email",
+        sms_mode: false,
         public_link: null,
         recipient_links: [
           {
@@ -419,13 +418,20 @@ const ApiDocumentation = () => {
         'Package must not be voided',
         'recipients[].name: required (string)',
         'recipients[].email: required for email/both delivery mode',
+        'recipients[].phone: required (E.164 format) when sms_mode=true; otherwise optional',
         'recipients[].role: signer | approver | reviewer | receive_copy',
         'recipients[].routing_order: integer >= 1 (determines wave)',
         'recipients[].wave: integer (used for mixed routing mode)',
+        'recipients[].reminder_enabled: optional boolean — turns on pending-signature reminder emails',
+        'recipients[].reminder_frequency: required when reminder_enabled=true. Values: daily | weekly | monthly | custom',
+        'recipients[].reminder_custom_value: integer > 0 — required when reminder_frequency=custom',
+        'recipients[].reminder_custom_unit: seconds | minutes | hours | days | weeks | months | years — required when reminder_frequency=custom',
+        'recipients[].max_reminders: optional integer >= 1 — caps total reminders sent (omit for unlimited)',
         'routing_mode: sequential | parallel | mixed',
         'delivery_mode: email | public_link | both | public_recipients',
         'field_assignments[].template_id: must match a template in the package',
         'field_assignments[].fields[].recipient_id: must match a recipient id',
+        'sms_mode: when true, every signer/approver/reviewer recipient MUST carry a phone (RECEIVE_COPY exempt). 400 Bad Request if any phone is missing.',
         'Approver must always come after signer in routing order',
         'If delivery_mode = public_link: public_link returned in response',
         'If delivery_mode = email: recipient access_links returned in response',
@@ -435,6 +441,80 @@ const ApiDocumentation = () => {
         sequential: 'Recipients are processed one by one based on routing_order. Each must complete before the next is notified.',
         parallel: 'All recipients are notified simultaneously. routing_order is ignored.',
         mixed: 'Recipients with the same routing_order (or wave) run in parallel. Different orders run sequentially. Example: Wave 1 = 2 signers in parallel, Wave 2 = 1 approver after both complete.',
+        sms_mode: 'When true, the signing page renders an SMS Security Check screen before consent. Recipient must enter a 6-digit OTP delivered to their phone (real Twilio if TWILIO_* env vars set; otherwise stub mode logs OTP to backend stdout). Sign attempts before verification return 428 Precondition Required. Maps to internal endpoints POST /api/docflow/packages/public/{token}/sms/send-otp and /sms/verify-otp.',
+      },
+    },
+    {
+      id: 'generate-links',
+      method: 'POST',
+      path: '/api/v1/documents/generate-links',
+      title: 'Generate Document Links',
+      description: 'Generate document(s) with full workflow. Supports basic (single doc) and package (multi doc) modes. Phase 81: includes SMS verification mode and auto-assign sweep for unclaimed signable fields.',
+      auth: 'JWT Bearer Token (admin session) — or API Key for programmatic use',
+      queryParams: [],
+      requestBody: {
+        send_mode: "basic",
+        template_id: "uuid-of-template",
+        document_name: "Client NDA",
+        routing_type: "sequential",
+        delivery_mode: "email",
+        send_email: true,
+        require_auth: true,
+        sms_mode: false,
+        recipients: [
+          {
+            name: "Client Name",
+            email: "client@example.com",
+            phone: "+12025551234",
+            role: "signer",
+            routing_order: 1,
+            assigned_components: ["field-uuid-1", "field-uuid-2"]
+          }
+        ],
+        merge_fields: { client_name: "Acme Corp", date: "2026-01-15" },
+        source_context: { record_id: "sf-record-id", object_type: "Opportunity" },
+        expires_at: null
+      },
+      response: {
+        success: true,
+        document_id: "uuid",
+        status: "generated",
+        recipient_links: [
+          {
+            name: "Client Name",
+            email: "client@example.com",
+            role: "signer",
+            status: "notified",
+            document_url: "https://app.com/docflow/view/{token}"
+          }
+        ],
+        public_link: "https://app.com/docflow/view/{token}",
+        package_id: null,
+        message: "Document generated successfully"
+      },
+      validationRules: [
+        'send_mode: basic | package',
+        'template_id: required for basic mode',
+        'routing_type: sequential | parallel',
+        'delivery_mode: email | public_link | both | public_recipients',
+        'recipients[].role: signer | approver | viewer',
+        'recipients[].phone: required (E.164 format) when sms_mode=true; otherwise optional',
+        'recipients[].assigned_components: array of field IDs (basic mode). Phase 81.1 — if EMPTY, auto-fills with all unclaimed signable fields. If partially populated and signable fields are still unclaimed after the empty-recipient sweep, leftovers are appended to the FIRST recipient so checkbox/radio/text overlays stay visible on the signer page.',
+        'recipients[].assigned_components_map: {template_id: [field_ids]} (package mode)',
+        'recipients[].reminder_enabled: optional boolean — turns on pending-signature reminders',
+        'recipients[].reminder_frequency: daily | weekly | monthly | custom',
+        'recipients[].reminder_custom_value: integer > 0 — required when reminder_frequency=custom',
+        'recipients[].reminder_custom_unit: seconds | minutes | hours | days | weeks | months | years — required when reminder_frequency=custom',
+        'recipients[].max_reminders: optional integer >= 1 — caps total reminders (omit for unlimited)',
+        'merge_fields: key-value pairs merged into document placeholders. Phase 81 — empty merge fields converted to fillable text fields by the signer flow back via webhook payload merge_fields key.',
+        'sms_mode: when true, every recipient MUST carry a phone number (E.164). 400 Bad Request if any phone is missing.',
+        'expires_at: ISO datetime string or null',
+      ],
+      workflowLogic: {
+        sequential: 'Wave-based execution: recipients process in routing_order. Same order = parallel within wave.',
+        parallel: 'All recipients notified at once.',
+        sms_mode: 'When true, the signer page renders an SMS Security Check modal before consent. Recipient must enter a 6-digit OTP delivered to their phone (real Twilio if TWILIO_* env vars set; otherwise stub mode logs OTP to backend stdout). Sign attempts before verification return 428 Precondition Required.',
+        auto_assign_sweep: 'Phase 81.1 — guarantees every signable field has at least one owner. (1) Empty assigned_components recipients get all unclaimed fields in routing_order. (2) Final sweep dumps any remaining unclaimed signable IDs onto the first (lowest routing_order) recipient. Merge/label fields are document-level and NEVER auto-assigned.',
       },
     },
     {
@@ -469,98 +549,76 @@ const ApiDocumentation = () => {
       validationRules: ['tenant_id is required', 'Returns 404 if tenant does not exist', 'Only returns active + latest version templates'],
     },
     {
-      id: 'generate-links',
+      id: 'void-document',
       method: 'POST',
-      path: '/api/v1/documents/generate-links',
-      title: 'Generate Document Links',
-      description: 'Generate document(s) with full workflow. Supports basic (single doc) and package (multi doc) modes.',
-      auth: 'JWT Bearer Token (admin session)',
+      path: '/api/docflow/public/documents/{document_id}/void',
+      title: 'Void Document',
+      description: 'Void a document. Cascades to all non-terminal recipients (signers, approvers, reviewers still pending). Cancels all scheduled email reminders, sends a cancellation email to active recipients, and writes a `document_voided` audit event. After void, every public access endpoint for this document returns HTTP 410. Idempotent: re-voiding an already-voided document returns the existing void info.',
+      auth: 'API Key (X-API-Key or Authorization: Bearer)',
       queryParams: [],
       requestBody: {
-        send_mode: "basic",
-        template_id: "uuid-of-template",
-        document_name: "Client NDA",
-        routing_type: "sequential",
-        delivery_mode: "email",
-        send_email: true,
-        require_auth: true,
-        recipients: [
-          {
-            name: "Client Name",
-            email: "client@example.com",
-            role: "signer",
-            routing_order: 1,
-            assigned_components: ["field-uuid-1", "field-uuid-2"]
-          }
-        ],
-        merge_fields: { client_name: "Acme Corp", date: "2026-01-15" },
-        source_context: { record_id: "sf-record-id", object_type: "Opportunity" },
-        expires_at: null
+        reason: "Sent to wrong recipient — please disregard."
       },
       response: {
         success: true,
+        already_voided: false,
         document_id: "uuid",
-        status: "generated",
-        recipient_links: [
-          {
-            name: "Client Name",
-            email: "client@example.com",
-            role: "signer",
-            status: "notified",
-            document_url: "https://app.com/docflow/view/{token}"
-          }
-        ],
-        public_link: "https://app.com/docflow/view/{token}",
-        package_id: null,
-        message: "Document generated successfully"
+        voided_at: "2026-02-04T11:00:35.377354+00:00",
+        voided_by: "api_key:dfk_jAU6AGkv",
+        void_reason: "Sent to wrong recipient — please disregard.",
+        cascaded_recipients: 2
       },
       validationRules: [
-        'send_mode: basic | package',
-        'template_id: required for basic mode',
-        'routing_type: sequential | parallel',
-        'delivery_mode: email | public_link | both | public_recipients',
-        'recipients[].role: signer | approver | viewer',
-        'recipients[].assigned_components: array of field IDs (basic mode)',
-        'recipients[].assigned_components_map: {template_id: [field_ids]} (package mode)',
-        'merge_fields: key-value pairs merged into document placeholders',
-        'expires_at: ISO datetime string or null',
+        'document_id: must belong to the API key tenant. Returns 404 if not found.',
+        'reason: optional string. Stored on the document, included in audit log, and rendered in the recipient cancellation email.',
+        'Void is allowed at any status, including completed/signed (per product spec).',
+        'Cascades to recipients with status NOT IN (signed, completed, approved, rejected, reviewed, declined, skipped, expired, voided).',
+        'Returns already_voided=true if the document is already in voided state (HTTP 200, NOT 409).',
+        'After void, the public viewer URL `/docflow/view/{token}` returns HTTP 410 with structured detail {code:"document_voided", message, void_reason, voided_at, document_name}.',
+        'The /sign-with-fields, /view/{version}, /verify/send-otp, /verify/check-otp, and /instantiate endpoints all return HTTP 410 for voided documents.',
+        'Notification emails are best-effort — failures do not abort the void.',
       ],
       workflowLogic: {
-        sequential: 'Wave-based execution: recipients process in routing_order. Same order = parallel within wave.',
-        parallel: 'All recipients notified at once.',
+        cascading: 'Document → all non-terminal recipients flipped to status="voided" with voided_by + voided_at stamps. Reminders cancelled via cancel_run_reminders / cancel_recipient_reminders.',
+        audit: 'Writes one event_type="document_voided" entry to docflow_audit_events with metadata {reason, cascaded_recipients, document_name, ip_address, user_agent}.',
+        notifications: 'Sends one "Signing Request Cancelled" email per active recipient via SystemEmailService.send_workflow_notification_email(notification_type="voided") containing the void reason.',
       },
     },
     {
-      id: 'webhook-events',
+      id: 'void-package',
       method: 'POST',
-      path: 'Your Webhook URL',
-      title: 'Webhook Events',
-      description: 'DocFlow fires webhook events at key lifecycle moments. Configure webhook_url in your package. Events include signed document URLs and recipient details.',
-      auth: 'N/A — outbound POST to your URL',
+      path: '/api/docflow/public/packages/{package_id}/void',
+      title: 'Void Package',
+      description: 'Void a package blueprint AND cascade to every active run, every child document, and every active recipient under those documents. Cancels all run reminders, sends cancellation emails, and writes a `package_voided` audit event. Idempotent.',
+      auth: 'API Key (X-API-Key or Authorization: Bearer)',
       queryParams: [],
-      requestBody: null,
+      requestBody: {
+        reason: "Contract terms changed — package no longer needed."
+      },
       response: {
-        event_type: "document_signed",
+        success: true,
+        already_voided: false,
         package_id: "uuid",
-        timestamp: "2026-04-12T09:00:00Z",
-        data: {
-          recipient_id: "uuid",
-          action: "signed",
-          status: "signed",
-          recipient_details: { name: "John Doe", email: "john@example.com" },
-          signed_documents: [
-            { document_id: "uuid", template_name: "NDA", signed_document_url: "https://..." }
-          ],
-          documents_signed: 1,
-        }
+        voided_at: "2026-02-04T11:00:35.377354+00:00",
+        voided_by: "api_key:dfk_jAU6AGkv",
+        void_reason: "Contract terms changed — package no longer needed.",
+        cascaded_documents: 4,
+        cascaded_run_ids: ["pkg-blueprint-uuid", "run-uuid-1", "run-uuid-2", "run-uuid-3"]
       },
       validationRules: [
-        'Events: document_signed, recipient_approved, recipient_rejected, package_completed, package_voided',
-        'document_signed: includes signed_documents[] with signed_document_url',
-        'recipient_details: includes name and email of the acting recipient',
-        'timestamp: ISO 8601 UTC',
-        'Retry: Failed webhook calls are logged but not retried automatically',
+        'package_id: must be a blueprint package belonging to the API key tenant (not a run). Returns 404 if not found.',
+        'reason: optional string. Stored on package + each cascaded run + each cascaded document.',
+        'Void is allowed at any status (per product spec).',
+        'Cascade scope: blueprint package → all runs (status NOT IN completed,voided) → all documents tied to those runs (status != voided) → all non-terminal recipients on each document.',
+        'Returns already_voided=true if the package is already voided (HTTP 200, NOT 409).',
+        'After void, the public package URL `/docflow/package/{run_id}/view/{token}` returns HTTP 410 with structured detail {code:"package_voided", message, voided_at, void_reason, package_name}.',
+        'Notification emails are best-effort — sent per recipient per cascaded document.',
       ],
+      workflowLogic: {
+        cascading: 'Package blueprint → runs (in both docflow_packages with _type="run" and docflow_package_runs collections) → child documents (matched by package_id OR package_run_id) → recipients. Reminders cancelled via cancel_run_reminders for every run id (blueprint + children).',
+        audit: 'Writes one event_type="package_voided" entry to docflow_audit_events with metadata {reason, cascaded_documents, package_name, ip_address, user_agent}.',
+        idempotency: 'Re-calling on an already-voided package returns the original voided_at, voided_by, void_reason — does not re-fire emails or re-write audit events.',
+      },
     },
   ];
 
@@ -573,15 +631,47 @@ const ApiDocumentation = () => {
     return <span className={`px-2 py-0.5 text-[10px] font-bold rounded border ${colors[method] || 'bg-gray-100'}`}>{method}</span>;
   };
 
-  const JsonBlock = ({ data, label }) => (
-    <div className="relative group">
+  // Reusable Copy button with a visible "Copied" success state.
+  const CopyButton = ({ value, label = 'Copy', size = 'sm', testId, onCopy }) => {
+    const [copied, setCopied] = useState(false);
+    const handleClick = (e) => {
+      e.stopPropagation();
+      try {
+        navigator.clipboard.writeText(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
+        setCopied(true);
+        toast.success(`${label} copied`);
+        if (onCopy) onCopy();
+        setTimeout(() => setCopied(false), 1500);
+      } catch (err) {
+        toast.error('Copy failed');
+      }
+    };
+    const sizeClasses = size === 'xs'
+      ? 'px-2 py-0.5 text-[10px]'
+      : 'px-2.5 py-1 text-[11px]';
+    return (
+      <button
+        onClick={handleClick}
+        data-testid={testId}
+        className={`inline-flex items-center gap-1 font-medium rounded-md transition-colors ${sizeClasses} ${
+          copied
+            ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+            : 'bg-white text-indigo-600 hover:text-indigo-800 border border-indigo-200 hover:bg-indigo-50'
+        }`}
+      >
+        {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+        {copied ? 'Copied' : label}
+      </button>
+    );
+  };
+
+  const JsonBlock = ({ data, label, testId }) => (
+    <div className="relative">
       <div className="flex items-center justify-between mb-1.5">
         <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">{label}</span>
-        <button onClick={() => copyJson(data)} className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] text-indigo-600 hover:text-indigo-800 font-medium">
-          <Copy className="h-3 w-3" /> Copy
-        </button>
+        <CopyButton value={data} label="Copy JSON" testId={testId ? `${testId}-copy` : undefined} />
       </div>
-      <pre className="bg-gray-900 text-gray-100 rounded-lg p-4 text-xs font-mono overflow-x-auto max-h-96 leading-relaxed">
+      <pre className="bg-gray-900 text-gray-100 rounded-lg p-4 text-xs font-mono overflow-x-auto max-h-96 leading-relaxed" data-testid={testId}>
         {JSON.stringify(data, null, 2)}
       </pre>
     </div>
@@ -612,18 +702,76 @@ const ApiDocumentation = () => {
       {/* API Cards */}
       {apis.map(api => {
         const isOpen = expandedApi === api.id;
+        // Build a copyable absolute endpoint URL. For "Webhook Events" the path
+        // isn't a real route ("Your Webhook URL") — skip the prefix so users
+        // see a sensible value.
+        const isAbsolute = /^https?:\/\//i.test(api.path);
+        const looksLikeRoute = api.path.startsWith('/');
+        const endpointUrl = looksLikeRoute ? `${API_URL}${api.path}` : api.path;
+
+        // cURL example (single-line). Strips path-template braces hint.
+        const curlMethod = api.method;
+        const headers = [];
+        if (api.auth && api.auth.toLowerCase().includes('api key')) {
+          headers.push(`-H "X-API-Key: dfk_your_api_key_here"`);
+        } else if (api.auth && api.auth.toLowerCase().includes('jwt')) {
+          headers.push(`-H "Authorization: Bearer YOUR_JWT_TOKEN"`);
+        }
+        if (api.requestBody && api.requestBody._content_type === 'multipart/form-data') {
+          headers.push(`-H "Content-Type: multipart/form-data"`);
+        } else if (api.requestBody) {
+          headers.push(`-H "Content-Type: application/json"`);
+        }
+        let curlBody = '';
+        if (api.requestBody) {
+          if (api.requestBody._content_type === 'multipart/form-data') {
+            curlBody = ` -F "file=@./template.docx" -F "name=My Template" -F "template_type=general"`;
+          } else {
+            curlBody = ` -d '${JSON.stringify(api.requestBody)}'`;
+          }
+        }
+        const curlExample = looksLikeRoute
+          ? `curl -X ${curlMethod} "${endpointUrl}" ${headers.join(' ')}${curlBody}`.trim()
+          : null;
+
         return (
           <div key={api.id} className="bg-white rounded-xl border border-gray-200 overflow-hidden" data-testid={`api-card-${api.id}`}>
-            <button onClick={() => toggle(api.id)} className="w-full flex items-center gap-3 px-5 py-4 text-left hover:bg-gray-50 transition-colors">
-              {isOpen ? <ChevronDown className="h-4 w-4 text-gray-400 shrink-0" /> : <ChevronRight className="h-4 w-4 text-gray-400 shrink-0" />}
-              <MethodBadge method={api.method} />
-              <code className="text-sm font-mono text-gray-700 font-medium">{api.path}</code>
-              <span className="text-sm text-gray-500 ml-2">{api.title}</span>
-            </button>
+            <div className="w-full flex items-center gap-3 px-5 py-4 hover:bg-gray-50 transition-colors">
+              <button
+                onClick={() => toggle(api.id)}
+                className="flex items-center gap-3 flex-1 min-w-0 text-left"
+                data-testid={`api-toggle-${api.id}`}
+              >
+                {isOpen ? <ChevronDown className="h-4 w-4 text-gray-400 shrink-0" /> : <ChevronRight className="h-4 w-4 text-gray-400 shrink-0" />}
+                <MethodBadge method={api.method} />
+                <code className="text-sm font-mono text-gray-700 font-medium truncate">{api.path}</code>
+                <span className="text-sm text-gray-500 ml-2 truncate">{api.title}</span>
+              </button>
+              {looksLikeRoute && (
+                <CopyButton
+                  value={endpointUrl}
+                  label="Copy Endpoint"
+                  testId={`copy-endpoint-${api.id}`}
+                />
+              )}
+            </div>
 
             {isOpen && (
               <div className="border-t border-gray-100 px-5 py-5 space-y-5">
                 <p className="text-sm text-gray-600">{api.description}</p>
+
+                {/* Endpoint URL pinned at top of expanded panel */}
+                {looksLikeRoute && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">Endpoint URL</span>
+                      <CopyButton value={endpointUrl} label="Copy URL" testId={`copy-url-${api.id}`} />
+                    </div>
+                    <code className="block bg-gray-50 border border-gray-200 px-3 py-2 rounded-lg text-xs font-mono text-gray-700 break-all" data-testid={`endpoint-url-${api.id}`}>
+                      {endpointUrl}
+                    </code>
+                  </div>
+                )}
 
                 <div className="flex items-center gap-2 text-xs">
                   <Shield className="h-3.5 w-3.5 text-amber-500" />
@@ -654,11 +802,47 @@ const ApiDocumentation = () => {
                   </div>
                 )}
 
-                {/* Request Body */}
-                {api.requestBody && <JsonBlock data={api.requestBody} label="Request Body" />}
+                {/* Request Body — show JSON only when not multipart */}
+                {api.requestBody && api.requestBody._content_type !== 'multipart/form-data' && (
+                  <JsonBlock data={api.requestBody} label="Request Body" testId={`request-body-${api.id}`} />
+                )}
+
+                {/* Multipart form fields (file upload endpoints) */}
+                {api.requestBody && api.requestBody._content_type === 'multipart/form-data' && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Form Fields (multipart/form-data)</h4>
+                    <table className="w-full text-xs">
+                      <thead><tr className="border-b border-gray-100">
+                        <th className="py-1.5 pr-3 text-left font-semibold text-gray-500">Field</th>
+                        <th className="py-1.5 text-left font-semibold text-gray-500">Value</th>
+                      </tr></thead>
+                      <tbody>{Object.entries(api.requestBody)
+                        .filter(([k]) => k !== '_content_type')
+                        .map(([k, v]) => (
+                          <tr key={k} className="border-b border-gray-50">
+                            <td className="py-1.5 pr-3 font-mono text-indigo-600">{k}</td>
+                            <td className="py-1.5 text-gray-600 font-mono break-all">{String(v)}</td>
+                          </tr>
+                        ))}</tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* cURL example */}
+                {curlExample && (
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">cURL Example</span>
+                      <CopyButton value={curlExample} label="Copy cURL" testId={`copy-curl-${api.id}`} />
+                    </div>
+                    <pre className="bg-gray-900 text-gray-100 rounded-lg p-4 text-xs font-mono overflow-x-auto leading-relaxed whitespace-pre-wrap" data-testid={`curl-example-${api.id}`}>
+                      {curlExample}
+                    </pre>
+                  </div>
+                )}
 
                 {/* Response Body */}
-                <JsonBlock data={api.response} label="Response" />
+                <JsonBlock data={api.response} label="Response" testId={`response-body-${api.id}`} />
 
                 {/* Validation Rules */}
                 {api.validationRules && (

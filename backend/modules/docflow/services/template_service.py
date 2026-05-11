@@ -275,9 +275,110 @@ class TemplateService:
         return new_template
 
     async def delete_template(self, template_id: str, tenant_id: str) -> bool:
-        """Delete template"""
-        result = await self.collection.delete_one({"id": template_id, "tenant_id": tenant_id})
-        return result.deleted_count > 0
+        """
+        Phase 81.11 — Permanent (hard) delete with full cascade.
+
+        Deletes:
+          - Template master record
+          - ALL versions in the template_group (v1, v2, v3...) → no version reuse
+          - All template_versions snapshots (if collection exists)
+          - All field placements / merge fields / builder layout (already inside
+            template doc — gone with the master record)
+          - Template assignments inside packages (auto-unlinks templates)
+          - S3 source files (if s3_service available)
+          - Cached preview/render entries (if collection exists)
+
+        Returns True if anything was deleted from `docflow_templates`.
+        """
+        target = await self.collection.find_one(
+            {"id": template_id, "tenant_id": tenant_id},
+            {"_id": 0},
+        )
+        if not target:
+            return False
+
+        group_id = target.get("template_group_id") or template_id
+        all_version_ids = set([template_id])
+        all_s3_keys = set()
+        try:
+            cursor = self.collection.find(
+                {"tenant_id": tenant_id, "template_group_id": group_id},
+                {"_id": 0, "id": 1, "s3_key": 1, "file_url": 1, "uploaded_file_url": 1},
+            )
+            async for v in cursor:
+                if v.get("id"):
+                    all_version_ids.add(v["id"])
+                for k in ("s3_key", "uploaded_file_url"):
+                    if v.get(k):
+                        all_s3_keys.add(v[k])
+        except Exception as e:
+            logger.warning(f"[delete_template] version enumeration soft-failed: {e}")
+
+        # 1. Delete master + every version row in `docflow_templates`.
+        delete_filter = {
+            "tenant_id": tenant_id,
+            "$or": [
+                {"id": {"$in": list(all_version_ids)}},
+                {"template_group_id": group_id},
+            ],
+        }
+        del_res = await self.collection.delete_many(delete_filter)
+
+        # 2. Drop standalone version snapshots (best-effort — collection may not exist).
+        for coll_name in ("docflow_template_versions", "docflow_template_history"):
+            try:
+                if hasattr(self.db, coll_name) or coll_name in (await self.db.list_collection_names()):
+                    await self.db[coll_name].delete_many(
+                        {"tenant_id": tenant_id, "$or": [
+                            {"template_id": {"$in": list(all_version_ids)}},
+                            {"template_group_id": group_id},
+                        ]}
+                    )
+            except Exception as e:
+                logger.warning(f"[delete_template] {coll_name} cleanup soft-failed: {e}")
+
+        # 3. Unlink from packages — pull the template entry from packages.documents
+        #    so package builder no longer surfaces broken references. Orphan
+        #    keys inside recipients[].assigned_components keyed by removed
+        #    template_id are harmless (lookups skip missing entries).
+        try:
+            await self.db.docflow_packages.update_many(
+                {"tenant_id": tenant_id, "documents.template_id": {"$in": list(all_version_ids)}},
+                {"$pull": {"documents": {"template_id": {"$in": list(all_version_ids)}}}},
+            )
+        except Exception as e:
+            logger.warning(f"[delete_template] package unlink soft-failed: {e}")
+
+        # 4. S3 source-file cleanup — best-effort.
+        if all_s3_keys:
+            try:
+                from .s3_service import S3Service
+                s3 = S3Service()
+                for key in all_s3_keys:
+                    try:
+                        s3.delete_file(key)
+                    except Exception as _se:
+                        logger.warning(f"[delete_template] S3 delete soft-fail for {key}: {_se}")
+            except Exception as e:
+                logger.warning(f"[delete_template] S3Service unavailable: {e}")
+
+        # 5. Cached previews / render artifacts (best-effort across known caches).
+        for coll_name in ("docflow_template_cache", "docflow_template_previews"):
+            try:
+                colls = await self.db.list_collection_names()
+                if coll_name in colls:
+                    await self.db[coll_name].delete_many(
+                        {"tenant_id": tenant_id, "template_id": {"$in": list(all_version_ids)}}
+                    )
+            except Exception as e:
+                logger.warning(f"[delete_template] {coll_name} cleanup soft-failed: {e}")
+
+        logger.info(
+            f"[delete_template] hard-deleted template {template_id} "
+            f"(group={group_id}, versions={len(all_version_ids)}, "
+            f"templates_removed={del_res.deleted_count})"
+        )
+        return del_res.deleted_count > 0
 
     async def clone_template(self, source_template_id: str, tenant_id: str, user_id: str) -> dict:
         """
@@ -334,6 +435,33 @@ class TemplateService:
             "last_sent_at", "last_signed_at", "send_count",
         ):
             cloned.pop(field, None)
+
+        # ── Phase 81.75 — Isolate the clone's S3 file ────────────────
+        # Previously the clone inherited the source's s3_key, meaning BOTH
+        # records pointed at the same S3 object. If the source was re-
+        # uploaded or deleted, the clone silently flipped to the new
+        # content / broke entirely (root cause of "wrong PDF renders in
+        # the Copy"). We now server-side COPY the S3 file to an isolated
+        # key that lives under the clone's own folder.
+        try:
+            from .s3_service import S3Service
+            _s3 = S3Service()
+            for key_field in ("s3_key", "uploaded_pdf_s3_key"):
+                src_key = source.get(key_field)
+                if not src_key or not _s3.object_exists(src_key):
+                    continue
+                # templates/{tenant}/{uuid}/{filename} — reuse terminal filename.
+                src_filename = src_key.rsplit("/", 1)[-1]
+                dest_key = f"templates/{tenant_id}/{uuid.uuid4().hex}/{src_filename}"
+                if _s3.copy_object(src_key, dest_key):
+                    cloned[key_field] = dest_key
+                    # Refresh corresponding URL field so the FE can render immediately.
+                    if key_field == "s3_key":
+                        cloned["file_url"] = _s3.get_template_url(dest_key, expiration=604800) or cloned.get("file_url")
+                    elif key_field == "uploaded_pdf_s3_key":
+                        cloned["uploaded_pdf_url"] = _s3.get_template_url(dest_key, expiration=604800) or cloned.get("uploaded_pdf_url")
+        except Exception as _copy_err:
+            logger.warning(f"clone_template: S3 isolation copy failed ({_copy_err}). Clone will share source s3_key (legacy behavior).")
 
         await self.collection.insert_one(cloned)
         logger.info(f"Cloned template '{original_name}' (src={source_template_id}) -> new id={new_id}")

@@ -1,4 +1,5 @@
 """Enhanced Template Routes with PDF Upload Support"""
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from pydantic import BaseModel
 from typing import Optional, List, Any
@@ -20,6 +21,7 @@ from ..services.validation_service import ValidationService
 # Initialize S3 Service
 s3_service = S3Service()
 validation_service = ValidationService(db)
+logger = logging.getLogger(__name__)
 
 # Pydantic models
 class FieldPlacementsUpdate(BaseModel):
@@ -34,15 +36,25 @@ async def upload_template_pdf(
     template_type: str = Form("contract"),
     current_user: User = Depends(get_current_user)
 ):
-    """Upload PDF or DOCX file as template with S3 storage"""
-    # Validate file type - only PDF files accepted (DOCX conversion moved to frontend)
-    allowed_extensions = ['.pdf']
+    """Upload PDF / DOC / DOCX file as template with S3 storage.
+
+    Phase 81 — DOC and DOCX uploads are now supported end-to-end:
+      * File is stored as-is in S3 with its native extension.
+      * Frontend triggers `/templates/{id}/convert-to-blocks` after upload,
+        which uses `document_conversion_service` to extract editable content
+        blocks (works for both PDF and DOCX).
+      * Builder/visual editor renders from content blocks for DOC/DOCX
+        templates, so no eager PDF conversion is required.
+      * Final-signed PDF generation reads from blocks at sign time.
+    """
+    # Validate file type — PDF, DOC, DOCX accepted.
+    allowed_extensions = ['.pdf', '.docx', '.doc']
     file_ext = os.path.splitext(file.filename)[1].lower()
 
     if file_ext not in allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail="Only PDF files are allowed. DOCX files should be converted to PDF in frontend before upload."
+            detail="Only PDF, DOC, or DOCX files are allowed."
         )
     
     # Validate file size (100MB max)
@@ -72,6 +84,14 @@ async def upload_template_pdf(
     template = {
         "id": template_id,
         "tenant_id": current_user.tenant_id,
+        # Phase 81.11 — every upload starts a brand-new version tree. We
+        # explicitly set template_group_id = template_id so re-uploading the
+        # same source file (after a previous template was deleted) NEVER
+        # rejoins an old group_id and never inherits old fields/versions.
+        "template_group_id": template_id,
+        "version": 1,
+        "is_latest": True,
+        "status": "draft",
         "name": name,
         "description": description,
         "type": template_type,
@@ -103,6 +123,142 @@ async def upload_template_pdf(
     }
 
 
+@router.post("/templates/{template_id}/replace-file")
+async def replace_template_source_file(
+    template_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """Phase 81.76 — Replace the source PDF/DOC/DOCX of an existing template.
+
+    - Accepts the same file types as `/templates/upload-pdf` (PDF / DOC / DOCX).
+    - Generates a fresh unique S3 key (no overwrite of previous file).
+    - For DOC/DOCX: runs LibreOffice conversion and stores both original + PDF.
+    - For PDF: stores as-is, no conversion.
+    - Best-effort deletes the PREVIOUS S3 files to avoid orphaned storage.
+    - Returns the refreshed template document.
+    """
+    import io
+    from .template_routes import _convert_doc_to_pdf
+
+    allowed_extensions = [".pdf", ".docx", ".doc"]
+    file_ext = os.path.splitext(file.filename or "")[1].lower()
+    if file_ext not in allowed_extensions:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF, DOC, or DOCX files are allowed.",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+    if len(content) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File size exceeds 100MB limit.")
+
+    template = await db.docflow_templates.find_one(
+        {"id": template_id, "tenant_id": current_user.tenant_id}
+    )
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    prev_s3_key = template.get("s3_key")
+    prev_converted_key = template.get("uploaded_pdf_s3_key")
+
+    # Upload primary source file with a fresh UUID key.
+    new_s3_key = s3_service.upload_template_file(
+        file_bytes=content,
+        tenant_id=current_user.tenant_id,
+        filename=file.filename,
+    )
+    if not new_s3_key:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to upload replacement file to storage. Please retry.",
+        )
+    new_file_url = s3_service.get_template_url(new_s3_key, expiration=604800)
+
+    update_fields = {
+        "s3_key": new_s3_key,
+        "file_url": new_file_url,
+        "original_filename": file.filename,
+        "file_type": file_ext.lstrip("."),
+        "updated_at": datetime.utcnow().isoformat(),
+        # Legacy flags cleared so old cached states are not used.
+        "pdf_file_path": None,
+        "pdf_filename": file.filename,
+    }
+
+    # DOC / DOCX: convert to PDF and store alongside. PDF uploads reuse the
+    # primary key for the `uploaded_pdf_*` twin so downstream code that prefers
+    # the "converted PDF" path still works.
+    new_converted_key = None
+    if file_ext in (".docx", ".doc"):
+        try:
+            pdf_bytes = _convert_doc_to_pdf(content, file_ext.lstrip("."))
+            if not pdf_bytes:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Failed to convert {file_ext.upper().lstrip('.')} to PDF. "
+                        "Try opening it in Word and re-saving as PDF, then upload again."
+                    ),
+                )
+            pdf_filename = os.path.splitext(file.filename)[0] + ".pdf"
+            new_converted_key = s3_service.upload_template_file(
+                file_bytes=pdf_bytes,
+                tenant_id=current_user.tenant_id,
+                filename=pdf_filename,
+            )
+            if new_converted_key:
+                update_fields["uploaded_pdf_s3_key"] = new_converted_key
+                update_fields["uploaded_pdf_url"] = s3_service.get_template_url(
+                    new_converted_key, expiration=604800
+                )
+                try:
+                    from PyPDF2 import PdfReader
+                    reader = PdfReader(io.BytesIO(pdf_bytes))
+                    update_fields["page_count"] = len(reader.pages)
+                except Exception:
+                    pass
+        except HTTPException:
+            # If conversion failed: roll back the primary upload so we don't
+            # leave the template in a half-replaced state.
+            try:
+                s3_service.delete_file(new_s3_key)
+            except Exception:
+                pass
+            raise
+    else:
+        # PDF — twin points at same key for consistency with upload-pdf flow.
+        update_fields["uploaded_pdf_s3_key"] = new_s3_key
+        update_fields["uploaded_pdf_url"] = new_file_url
+        try:
+            from PyPDF2 import PdfReader
+            reader = PdfReader(io.BytesIO(content))
+            update_fields["page_count"] = len(reader.pages)
+        except Exception:
+            pass
+
+    # Persist the template update.
+    await db.docflow_templates.update_one(
+        {"id": template_id, "tenant_id": current_user.tenant_id},
+        {"$set": update_fields},
+    )
+
+    # Best-effort: purge the PREVIOUS S3 files so replaced files don't linger.
+    for old_key in {prev_s3_key, prev_converted_key}:
+        if old_key and old_key != new_s3_key and old_key != new_converted_key:
+            try:
+                s3_service.delete_file(old_key)
+            except Exception as _del_err:
+                logger.warning(f"replace-file: failed to delete old key {old_key}: {_del_err}")
+
+    refreshed = await db.docflow_templates.find_one(
+        {"id": template_id, "tenant_id": current_user.tenant_id}, {"_id": 0}
+    )
+    return {"success": True, "template": refreshed}
+
+
 @router.get("/templates/{template_id}/pdf")
 async def get_template_pdf(
     template_id: str,
@@ -129,12 +285,51 @@ async def get_template_pdf(
             return FileResponse(pdf_path, media_type="application/pdf", 
                               filename=template.get("original_filename", "template.pdf"))
         else:
-            raise HTTPException(status_code=404, detail="Template file not found")
-    
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "code": "template_file_not_uploaded",
+                    "message": "Template was saved without a PDF file. Please re-upload the source document.",
+                    "template_id": template_id,
+                    "template_name": template.get("name") or "",
+                },
+            )
+
     # Download from S3 and return
     file_bytes = s3_service.download_file(s3_key)
+
+    # Phase 81.75 — Automatic recovery: if the primary s3_key is missing
+    # from storage but the template ALSO has `uploaded_pdf_s3_key` (the
+    # converted PDF stored alongside DOC/DOCX uploads), fall back to it.
+    # Prevents the "Template PDF missing" error for templates whose primary
+    # file was accidentally deleted but the converted twin is still there.
     if not file_bytes:
-        raise HTTPException(status_code=404, detail="Failed to download template from S3")
+        fallback_key = template.get("uploaded_pdf_s3_key") or template.get("pdf_s3_key")
+        if fallback_key and fallback_key != s3_key:
+            try:
+                file_bytes = s3_service.download_file(fallback_key)
+                if file_bytes:
+                    logger.info(
+                        f"Template {template_id}: primary s3_key missing, "
+                        f"serving from fallback key {fallback_key}"
+                    )
+            except Exception as _fb_err:
+                logger.warning(f"Template {template_id} fallback also failed: {_fb_err}")
+
+    if not file_bytes:
+        # Phase 81.74 — structured error so frontend can show an actionable
+        # "template file missing in storage" banner instead of the generic
+        # "Failed to load template file" toast + blind retry loop.
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "template_file_missing",
+                "message": "Template PDF file is missing from storage. Please re-upload the source document to restore this template.",
+                "template_id": template_id,
+                "template_name": template.get("name") or "",
+                "s3_key": s3_key,
+            },
+        )
     
     # Determine content type
     file_type = template.get("file_type", "pdf")

@@ -556,7 +556,12 @@ try:
     from modules.docflow.api.template_public_routes import router as template_public_router
     from modules.docflow.api.package_public_link_routes import router as package_public_link_router
     from modules.docflow.api.package_public_api_routes import router as package_public_api_router
+    from modules.docflow.api.void_public_api_routes import router as void_public_api_router
     from modules.docflow.api.email_template_routes import router as email_template_router
+    from modules.docflow.api.sms_template_routes import router as sms_template_router
+    from modules.docflow.api.security_sms_routes import router as security_sms_router
+    from modules.docflow.api.content_config_routes import router as content_config_router
+    from modules.docflow.api.content_config_routes import public_router as content_config_public_router
 
     app.include_router(template_router, prefix="/api", tags=["DocFlow"])
     app.include_router(template_enhanced_router, prefix="/api", tags=["DocFlow"])
@@ -572,8 +577,13 @@ try:
     app.include_router(package_public_router, prefix="/api", tags=["DocFlow Package Public"])
     app.include_router(package_public_link_router, prefix="/api", tags=["DocFlow Public Link"])
     app.include_router(package_public_api_router, prefix="/api", tags=["DocFlow Public API"])
+    app.include_router(void_public_api_router, prefix="/api/docflow", tags=["DocFlow Public API"])
     app.include_router(template_public_router, prefix="/api", tags=["DocFlow Public Templates"])
+    app.include_router(security_sms_router)  # already has /api prefix
     app.include_router(email_template_router, prefix="/api", tags=["DocFlow Email Templates"])
+    app.include_router(sms_template_router, prefix="/api", tags=["DocFlow SMS Templates"])
+    app.include_router(content_config_router, prefix="/api", tags=["DocFlow Content Config"])
+    app.include_router(content_config_public_router, prefix="/api", tags=["DocFlow Content Config"])
     logger.info("DocFlow routes loaded successfully (including CRM routes)")
 except Exception as e:
     logger.warning(f"DocFlow routes not loaded: {str(e)}")
@@ -1024,7 +1034,15 @@ async def startup_event():
         logger.info("✅ Audit cleanup scheduler started")
     except Exception as e:
         logger.warning(f"Audit cleanup scheduler not started: {str(e)}")
-    
+
+    # Phase 81.24 — DocFlow recipient reminder scheduler
+    try:
+        from modules.docflow.services.reminder_service import get_scheduler as _docflow_rem_get
+        await _docflow_rem_get(db).start()
+        logger.info("✅ DocFlow reminder scheduler started")
+    except Exception as e:
+        logger.warning(f"DocFlow reminder scheduler not started: {str(e)}")
+
     logger.info("✅ Application startup complete")
 
 

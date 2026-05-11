@@ -135,6 +135,25 @@ class S3Service:
         except ClientError as e:
             logger.error(f"Error deleting from S3: {e}")
             return False
+
+    def copy_object(self, source_key: str, dest_key: str) -> bool:
+        """Phase 81.75 — server-side copy within the same bucket.
+
+        Used by template cloning so the clone gets its OWN independent S3
+        object (instead of sharing the source's s3_key — which was the root
+        cause of the "wrong document renders in the Copy" bug).
+        """
+        try:
+            self.s3_client.copy_object(
+                Bucket=self.bucket_name,
+                Key=dest_key,
+                CopySource={"Bucket": self.bucket_name, "Key": source_key},
+            )
+            logger.info(f"S3 copy: {source_key} -> {dest_key}")
+            return True
+        except ClientError as e:
+            logger.error(f"S3 copy failed ({source_key} -> {dest_key}): {e}")
+            return False
     
     def file_exists(self, s3_key: str) -> bool:
         """
@@ -189,18 +208,50 @@ class S3Service:
                 Body=file_bytes,
                 ContentType=self._get_content_type(filename)
             )
+            # Phase 81.75 — verify object persistence after put_object.
+            try:
+                self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
+            except ClientError as head_err:
+                logger.error(f"Post-upload HEAD failed for {s3_key}: {head_err}")
+                return None
             logger.info(f"Uploaded template to S3: {s3_key}")
             return s3_key
         except ClientError as e:
             logger.error(f"Error uploading template to S3: {e}")
             return None
 
+    def object_exists(self, s3_key: str) -> bool:
+        """Phase 81.75 — cheap HEAD-based existence probe (no full body download).
+
+        Used by template-load endpoints to short-circuit cascading 500 errors
+        when an S3 file is missing without incurring the cost of a full GET.
+        """
+        try:
+            self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
+            return True
+        except ClientError:
+            return False
+
     def upload_template_file(self, file_bytes: bytes, tenant_id: str, filename: str) -> Optional[str]:
         """
-        Upload template file to S3 (for uploaded templates)
-        Path: templates/{tenant_id}/{filename}
+        Upload template file to S3 (for uploaded templates).
+
+        Phase 81.19 — Path is now `templates/{tenant_id}/{uuid}/{filename}` so
+        every upload gets a unique S3 key. Previously the key was
+        `templates/{tenant_id}/{filename}` which meant re-uploading a file
+        with the same name (e.g. `Mutual NDA.pdf`) silently OVERWROTE the
+        existing S3 object — the old template record still pointed at the
+        same S3 path, so users perceived "old fields auto-appeared". Each
+        upload is now a fresh, isolated S3 path with no possibility of
+        cross-contamination between independently-uploaded templates.
+
+        Phase 81.75 — Post-upload HEAD validation. If AWS silently drops the
+        object (rare but happens on timeouts / throttling), we detect it now
+        and return None so the caller can surface a clean error INSTEAD of
+        persisting a DB row pointing at a missing key.
         """
-        s3_key = f"templates/{tenant_id}/{filename}"
+        unique_id = uuid.uuid4().hex
+        s3_key = f"templates/{tenant_id}/{unique_id}/{filename}"
 
         try:
             self.s3_client.put_object(
@@ -209,6 +260,12 @@ class S3Service:
                 Body=file_bytes,
                 ContentType=self._get_content_type(filename)
             )
+            # Phase 81.75 — verify the object actually landed.
+            try:
+                self.s3_client.head_object(Bucket=self.bucket_name, Key=s3_key)
+            except ClientError as head_err:
+                logger.error(f"Post-upload HEAD failed for {s3_key}: {head_err}")
+                return None
             logger.info(f"Uploaded template file to S3: {s3_key}")
             return s3_key
         except ClientError as e:

@@ -103,10 +103,21 @@ async def create_package(
 class SendRecipientInput(BaseModel):
     name: str
     email: Optional[str] = ""
+    phone: Optional[str] = ""  # Phase 81.12 — required when sms_mode=true
     role_type: str = "SIGN"
     routing_order: int = 1
     assigned_components_map: Optional[Dict[str, List[str]]] = None
     email_template_id: Optional[str] = None
+    # Phase 81.24/81.25 — Per-recipient reminder configuration. Two forms:
+    #  1) reminder_config = { enabled, interval_value, interval_unit, max_count?, end_at? }
+    #  2) flat fields: reminder_enabled / reminder_frequency / reminder_custom_value
+    #     / reminder_custom_unit / max_reminders
+    reminder_config: Optional[Dict[str, Any]] = None
+    reminder_enabled: Optional[bool] = None
+    reminder_frequency: Optional[str] = None
+    reminder_custom_value: Optional[int] = None
+    reminder_custom_unit: Optional[str] = None
+    max_reminders: Optional[int] = None
 
 class SendRoutingConfig(BaseModel):
     mode: str = "sequential"
@@ -126,6 +137,12 @@ class SendPackageRequest(BaseModel):
     routing_config: Optional[SendRoutingConfig] = None
     security: Optional[SendSecurityInput] = None
     template_merge_fields: Optional[List[TemplateMergeFieldsInput]] = None
+    # Phase 81.12 — SMS mode controls whether SMS is sent to recipients.
+    # Every actionable recipient must have a phone number when sms_mode=true.
+    sms_mode: Optional[bool] = False
+    # sms_consent controls ONLY whether the SMS disclaimer popup is shown in
+    # the public signing flow. Independent of sms_mode.
+    sms_consent: Optional[bool] = False
 
 @router.post("/{package_id}/send")
 async def send_package(
@@ -161,14 +178,44 @@ async def send_package(
     # Build recipient data
     pkg_recipients = []
     for r in req.recipients:
+        # Phase 81.25 — accept either nested `reminder_config` or flat
+        # public-API style fields.
+        rcfg = r.reminder_config
+        if not rcfg and r.reminder_enabled:
+            rcfg = {
+                "reminder_enabled": True,
+                "reminder_frequency": r.reminder_frequency,
+                "reminder_custom_value": r.reminder_custom_value,
+                "reminder_custom_unit": r.reminder_custom_unit,
+                "max_reminders": r.max_reminders,
+            }
         pkg_recipients.append({
             "name": r.name,
             "email": r.email or "",
+            # Phase 81.12 — propagate phone so the run recipient gets it.
+            "phone": (r.phone or "").strip(),
             "role_type": r.role_type,
             "routing_order": r.routing_order,
             "assigned_components": r.assigned_components_map or {},
             "email_template_id": r.email_template_id,
+            "reminder_config": rcfg,
         })
+
+    # Phase 81.12 — when sms_mode is enabled, every actionable recipient
+    # (signer / approver) must carry a phone number; receive-copy roles are
+    # exempt because they don't sign or verify.
+    if req.sms_mode:
+        actionable_roles = {"SIGN", "SIGNER", "APPROVE_REJECT", "APPROVER"}
+        missing = []
+        for r in req.recipients:
+            role = (r.role_type or "SIGN").upper()
+            if role in actionable_roles and not (r.phone or "").strip():
+                missing.append(r.name or r.email or "Unnamed")
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"SMS Disclaimer is ON — phone required for: {', '.join(missing)}"
+            )
 
     # Auto-assign: if a recipient has no assigned_components for a given document,
     # default to ALL of that document's signable fields (minus any already claimed
@@ -211,6 +258,24 @@ async def send_package(
                 _pkg_logger.info(
                     f"[package-send] auto-assign: recipient='{pr.get('name')}' "
                     f"doc={tid} empty → auto-assigned {len(unclaimed)} field(s)"
+                )
+
+            # Phase 81.1 — final sweep: if any signable field is still unclaimed
+            # after the empty-recipient pass (manual partial assignment scenario),
+            # append leftovers to the FIRST recipient so checkbox/radio etc. stay
+            # visible to the signer and don't get hidden by Phase 50.
+            leftover = [fid for fid in assignable_ids if fid not in claimed]
+            if leftover and pkg_recipients:
+                first_pr = sorted(pkg_recipients, key=lambda x: x.get("routing_order") or 1)[0]
+                amap = first_pr.get("assigned_components") or {}
+                merged = list(dict.fromkeys((amap.get(tid) or []) + leftover))
+                amap[tid] = merged
+                first_pr["assigned_components"] = amap
+                claimed.update(leftover)
+                _pkg_logger.info(
+                    f"[package-send] auto-assign sweep: doc={tid} appended "
+                    f"{len(leftover)} leftover field(s) to first recipient "
+                    f"'{first_pr.get('name')}'"
                 )
     except Exception as _auto_err:
         _pkg_logger.warning(f"[package-send] auto-assign skipped due to error: {_auto_err}")
@@ -270,6 +335,8 @@ async def send_package(
         user_id=current_user.id,
         tenant_id=current_user.tenant_id,
         template_merge_fields=merge_fields_map,
+        sms_mode=bool(req.sms_mode),
+        sms_consent=bool(req.sms_consent),
     )
 
     frontend_url = os.environ.get("FRONTEND_URL", "")
@@ -769,6 +836,169 @@ async def download_combined_pdf(
     )
 
 
+# ── Submission Download APIs (Phase 81.77) ──
+# Per-submission: list docs, download individual signed doc, download merged combined PDF.
+
+async def _load_submission(package_id: str, run_id: str, submission_id: str, tenant_id: str):
+    """Verify run belongs to package/tenant and load submission."""
+    run = await db.docflow_package_runs.find_one(
+        {"id": run_id, "package_id": package_id, "tenant_id": tenant_id},
+        {"_id": 0, "id": 1}
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    submission = await db.docflow_public_submissions.find_one(
+        {"id": submission_id, "package_id": run_id},
+        {"_id": 0}
+    )
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+    return submission
+
+
+def _refresh_signed_doc_urls(signed_documents: list) -> list:
+    """Regenerate presigned URLs from s3_key (if present) so links don't expire."""
+    from ..services.s3_service import S3Service
+    s3 = S3Service()
+    out = []
+    for sd in signed_documents or []:
+        s3_key = sd.get("signed_s3_key")
+        url = sd.get("signed_file_url", "")
+        if s3_key:
+            fresh = s3.get_document_url(s3_key, expiration=604800)
+            if fresh:
+                url = fresh
+        out.append({
+            "document_id": sd.get("document_id"),
+            "document_name": sd.get("document_name", "Document"),
+            "signed_file_url": url,
+            "signed_s3_key": s3_key,
+            "order": sd.get("order", 0),
+        })
+    # Preserve original order (as signed during submission)
+    return out
+
+
+@router.get("/{package_id}/runs/{run_id}/submissions/{submission_id}/documents")
+async def list_submission_documents(
+    package_id: str,
+    run_id: str,
+    submission_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """List all signed documents for a specific submission with fresh presigned URLs."""
+    submission = await _load_submission(package_id, run_id, submission_id, current_user.tenant_id)
+    docs = _refresh_signed_doc_urls(submission.get("signed_documents", []))
+    return {
+        "submission_id": submission_id,
+        "name": submission.get("name", ""),
+        "email": submission.get("email", ""),
+        "status": submission.get("status", ""),
+        "submitted_at": submission.get("submitted_at"),
+        "documents": docs,
+        "total": len(docs),
+    }
+
+
+@router.get("/{package_id}/runs/{run_id}/submissions/{submission_id}/documents/{doc_id}/download")
+async def download_submission_document(
+    package_id: str,
+    run_id: str,
+    submission_id: str,
+    doc_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Download a single signed document from a submission."""
+    import requests as _rq
+    submission = await _load_submission(package_id, run_id, submission_id, current_user.tenant_id)
+    target = None
+    for sd in submission.get("signed_documents", []):
+        if sd.get("document_id") == doc_id:
+            target = sd
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail="Document not found in submission")
+
+    pdf_bytes = None
+    s3_key = target.get("signed_s3_key")
+    if s3_key:
+        from ..services.s3_service import S3Service
+        pdf_bytes = S3Service().download_file(s3_key)
+    if not pdf_bytes and target.get("signed_file_url"):
+        try:
+            r = _rq.get(target["signed_file_url"], timeout=20)
+            if r.status_code == 200 and len(r.content) > 100:
+                pdf_bytes = r.content
+        except Exception:
+            pass
+    if not pdf_bytes:
+        raise HTTPException(status_code=404, detail="Signed document file unavailable")
+
+    safe_name = (target.get("document_name") or "document").replace(" ", "_")[:60]
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_signed.pdf"'},
+    )
+
+
+@router.get("/{package_id}/runs/{run_id}/submissions/{submission_id}/download/combined")
+async def download_submission_combined(
+    package_id: str,
+    run_id: str,
+    submission_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Download all submission signed documents merged into a single combined PDF."""
+    import requests as _rq
+    from PyPDF2 import PdfMerger, PdfReader
+    from ..services.s3_service import S3Service
+
+    submission = await _load_submission(package_id, run_id, submission_id, current_user.tenant_id)
+    signed_docs = submission.get("signed_documents", [])
+    if not signed_docs:
+        raise HTTPException(status_code=404, detail="No signed documents in submission")
+
+    s3 = S3Service()
+    merger = PdfMerger()
+    added = 0
+    # Preserve original signing order (signed_documents were appended in document order)
+    for sd in signed_docs:
+        pdf_bytes = None
+        s3_key = sd.get("signed_s3_key")
+        if s3_key:
+            pdf_bytes = s3.download_file(s3_key)
+        if not pdf_bytes and sd.get("signed_file_url"):
+            try:
+                r = _rq.get(sd["signed_file_url"], timeout=20)
+                if r.status_code == 200 and len(r.content) > 100:
+                    pdf_bytes = r.content
+            except Exception:
+                pass
+        if pdf_bytes:
+            try:
+                merger.append(PdfReader(io.BytesIO(pdf_bytes)))
+                added += 1
+            except Exception:
+                continue
+
+    if added == 0:
+        merger.close()
+        raise HTTPException(status_code=404, detail="Unable to retrieve any signed documents")
+
+    out = io.BytesIO()
+    merger.write(out)
+    merger.close()
+    out.seek(0)
+
+    safe_name = (submission.get("name") or "submission").replace(" ", "_")[:40] or "submission"
+    return StreamingResponse(
+        out,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}_combined_signed.pdf"'},
+    )
+
+
 @router.get("/{package_id}/certificate")
 async def download_certificate(
     package_id: str,
@@ -889,3 +1119,273 @@ async def delete_package(
     await db.docflow_packages.delete_one({"id": package_id})
 
     return {"success": True, "message": f"Package and {len(run_ids)} run(s) deleted"}
+
+
+
+# Phase 81.24 — Reminder logs endpoint (admin / sender visibility).
+@router.get("/{package_id}/reminder-logs")
+async def get_package_reminder_logs(
+    package_id: str,
+    limit: int = Query(default=200, ge=1, le=1000),
+    current_user: User = Depends(get_current_user),
+):
+    """Return chronologically-ordered reminder send logs for a package.
+    Includes both successful and failed delivery attempts."""
+    package = await db.docflow_packages.find_one(
+        {"id": package_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0, "id": 1, "package_name": 1},
+    )
+    if not package:
+        raise HTTPException(status_code=404, detail="Package not found")
+    cursor = db.docflow_reminder_logs.find(
+        {"package_id": package_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0},
+    ).sort("sent_at", -1).limit(limit)
+    logs = await cursor.to_list(length=limit)
+    return {"package_id": package_id, "package_name": package.get("package_name"), "count": len(logs), "logs": logs}
+
+
+
+# Phase 81.42 — Package RUN recipient actions (Resend / Void / Unvoid).
+# Mirrors the document-level equivalents at /documents/{id}/recipients/{rid}/...
+# Scope: the "run" is identified by {run_id}, which equals the
+# docflow_package_runs.id. Only affects email-based sends. Keeps terminal
+# (signed/approved/reviewed/declined) recipients untouched.
+
+async def _run_find_recipient(run_id: str, recipient_id: str, tenant_id: str):
+    run = await db.docflow_package_runs.find_one(
+        {"id": run_id, "tenant_id": tenant_id},
+        {"_id": 0},
+    )
+    if not run:
+        raise HTTPException(status_code=404, detail="Package run not found")
+    recipient = next(
+        (r for r in (run.get("recipients") or []) if r.get("id") == recipient_id),
+        None,
+    )
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    return run, recipient
+
+
+@router.post("/runs/{run_id}/recipients/{recipient_id}/resend")
+async def resend_run_recipient_email(
+    run_id: str,
+    recipient_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Resend the signing invitation email for a single package-run recipient.
+
+    Only valid for pending / notified / viewed / in_progress recipients.
+    Already-signed or voided recipients return 409.
+    """
+    from datetime import datetime, timezone
+    run, recipient = await _run_find_recipient(run_id, recipient_id, current_user.tenant_id)
+
+    if not recipient.get("email"):
+        raise HTTPException(status_code=400, detail="Recipient has no email to send to")
+    if recipient.get("status") in ("signed", "completed", "approved", "rejected", "reviewed", "declined"):
+        raise HTTPException(status_code=409, detail="Cannot resend to a recipient who has completed the flow")
+    if recipient.get("voided") or recipient.get("status") == "voided":
+        raise HTTPException(status_code=409, detail="Cannot resend to a voided recipient")
+
+    public_token = recipient.get("public_token")
+    if not public_token:
+        raise HTTPException(status_code=400, detail="Recipient has no public_token")
+
+    frontend_base = os.environ.get("FRONTEND_URL") or os.environ.get("PUBLIC_BASE_URL") or ""
+    recipient_url = (
+        f"{frontend_base.rstrip('/')}/docflow/package/{run_id}/view/{public_token}"
+        if frontend_base
+        else f"/docflow/package/{run_id}/view/{public_token}"
+    )
+
+    try:
+        from ..services.system_email_service import SystemEmailService
+        email_service = SystemEmailService()
+        result = await email_service.send_document_email(
+            recipient_email=recipient.get("email"),
+            recipient_name=recipient.get("name") or recipient.get("email"),
+            template_name=run.get("package_name") or run.get("name") or "Package",
+            document_url=recipient_url,
+            pdf_content=None,
+            sender_name="DocFlow CRM",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Unable to resend email: {e}")
+
+    if not result.get("success"):
+        raise HTTPException(status_code=502, detail=result.get("error") or "Unable to resend email.")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    # Phase 81.43 — dual-write stamp so Package Detail + Run Detail agree.
+    await db.docflow_package_runs.update_one(
+        {"id": run_id, "recipients.id": recipient_id},
+        {"$set": {"recipients.$.resent_at": now_iso, "updated_at": now_iso}},
+    )
+    await db.docflow_packages.update_one(
+        {"recipients.id": recipient_id, "recipients.public_token": recipient.get("public_token")},
+        {"$set": {"recipients.$.resent_at": now_iso, "updated_at": now_iso}},
+    )
+    try:
+        await audit_service.log_event(
+            tenant_id=current_user.tenant_id,
+            package_id=run_id,
+            event_type="run_recipient_resent",
+            actor=current_user.email,
+            metadata={
+                "recipient_id": recipient_id,
+                "recipient_email": recipient.get("email"),
+            },
+        )
+    except Exception:
+        pass
+    return {"success": True, "resent_at": now_iso}
+
+
+import os as _os
+from datetime import datetime as _datetime, timezone as _timezone
+
+
+@router.post("/runs/{run_id}/recipients/{recipient_id}/void")
+async def void_run_recipient(
+    run_id: str,
+    recipient_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Void a single recipient in a package run.
+
+    Blocks the recipient from opening their signing link, cancels future
+    reminders, and pushes an audit entry. Already-signed/terminal
+    recipients cannot be voided (returns 409).
+    """
+    run, recipient = await _run_find_recipient(run_id, recipient_id, current_user.tenant_id)
+
+    if recipient.get("status") in ("signed", "completed", "approved", "rejected", "reviewed", "declined"):
+        raise HTTPException(status_code=409, detail="Cannot void a recipient who has completed the flow")
+    if recipient.get("voided") or recipient.get("status") == "voided":
+        raise HTTPException(status_code=409, detail="Recipient is already voided")
+
+    now_iso = _datetime.now(_timezone.utc).isoformat()
+    # Phase 81.43 — write void state to BOTH docflow_package_runs (the
+    # authoritative per-run record) AND docflow_packages (the collection
+    # _find_package_by_recipient_token queries first). Without this dual
+    # write, the public /packages/public/{token} endpoint would still see
+    # the recipient as active and happily serve them the signing view.
+    void_set = {
+        "recipients.$.voided": True,
+        "recipients.$.voided_at": now_iso,
+        "recipients.$.voided_by": current_user.email,
+        "recipients.$.status": "voided",
+        "updated_at": now_iso,
+    }
+    await db.docflow_package_runs.update_one(
+        {"id": run_id, "recipients.id": recipient_id},
+        {"$set": void_set},
+    )
+    await db.docflow_packages.update_one(
+        {"recipients.id": recipient_id, "recipients.public_token": recipient.get("public_token")},
+        {"$set": void_set},
+    )
+
+    # Phase 81.42 — Stop pending-signature reminders for this recipient.
+    try:
+        from ..services.reminder_service import cancel_recipient_reminders
+        await cancel_recipient_reminders(db, run_id, recipient_id, reason="stopped")
+    except Exception:
+        pass
+
+    try:
+        await audit_service.log_event(
+            tenant_id=current_user.tenant_id,
+            package_id=run_id,
+            event_type="run_recipient_voided",
+            actor=current_user.email,
+            metadata={
+                "recipient_id": recipient_id,
+                "recipient_email": recipient.get("email"),
+            },
+        )
+    except Exception:
+        pass
+    return {"success": True, "voided_at": now_iso}
+
+
+@router.post("/runs/{run_id}/recipients/{recipient_id}/unvoid")
+async def unvoid_run_recipient(
+    run_id: str,
+    recipient_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Unvoid (restore) a previously-voided package-run recipient.
+
+    Restores status to `sent` if previously sent, else `pending`, and
+    resends a fresh signing email so the recipient has a working link.
+    Reminders will resume on the next scheduler tick for any recipient
+    whose reminder_state.status was left at `stopped`.
+    """
+    run, recipient = await _run_find_recipient(run_id, recipient_id, current_user.tenant_id)
+    if not recipient.get("voided") and recipient.get("status") != "voided":
+        raise HTTPException(status_code=409, detail="Recipient is not voided")
+
+    restored_status = "sent" if recipient.get("sent_at") else "pending"
+    now_iso = _datetime.now(_timezone.utc).isoformat()
+    # Phase 81.43 — dual-write to docflow_package_runs + docflow_packages so
+    # the public view sees the restored recipient state.
+    set_payload = {
+        "recipients.$.voided": False,
+        "recipients.$.voided_at": None,
+        "recipients.$.voided_by": None,
+        "recipients.$.unvoided_at": now_iso,
+        "recipients.$.unvoided_by": current_user.email,
+        "recipients.$.status": restored_status,
+        "updated_at": now_iso,
+    }
+    if isinstance(recipient.get("reminder_state"), dict):
+        set_payload["recipients.$.reminder_state.status"] = "active"
+    await db.docflow_package_runs.update_one(
+        {"id": run_id, "recipients.id": recipient_id},
+        {"$set": set_payload},
+    )
+    await db.docflow_packages.update_one(
+        {"recipients.id": recipient_id, "recipients.public_token": recipient.get("public_token")},
+        {"$set": set_payload},
+    )
+
+    # Best-effort resend of the signing email so the recipient has a working link.
+    public_token = recipient.get("public_token")
+    if public_token and recipient.get("email"):
+        frontend_base = _os.environ.get("FRONTEND_URL") or _os.environ.get("PUBLIC_BASE_URL") or ""
+        recipient_url = (
+            f"{frontend_base.rstrip('/')}/docflow/package/{run_id}/view/{public_token}"
+            if frontend_base
+            else f"/docflow/package/{run_id}/view/{public_token}"
+        )
+        try:
+            from ..services.system_email_service import SystemEmailService
+            email_service = SystemEmailService()
+            await email_service.send_document_email(
+                recipient_email=recipient.get("email"),
+                recipient_name=recipient.get("name") or recipient.get("email"),
+                template_name=run.get("package_name") or run.get("name") or "Package",
+                document_url=recipient_url,
+                pdf_content=None,
+                sender_name="DocFlow CRM",
+            )
+        except Exception:
+            pass
+
+    try:
+        await audit_service.log_event(
+            tenant_id=current_user.tenant_id,
+            package_id=run_id,
+            event_type="run_recipient_unvoided",
+            actor=current_user.email,
+            metadata={
+                "recipient_id": recipient_id,
+                "recipient_email": recipient.get("email"),
+            },
+        )
+    except Exception:
+        pass
+    return {"success": True, "unvoided_at": now_iso, "status": restored_status}

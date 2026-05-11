@@ -55,6 +55,26 @@ async def generate_document(
 ):
     """Generate document from template"""
     try:
+        # Phase 81 — when sms_mode=true, every recipient MUST have a phone.
+        # We validate at the API layer so the failure surfaces immediately
+        # before any DB write or email send.
+        if doc_data.sms_mode:
+            recipients = doc_data.recipients or []
+            missing = [
+                r.get("name") or r.get("email") or "Unnamed"
+                for r in recipients
+                if not (r.get("phone") or r.get("phone_number"))
+            ]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "SMS mode is enabled but the following recipient(s) "
+                        f"have no phone number: {', '.join(missing)}. "
+                        "Add a phone number for each recipient or disable SMS mode."
+                    ),
+                )
+
         document = await document_service.generate_document(
             template_id=doc_data.template_id,
             crm_object_id=doc_data.crm_object_id,
@@ -64,7 +84,10 @@ async def generate_document(
             delivery_channels=doc_data.delivery_channels,
             recipient_email=doc_data.recipient_email,
             recipient_name=doc_data.recipient_name,
-            expires_in_days=doc_data.expires_in_days
+            expires_in_days=doc_data.expires_in_days,
+            recipients=doc_data.recipients,
+            routing_mode=doc_data.routing_mode,
+            sms_mode=bool(doc_data.sms_mode),
         )
         return Document(**document)
     except ValueError as e:
@@ -242,6 +265,22 @@ async def view_document_public(document_id: str, version: str):
     if await document_service.mark_expired_if_needed(document_id):
         raise HTTPException(status_code=410, detail="Document has expired")
 
+    # Phase 81.67 (security fix) — block PDF access for voided documents.
+    document = await db.docflow_documents.find_one({"id": document_id})
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if str(document.get("status") or "").lower() == "voided":
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "document_voided",
+                "message": "This document has been voided by the sender.",
+                "voided_at": document.get("voided_at"),
+                "void_reason": document.get("void_reason") or "",
+                "document_name": document.get("template_name") or document.get("name") or "",
+            },
+        )
+
     pdf_bytes = await document_service.get_document_pdf(document_id, version)
     
     if not pdf_bytes:
@@ -251,7 +290,6 @@ async def view_document_public(document_id: str, version: str):
         )
     
     # Get document info for filename
-    document = await db.docflow_documents.find_one({"id": document_id})
     filename = f"{document.get('template_name', 'document')}_{version}.pdf"
     
     return StreamingResponse(
@@ -274,6 +312,13 @@ async def sign_document(
     """Add signature to document (public endpoint)"""
     if await document_service.mark_expired_if_needed(document_id):
         raise HTTPException(status_code=410, detail="Document has expired")
+
+    # Phase 81.67 (security fix) — block sign on voided document.
+    _doc_status = await db.docflow_documents.find_one(
+        {"id": document_id}, {"_id": 0, "status": 1}
+    )
+    if _doc_status and str(_doc_status.get("status") or "").lower() == "voided":
+        raise HTTPException(status_code=410, detail="This document has been voided by the sender")
 
     # Add metadata
     signature_data["ip_address"] = request.client.host

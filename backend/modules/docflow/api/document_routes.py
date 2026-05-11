@@ -10,6 +10,7 @@ import io
 import json
 import logging
 from datetime import datetime, timezone
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,26 @@ async def generate_document(
 ):
     """Generate document from template with PDF generation"""
     try:
+        # Phase 81 — when sms_mode=true, every recipient MUST have a phone.
+        # Validate at the API layer so the failure surfaces immediately
+        # before any DB write or email send.
+        if doc_data.sms_mode:
+            recipients = doc_data.recipients or []
+            missing = [
+                r.get("name") or r.get("email") or "Unnamed"
+                for r in recipients
+                if not (r.get("phone") or r.get("phone_number"))
+            ]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "SMS mode is enabled but the following recipient(s) "
+                        f"have no phone number: {', '.join(missing)}. "
+                        "Add a phone number for each recipient or disable SMS mode."
+                    ),
+                )
+
         # Use enhanced service that actually generates PDFs
         document = await enhanced_document_service.generate_document(
             template_id=doc_data.template_id,
@@ -75,7 +96,8 @@ async def generate_document(
             recipient_name=doc_data.recipient_name,
             recipients=doc_data.recipients,
             routing_mode=doc_data.routing_mode,
-            expires_in_days=doc_data.expires_in_days
+            expires_in_days=doc_data.expires_in_days,
+            sms_mode=bool(doc_data.sms_mode),
         )
         return Document(**document)
     except ValueError as e:
@@ -89,6 +111,7 @@ async def list_documents(
     search: Optional[str] = None,
     page: int = 1,
     limit: int = 10,
+    sort_order: str = "newest",
     current_user: User = Depends(get_current_user)
 ):
     """List documents with pagination and search"""
@@ -98,7 +121,8 @@ async def list_documents(
         status,
         search,
         page,
-        limit
+        limit,
+        sort_order=sort_order,
     )
 
     # Clean documents for response
@@ -172,9 +196,10 @@ async def get_document_detail(
                 "viewed_at": c.get("viewed_at"),
             })
 
-    # Counters
+    # Counters — Phase 81.34: include approved/rejected/reviewed in completed.
+    TERMINAL_DONE = ("signed", "completed", "approved", "rejected", "reviewed")
     total = len(recipients)
-    signed = sum(1 for r in recipients if r.get("status") in ("signed", "completed") or r.get("signed_at"))
+    signed = sum(1 for r in recipients if r.get("status") in TERMINAL_DONE or r.get("signed_at"))
     viewed = sum(1 for r in recipients if r.get("status") == "viewed")
     voided = sum(1 for r in recipients if r.get("voided") or r.get("status") == "voided")
     pending = max(0, total - signed - voided)
@@ -241,6 +266,10 @@ async def get_document_detail(
         "downloads": downloads,
         "public_token": document.get("public_token"),
         "audit_trail": document.get("audit_trail") or [],
+        # Phase 81.67 — full-document void metadata
+        "void_reason": document.get("void_reason"),
+        "voided_at": document.get("voided_at"),
+        "voided_by": document.get("voided_by"),
     }
 
 
@@ -248,12 +277,63 @@ async def get_document_detail(
 async def get_document_public(token: str):
     """Get document by public token (for signing - no auth required)"""
     try:
+        # Phase 81.67 (security fix) — entity-level void must be checked
+        # BEFORE delegating to the service. The service short-circuits for
+        # generator documents (reusable public links) and returns minimal
+        # info without `status`, so without this pre-check a voided generator
+        # would still serve content. Also covers per-recipient docs as a
+        # defense-in-depth measure.
+        try:
+            _doc_for_void = await db.docflow_documents.find_one(
+                {
+                    "$or": [
+                        {"public_token": token},
+                        {"recipients.public_token": token},
+                    ]
+                },
+                {
+                    "_id": 0,
+                    "status": 1,
+                    "void_reason": 1,
+                    "voided_at": 1,
+                    "template_name": 1,
+                    "name": 1,
+                },
+            )
+        except Exception:
+            _doc_for_void = None
+        if _doc_for_void and str(_doc_for_void.get("status") or "").lower() == "voided":
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "code": "document_voided",
+                    "message": "This document has been voided by the sender.",
+                    "voided_at": _doc_for_void.get("voided_at"),
+                    "void_reason": _doc_for_void.get("void_reason") or "",
+                    "document_name": _doc_for_void.get("template_name") or _doc_for_void.get("name") or "",
+                },
+            )
+
         doc_result = await enhanced_document_service.get_document_public_by_recipient_token(token)
         if not doc_result:
             raise HTTPException(status_code=404, detail="Document not found or expired")
 
         if doc_result.get("expired"):
             raise HTTPException(status_code=410, detail="Document has expired")
+
+        # Phase 81.67 — entity-level void → 410 Gone with structured info so
+        # the public viewer can render a "Document Voided" banner.
+        if str(doc_result.get("status") or "").lower() == "voided":
+            raise HTTPException(
+                status_code=410,
+                detail={
+                    "code": "document_voided",
+                    "message": "This document has been voided by the sender.",
+                    "voided_at": doc_result.get("voided_at"),
+                    "void_reason": doc_result.get("void_reason") or "",
+                    "document_name": doc_result.get("template_name") or doc_result.get("name") or "",
+                },
+            )
 
         # Generator documents return minimal info — user must call /instantiate first
         if doc_result.get("is_generator"):
@@ -296,12 +376,214 @@ async def get_document_public(token: str):
             result["can_sign"] = False
             result["voided_at"] = active.get("voided_at")
 
+        # Phase 81 — surface SMS verification requirement to the signer UI.
+        # Phase 81.4 — only flag `sms_required=true` when the active recipient
+        # still has a pending action (signer or approver). Viewers, completed
+        # signers, already-decided approvers, voided/declined/expired
+        # recipients, and terminal documents never trigger the disclaimer.
+        try:
+            doc_doc = await db.docflow_documents.find_one(
+                {"id": result.get("id")},
+                {"_id": 0, "sms_mode": 1, "sms_consent": 1, "status": 1, "recipients": 1},
+            )
+            sms_should_show = False
+            if doc_doc and doc_doc.get("sms_consent"):
+                rec = next(
+                    (r for r in (doc_doc.get("recipients") or []) if r.get("public_token") == token),
+                    None,
+                )
+                rec_status = str((rec or {}).get("status") or "").lower()
+                rec_role = str((rec or {}).get("role_type") or (rec or {}).get("role") or "SIGN").upper()
+                doc_status = str(doc_doc.get("status") or "").lower()
+                terminal_rec = rec_status in {"signed", "completed", "approved", "rejected", "declined", "voided", "expired", "skipped"}
+                terminal_doc = doc_status in {"completed", "signed", "voided", "expired", "declined", "cancelled"}
+                actionable_role = rec_role in {"SIGN", "SIGNER", "APPROVE_REJECT", "APPROVER"}
+                sms_should_show = (
+                    rec is not None
+                    and actionable_role
+                    and not terminal_rec
+                    and not terminal_doc
+                    and not (rec or {}).get("voided")
+                )
+                if sms_should_show:
+                    from ..services.sms_service import mask_phone
+                    result["sms_required"] = True
+                    result["sms_mode"] = bool(doc_doc.get("sms_mode", False))
+                    result["sms_verified"] = bool(rec and rec.get("sms_verified"))
+                    result["recipient_phone_masked"] = mask_phone((rec or {}).get("phone"))
+                else:
+                    result["sms_required"] = False
+                    result["sms_mode"] = bool(doc_doc.get("sms_mode", False))
+            else:
+                result["sms_required"] = False
+                result["sms_mode"] = False
+        except Exception as sms_err:
+            logger.warning(f"SMS state resolution failed: {sms_err}")
+            result["sms_required"] = False
+            result["sms_mode"] = False
+
         return result
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error in get_document_public: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 81 — SMS verification endpoints (public, recipient-scoped via token)
+# ──────────────────────────────────────────────────────────────────────────
+
+class _SmsSendRequest(BaseModel):
+    pass  # no body — token is in path; phone is server-side
+
+
+class _SmsVerifyRequest(BaseModel):
+    code: str
+
+
+@router.post("/documents/public/{token}/sms/send-otp")
+async def sms_send_otp(token: str):
+    """Generate + send a 6-digit OTP via SMS to the recipient. Idempotent
+    within a 60s window: re-issuing the same OTP if recently created."""
+    from ..services.sms_service import generate_otp, send_otp_sms
+
+    doc = await db.docflow_documents.find_one(
+        {"recipients.public_token": token},
+        {"_id": 0, "id": 1, "template_name": 1, "sms_mode": 1, "recipients": 1},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Invalid signing link")
+    if not doc.get("sms_mode"):
+        raise HTTPException(status_code=400, detail="SMS verification is not enabled for this document")
+
+    recipient = next(
+        (r for r in (doc.get("recipients") or []) if r.get("public_token") == token),
+        None,
+    )
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    phone = recipient.get("phone")
+    if not phone:
+        raise HTTPException(status_code=400, detail="Recipient has no phone number on file")
+
+    # Rate limit: reuse existing OTP if one was issued in the last 60 seconds
+    now = datetime.now(timezone.utc)
+    existing = recipient.get("sms_otp")
+    existing_at_raw = recipient.get("sms_otp_issued_at")
+    existing_at = None
+    if existing_at_raw:
+        try:
+            existing_at = datetime.fromisoformat(str(existing_at_raw).replace("Z", "+00:00"))
+        except Exception:
+            existing_at = None
+
+    if existing and existing_at and (now - existing_at).total_seconds() < 60:
+        otp = existing
+    else:
+        otp = generate_otp(6)
+        await db.docflow_documents.update_one(
+            {"id": doc["id"], "recipients.public_token": token},
+            {
+                "$set": {
+                    "recipients.$.sms_otp": otp,
+                    "recipients.$.sms_otp_issued_at": now.isoformat(),
+                    "recipients.$.sms_otp_attempts": 0,
+                }
+            },
+        )
+
+    result = await send_otp_sms(phone, otp, document_name=doc.get("template_name"))
+
+    # Audit (non-PII)
+    try:
+        await db.docflow_documents.update_one(
+            {"id": doc["id"]},
+            {"$push": {"audit_trail": {
+                "event": "sms_otp_sent",
+                "recipient_id": recipient.get("id"),
+                "stubbed": bool(result.get("stubbed")),
+                "at": now.isoformat(),
+            }}},
+        )
+    except Exception:
+        pass
+
+    return {
+        "success": result.get("success", False),
+        "stubbed": bool(result.get("stubbed")),
+        "expires_in_seconds": 600,
+    }
+
+
+@router.post("/documents/public/{token}/sms/verify-otp")
+async def sms_verify_otp(token: str, body: _SmsVerifyRequest):
+    """Verify the OTP and mark the recipient as sms_verified=true. The
+    signing endpoint will require this flag when sms_mode is enabled."""
+    doc = await db.docflow_documents.find_one(
+        {"recipients.public_token": token},
+        {"_id": 0, "id": 1, "sms_mode": 1, "recipients": 1},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Invalid signing link")
+    if not doc.get("sms_mode"):
+        raise HTTPException(status_code=400, detail="SMS verification is not enabled for this document")
+
+    recipient = next(
+        (r for r in (doc.get("recipients") or []) if r.get("public_token") == token),
+        None,
+    )
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    if recipient.get("sms_verified"):
+        return {"success": True, "already_verified": True}
+
+    issued_raw = recipient.get("sms_otp_issued_at")
+    issued_at = None
+    if issued_raw:
+        try:
+            issued_at = datetime.fromisoformat(str(issued_raw).replace("Z", "+00:00"))
+        except Exception:
+            issued_at = None
+    if not recipient.get("sms_otp") or not issued_at:
+        raise HTTPException(status_code=400, detail="No active code. Request a new one.")
+    if (datetime.now(timezone.utc) - issued_at).total_seconds() > 600:
+        raise HTTPException(status_code=400, detail="Code has expired. Request a new one.")
+
+    attempts = int(recipient.get("sms_otp_attempts") or 0)
+    if attempts >= 5:
+        raise HTTPException(status_code=429, detail="Too many attempts. Request a new code.")
+
+    submitted = (body.code or "").strip()
+    if submitted != recipient.get("sms_otp"):
+        await db.docflow_documents.update_one(
+            {"id": doc["id"], "recipients.public_token": token},
+            {"$inc": {"recipients.$.sms_otp_attempts": 1}},
+        )
+        raise HTTPException(status_code=400, detail="Incorrect code")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    await db.docflow_documents.update_one(
+        {"id": doc["id"], "recipients.public_token": token},
+        {
+            "$set": {
+                "recipients.$.sms_verified": True,
+                "recipients.$.sms_verified_at": now_iso,
+                # Clear the OTP material so it can't be re-used.
+                "recipients.$.sms_otp": None,
+                "recipients.$.sms_otp_issued_at": None,
+                "recipients.$.sms_otp_attempts": 0,
+            },
+            "$push": {
+                "audit_trail": {
+                    "event": "sms_otp_verified",
+                    "recipient_id": recipient.get("id"),
+                    "at": now_iso,
+                }
+            },
+        },
+    )
+    return {"success": True, "verified_at": now_iso}
 
 
 @router.post("/documents/public/instantiate")
@@ -314,6 +596,31 @@ async def instantiate_public_document(data: dict):
 
     if not token or not name or not email:
         raise HTTPException(status_code=400, detail="Token, name, and email are required")
+
+    # Phase 81.67 (security fix) — block instantiation when the parent
+    # generator document has been voided. Without this check, the user
+    # could submit identity, get a fresh child token, and access content
+    # via the new token — bypassing the void.
+    parent_doc = await db.docflow_documents.find_one(
+        {
+            "$or": [
+                {"public_token": token},
+                {"recipients.public_token": token},
+            ]
+        },
+        {"_id": 0, "status": 1, "void_reason": 1, "voided_at": 1, "template_name": 1, "name": 1},
+    )
+    if parent_doc and str(parent_doc.get("status") or "").lower() == "voided":
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "document_voided",
+                "message": "This document has been voided by the sender.",
+                "voided_at": parent_doc.get("voided_at"),
+                "void_reason": parent_doc.get("void_reason") or "",
+                "document_name": parent_doc.get("template_name") or parent_doc.get("name") or "",
+            },
+        )
 
     try:
         result = await enhanced_document_service.instantiate_public_document(token, name, email)
@@ -336,7 +643,15 @@ async def send_signing_otp(
     
     if not all([token, name, email]):
         raise HTTPException(status_code=400, detail="Missing required verification data")
-        
+
+    # Phase 81.67 (security fix) — block OTP dispatch for voided documents.
+    _doc_void = await db.docflow_documents.find_one(
+        {"$or": [{"public_token": token}, {"recipients.public_token": token}]},
+        {"_id": 0, "status": 1},
+    )
+    if _doc_void and str(_doc_void.get("status") or "").lower() == "voided":
+        raise HTTPException(status_code=410, detail="This document has been voided by the sender")
+
     success = await enhanced_document_service.send_otp(token, name, email)
     if not success:
         raise HTTPException(status_code=500, detail="Failed to send verification code")
@@ -355,7 +670,15 @@ async def check_signing_otp(
     
     if not all([token, email, otp]):
         raise HTTPException(status_code=400, detail="Missing verification code")
-        
+
+    # Phase 81.67 (security fix) — block OTP verification for voided documents.
+    _doc_void = await db.docflow_documents.find_one(
+        {"$or": [{"public_token": token}, {"recipients.public_token": token}]},
+        {"_id": 0, "status": 1},
+    )
+    if _doc_void and str(_doc_void.get("status") or "").lower() == "voided":
+        raise HTTPException(status_code=410, detail="This document has been voided by the sender")
+
     is_valid = await enhanced_document_service.verify_otp(token, email, otp)
     if not is_valid:
         raise HTTPException(status_code=401, detail="Invalid or expired verification code")
@@ -380,18 +703,24 @@ async def sign_document(
 
         # Phase 80: block signing attempts from voided recipients server-side.
         # Frontend will also hide controls, but this is the authoritative check.
-        if recipient_token:
-            _doc = await db.docflow_documents.find_one(
-                {"id": document_id},
-                {"_id": 0, "recipients": 1},
+        # Phase 81.67: also block signing attempts on a fully voided document.
+        _doc = await db.docflow_documents.find_one(
+            {"id": document_id},
+            {"_id": 0, "recipients": 1, "status": 1},
+        )
+        if _doc and str(_doc.get("status") or "").lower() == "voided":
+            raise HTTPException(status_code=410, detail="This document has been voided by the sender")
+        if recipient_token and _doc:
+            _r = next(
+                (r for r in (_doc.get("recipients") or []) if r.get("public_token") == recipient_token),
+                None,
             )
-            if _doc:
-                _r = next(
-                    (r for r in (_doc.get("recipients") or []) if r.get("public_token") == recipient_token),
-                    None,
-                )
-                if _r and (_r.get("voided") or _r.get("status") == "voided"):
-                    raise HTTPException(status_code=403, detail="This signing request has been voided by the sender")
+            if _r and (_r.get("voided") or _r.get("status") == "voided"):
+                raise HTTPException(status_code=403, detail="This signing request has been voided by the sender")
+
+        # Phase 81.7 — SMS verification block removed. Disclaimer popup is the
+        # only SMS-related UX gate; signing endpoints no longer enforce OTP
+        # verification at the API layer.
 
         # Parse field data
         field_data_dict = {}
@@ -419,6 +748,8 @@ async def sign_document(
         return {"success": True, "message": "Signature added successfully"}
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid field data format")
+    except HTTPException:
+        raise  # Re-raise HTTPException as-is (don't wrap in 500)
     except Exception as e:
         logger.error(f"Error in sign_document: {e}")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
@@ -440,7 +771,23 @@ async def view_document(
     document = await db.docflow_documents.find_one({"id": document_id})
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    
+
+    # Phase 81.67 (security fix) — block PDF access for voided documents.
+    # The /view endpoint is unauthenticated (used by the public signing UI),
+    # so without this check anyone with the doc_id could still fetch the
+    # raw PDF bytes after a void.
+    if str(document.get("status") or "").lower() == "voided":
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "document_voided",
+                "message": "This document has been voided by the sender.",
+                "voided_at": document.get("voided_at"),
+                "void_reason": document.get("void_reason") or "",
+                "document_name": document.get("template_name") or document.get("name") or "",
+            },
+        )
+
     pdf_bytes = await enhanced_document_service.get_document_pdf(document_id, version)
     
     if not pdf_bytes:
@@ -824,6 +1171,16 @@ async def void_recipient(
         },
     )
 
+    # Phase 81.42 — Stop all future pending-signature email reminders for
+    # this recipient. Already-sent reminders remain in history; future ones
+    # are blocked. Safe-guarded because the recipient may have no reminder
+    # config at all (reminder_state is null in that case).
+    try:
+        from ..services.reminder_service import cancel_recipient_reminders
+        await cancel_recipient_reminders(db, document_id, recipient_id, reason="stopped")
+    except Exception as _rem_err:
+        logger.warning(f"Failed to cancel reminders on void_recipient: {_rem_err}")
+
     # Send cancellation email (best-effort, never blocks the void)
     try:
         from ..services.email_service import EmailService
@@ -946,9 +1303,58 @@ async def unvoid_recipient(
     return {"success": True, "unvoided_at": now_iso, "status": restored_status}
 
 
+# Phase 81.67 — Full Document Void (cascading)
+class _DocumentVoidBody(BaseModel):
+    reason: Optional[str] = None
 
+
+@router.post("/documents/{document_id}/void")
+async def void_document(
+    document_id: str,
+    body: _DocumentVoidBody,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Void a full document. Cascades to all non-terminal recipients,
+    cancels reminders, sends notification emails, and writes an audit event.
+    Idempotent: re-voiding returns existing void info.
+    """
+    from ..services.void_service import VoidService
+    from ..services.docflow_audit_service import DocFlowAuditService
+    from ..services.system_email_service import SystemEmailService
+
+    void_service = VoidService(
+        db,
+        audit_service=DocFlowAuditService(db),
+        system_email_service=SystemEmailService(),
+    )
+
+    ip_address = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent", "")
+
+    try:
+        result = await void_service.void_document(
+            document_id=document_id,
+            tenant_id=current_user.tenant_id,
+            reason=body.reason,
+            actor=current_user.id,
+            actor_email=current_user.email,
+            ip_address=ip_address,
+            user_agent=user_agent,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    return {"success": True, **result}
+
+
+
+@router.post("/documents/{document_id}/role-action")
 async def document_role_action(document_id: str, request: Request):
-    """Handle Approver/Reviewer actions on a template-level document."""
+    """Handle Approver/Reviewer actions on a template-level document.
+    Phase 81.33 — restored missing @router.post decorator. Without it the
+    endpoint was unregistered and the frontend's reject/approve/review
+    button returned 404."""
     from datetime import timezone
     body = await request.json()
     action = body.get("action")  # approve, reject, review

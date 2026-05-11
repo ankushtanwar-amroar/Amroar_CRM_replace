@@ -45,7 +45,14 @@ const TemplateEditor = () => {
   const [autoRunValidationToken, setAutoRunValidationToken] = useState(0);
   const [uploadedPdfFile, setUploadedPdfFile] = useState(null);
   const [pdfLoading, setPdfLoading] = useState(false);
+  // Phase 81.76 — replace-source-file flow state (busy flag for spinner UI).
+  const [replacingFile, setReplacingFile] = useState(false);
+  // Phase 81.74 — structured error state when the template's PDF is missing
+  // from storage so the UI can show a banner + re-upload CTA instead of
+  // endlessly retrying.
+  const [templateFileError, setTemplateFileError] = useState(null);
   const [fieldPlacements, setFieldPlacements] = useState([]);
+  const [serverFieldsVersion, setServerFieldsVersion] = useState(0);
   const [crmObjects, setCrmObjects] = useState([]);
   const [crmFields, setCrmFields] = useState([]);
   const [cluebotOpen, setCluebotOpen] = useState(false);
@@ -215,7 +222,13 @@ const TemplateEditor = () => {
         const cached = JSON.parse(cacheRaw);
         if (cached?.templateData) {
           setTemplateData(cached.templateData);
-          if (cached.templateData.is_validated) setIsValidated(true);
+          // Phase 81.37 — Drafts always require a FRESH validation in the
+          // current session. Only ACTIVE templates start out validated;
+          // drafts get isValidated=false on load so the Save Template
+          // button stays disabled until the user clicks Validate.
+          if (cached.templateData.status === 'active' && cached.templateData.is_validated) {
+            setIsValidated(true);
+          }
           if (Array.isArray(cached.fieldPlacements)) setFieldPlacements(cached.fieldPlacements);
           if (Array.isArray(cached.contentBlocks)) setContentBlocks(cached.contentBlocks);
           hydratedFromCache = true;
@@ -230,7 +243,13 @@ const TemplateEditor = () => {
       // ── Phase 1: critical path — template metadata only. Blocks shell render.
       const data = await docflowService.getTemplate(templateId);
       setTemplateData(data);
-      if (data.is_validated) setIsValidated(true);
+      // Phase 81.37 — Drafts always need a fresh validation pass; only
+      // active templates trust the persisted is_validated flag.
+      if (data.status === 'active' && data.is_validated) {
+        setIsValidated(true);
+      } else {
+        setIsValidated(false);
+      }
 
       // Shell renders NOW. Everything below is background/non-blocking.
       setLoading(false);
@@ -240,6 +259,7 @@ const TemplateEditor = () => {
       const pdfPromise = (async () => {
         if (!(data.file_url || data.s3_key || data.pdf_file_path || data.pdf_filename)) return;
         setPdfLoading(true);
+        setTemplateFileError(null);
         try {
           let pdfUrlToLoad = null;
           if (data.file_type === 'docx') {
@@ -278,8 +298,29 @@ const TemplateEditor = () => {
             setUploadedPdfFile(file);
           }
         } catch (pdfError) {
+          // Phase 81.74 — parse structured 410 detail from backend so we can
+          // show an actionable message ("PDF file missing in storage") and
+          // avoid retry loops on permanent errors. The axios interceptor
+          // attaches `response.data` on failures.
           console.error('Error loading template file:', pdfError);
-          toast.error('Failed to load template file');
+          const resp = pdfError?.response;
+          const detail = resp?.data?.detail;
+          let msg = 'Failed to load template file';
+          let code = null;
+          if (detail && typeof detail === 'object') {
+            code = detail.code;
+            if (detail.message) msg = detail.message;
+          } else if (typeof detail === 'string') {
+            msg = detail;
+          }
+          // Permanent storage errors: surface as error toast + mark state so
+          // the viewer shows a re-upload CTA instead of a blank canvas.
+          if (resp?.status === 410 || code === 'template_file_missing' || code === 'template_file_not_uploaded') {
+            setTemplateFileError({ code, message: msg });
+            toast.error(msg, { duration: 6000 });
+          } else {
+            toast.error(msg);
+          }
         } finally {
           setPdfLoading(false);
         }
@@ -295,13 +336,19 @@ const TemplateEditor = () => {
         docflowService.getFieldPlacements(templateId)
           .then(fieldData => {
             const fps = fieldData?.field_placements || [];
-            if (fieldData?.field_placements) setFieldPlacements(fps);
+            if (fieldData?.field_placements) {
+              setFieldPlacements(fps);
+              setServerFieldsVersion(v => v + 1);
+            }
             return fps;
           })
           .catch(fieldError => {
             console.warn('Field placements endpoint failed, using template payload:', fieldError);
             const fps = data.field_placements || [];
-            if (fps.length) setFieldPlacements(fps);
+            if (fps.length) {
+              setFieldPlacements(fps);
+              setServerFieldsVersion(v => v + 1);
+            }
             return fps;
           }),
         docflowService.getContentBlocks(templateId || data.id)
@@ -406,8 +453,54 @@ const TemplateEditor = () => {
     }
   };
 
-  const handleFileUpload = async (e) => {
-    const file = e.target.files?.[0];
+  // Phase 81.76 — Replace the source PDF/DOC/DOCX of an existing template
+  // without losing field placements or version history. Backend returns the
+  // refreshed template document; we rehydrate local state so the Visual
+  // Builder picks up the new file on its next render.
+  const handleReplaceSourceFile = async (e) => {
+    const file = e.target?.files?.[0];
+    if (!file) return;
+    // Reset input so selecting the same filename again still fires `onChange`.
+    try { e.target.value = ''; } catch (_) { /* empty */ }
+
+    const allowed = ['.pdf', '.doc', '.docx'];
+    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+    if (!allowed.includes(ext)) {
+      toast.error('Only PDF, DOC, or DOCX files are allowed.');
+      return;
+    }
+    if (file.size > 100 * 1024 * 1024) {
+      toast.error('File size must be under 100MB.');
+      return;
+    }
+
+    try {
+      setReplacingFile(true);
+      setTemplateFileError(null);
+      const res = await docflowService.replaceTemplateFile(templateId, file);
+      const refreshed = res?.data?.template || res?.template;
+      if (refreshed) {
+        setTemplateData(prev => ({ ...prev, ...refreshed }));
+      }
+      setUploadedPdfFile(null);
+      toast.success('Source file replaced. Rebuild field placements if layout changed.');
+      // Force the PDF loader to re-run on the new s3_key.
+      setTimeout(() => {
+        try { window.location.reload(); } catch (_) { /* empty */ }
+      }, 600);
+    } catch (err) {
+      console.error('Replace source file failed:', err);
+      const detail = err?.response?.data?.detail;
+      const msg = typeof detail === 'string'
+        ? detail
+        : (detail?.message || 'Failed to replace source file.');
+      toast.error(msg);
+    } finally {
+      setReplacingFile(false);
+    }
+  };
+
+  const handleFileUpload = async (e) => {  const file = e.target.files?.[0];
     if (!file) return;
 
     // STRICT FILE TYPE VALIDATION - Only PDF and DOCX allowed
@@ -571,6 +664,89 @@ const TemplateEditor = () => {
     setTimeout(() => setValidating(false), 500);
   };
 
+  // Phase 81.19 — Save as Draft. Always-enabled, skips validation entirely
+  // so the user can park an in-progress template (e.g. mid-field-placement)
+  // and resume later. Distinct from `handleSave` which requires validation
+  // and activates the template. Persists the current `field_placements` +
+  // `content_blocks` so reopening picks up exactly where the user left off.
+  // Phase 81.37 — Editing an ACTIVE template + Save as Draft now CLONES into
+  // a brand-new draft version (vN+1) instead of overwriting the active vN.
+  // This keeps the published version stable while letting the user park
+  // changes for later iteration.
+  const handleSaveAsDraft = async () => {
+    if (!templateData.name?.trim()) {
+      toast.error('Please enter a template name');
+      return;
+    }
+    try {
+      setSaving(true);
+      const isActive = templateData.status === 'active';
+      const saveData = {
+        ...templateData,
+        field_placements: fieldPlacements,
+        content_blocks: contentBlocks.length > 0 ? contentBlocks : undefined,
+        status: 'draft',
+        is_validated: false,
+      };
+      delete saveData._id;
+
+      if (isEditMode && isActive) {
+        // Clone Active → new Draft version (preserves the active vN).
+        const result = await docflowService.createNewVersion(templateId, saveData);
+        if (result?.success && result.template) {
+          const response = result.template;
+          const fromVer = templateData.version || 1;
+          if (fieldPlacements && fieldPlacements.length > 0) {
+            try { await docflowService.updateFieldPlacements(response.id, fieldPlacements); } catch {}
+          }
+          if (contentBlocks && contentBlocks.length > 0) {
+            try { await docflowService.updateContentBlocks(response.id, contentBlocks); } catch {}
+          }
+          toast.success(`Draft v${response.version} created from active v${fromVer}`);
+        } else {
+          toast.error('Failed to create draft version');
+          return;
+        }
+      } else if (isEditMode) {
+        // Already a draft → save in place.
+        await docflowService.updateTemplate(templateId, saveData);
+        if (fieldPlacements && fieldPlacements.length > 0) {
+          try { await docflowService.updateFieldPlacements(templateId, fieldPlacements); } catch {}
+        }
+        if (contentBlocks && contentBlocks.length > 0) {
+          try { await docflowService.updateContentBlocks(templateId, contentBlocks); } catch {}
+        }
+        // Update cache so the next reopen starts from the saved state, not stale pre-save data.
+        try {
+          sessionStorage.setItem(
+            `docflow_tpl_cache:${templateId}`,
+            JSON.stringify({
+              templateData: { ...templateData, status: 'draft', is_validated: false },
+              fieldPlacements,
+              contentBlocks,
+            })
+          );
+        } catch (_) {}
+        toast.success('Draft saved');
+      } else {
+        const response = await docflowService.createTemplate(saveData);
+        if (fieldPlacements && fieldPlacements.length > 0) {
+          try { await docflowService.updateFieldPlacements(response.id, fieldPlacements); } catch {}
+        }
+        if (contentBlocks && contentBlocks.length > 0) {
+          try { await docflowService.updateContentBlocks(response.id, contentBlocks); } catch {}
+        }
+        toast.success('Template saved as draft');
+      }
+      setTimeout(() => navigate('/setup/docflow'), 1000);
+    } catch (error) {
+      console.error('Save as Draft failed', error);
+      toast.error(error?.response?.data?.detail || 'Failed to save draft');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const handleSave = async () => {
     if (!templateData.name?.trim()) {
       toast.error('Please enter a template name');
@@ -702,8 +878,8 @@ const TemplateEditor = () => {
             </button>
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-xl font-semibold text-gray-900" data-testid="editor-title">
-                  {isEditMode ? 'Edit Template' : 'Create Template'}
+                <h1 className="text-xl font-semibold text-gray-900 truncate max-w-[400px]" data-testid="editor-title" title={templateData.name}>
+                  {isEditMode ? (templateData.name || 'Edit Template') : 'Create Template'}
                 </h1>
                 {/* Version Badge */}
                 {isEditMode && templateData.version && (
@@ -802,20 +978,35 @@ const TemplateEditor = () => {
               </button>
             )}
             {isEditMode && (
-              <button
-                onClick={handleSave}
-                disabled={saving || !templateData.name || !isValidated || (validationResult && validationResult.errors?.length > 0)}
-                className={`flex items-center gap-2 px-4 py-2.5 rounded-lg font-medium transition-colors shadow-sm ${
-                  isValidated && !(validationResult && validationResult.errors?.length > 0)
-                  ? 'bg-indigo-600 text-white hover:bg-indigo-700'
-                  : 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                }`}
-                title={!isValidated ? 'Please run validation first' : ''}
-                data-testid="save-btn"
-              >
-                <Save className="h-4 w-4" />
-                {saving ? 'Saving...' : (isEditMode && templateData.status === 'active') ? 'Save as New Version' : 'Save Template'}
-              </button>
+              <>
+                {/* Phase 81.19 — Save as Draft. Always enabled (only requires
+                    a template name). Skips validation. Lets the user park
+                    progress and come back later. */}
+                <button
+                  onClick={handleSaveAsDraft}
+                  disabled={saving || !templateData.name?.trim()}
+                  className="flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 font-medium transition-colors shadow-sm"
+                  data-testid="save-draft-btn"
+                  title="Save your work-in-progress as a draft (no validation required)"
+                >
+                  <Save className="h-4 w-4" />
+                  Save as Draft
+                </button>
+                <button
+                  onClick={handleSave}
+                  disabled={saving || !templateData.name || !isValidated || (validationResult && validationResult.errors?.length > 0)}
+                  className={`flex items-center gap-2 px-4 py-2.5 rounded-lg font-medium transition-colors shadow-sm ${
+                    isValidated && !(validationResult && validationResult.errors?.length > 0)
+                    ? 'bg-indigo-600 text-white hover:bg-indigo-700'
+                    : 'bg-gray-200 text-gray-500 cursor-not-allowed'
+                  }`}
+                  title={!isValidated ? 'Please run validation first' : ''}
+                  data-testid="save-btn"
+                >
+                  <Save className="h-4 w-4" />
+                  {saving ? 'Saving...' : (isEditMode && templateData.status === 'active') ? 'Save as New Version' : 'Save Template'}
+                </button>
+              </>
             )}
           </div>
         </div>
@@ -856,7 +1047,9 @@ const TemplateEditor = () => {
           (uploadedPdfFile || contentBlocks.length > 0) ? (
             <MultiPageVisualBuilder
               pdfFile={uploadedPdfFile}
+              currentTemplateId={templateId}
               fields={fieldPlacements}
+              serverFieldsVersion={serverFieldsVersion}
               onFieldsChange={(fields) => {
                 handleFieldPlacementsChange(fields);
                 setTemplateData(prev => ({ ...prev, field_placements: fields }));
@@ -889,6 +1082,40 @@ const TemplateEditor = () => {
                 }
               } : undefined}
             />
+          ) : templateFileError ? (
+            /* Phase 81.74 — actionable error surface when the template's
+               PDF is missing/unavailable in storage. Replaces the blind
+               retry loop + generic "Failed to load template file" toast. */
+            <div
+              className="bg-white rounded-lg border-2 border-rose-200 p-8 text-center"
+              data-testid="template-file-error"
+            >
+              <div className="mx-auto mb-4 h-14 w-14 rounded-full bg-rose-100 flex items-center justify-center">
+                <FileText className="h-7 w-7 text-rose-600" />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900 mb-2">
+                Template file not available
+              </h3>
+              <p className="text-sm text-gray-600 max-w-lg mx-auto mb-5">
+                {templateFileError.message || 'The PDF file for this template could not be loaded from storage.'}
+              </p>
+              <div className="flex items-center justify-center gap-2">
+                <button
+                  onClick={() => setActiveTab('details')}
+                  className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium"
+                  data-testid="template-file-error-reupload-btn"
+                >
+                  Re-upload Source File
+                </button>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="px-4 py-2 bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium"
+                  data-testid="template-file-error-retry-btn"
+                >
+                  Retry
+                </button>
+              </div>
+            </div>
           ) : pdfLoading ? (
             /* Skeleton shown while the PDF blob is still being downloaded in the background */
             <div
@@ -991,6 +1218,59 @@ const TemplateEditor = () => {
                   </div>
                 </div>
               </div>
+
+              {/* Phase 81.76 — Replace Source File (edit mode only) */}
+              {isEditMode && (
+                <div
+                  className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden mb-8"
+                  data-testid="template-replace-source-card"
+                >
+                  <div className="px-6 py-4 border-b border-gray-100">
+                    <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                      <FileText className="h-5 w-5 text-indigo-600" />
+                      Source File
+                    </h3>
+                    <p className="text-sm text-gray-500 mt-1">
+                      Replace the PDF / DOC / DOCX attached to this template. Uploading
+                      a new file generates a fresh storage key — your old file is removed
+                      and field placements stay intact.
+                    </p>
+                  </div>
+                  <div className="p-6 space-y-4">
+                    <div className="flex items-center gap-3 p-3 rounded-lg bg-gray-50 border border-gray-200">
+                      <FileText className="h-4 w-4 text-gray-500 shrink-0" />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm font-medium text-gray-900 truncate">
+                          {templateData.original_filename || templateData.pdf_filename || 'No source file attached'}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-0.5">
+                          {templateData.file_type ? `Type: ${String(templateData.file_type).toUpperCase()}` : ''}
+                          {templateData.page_count ? ` · ${templateData.page_count} page(s)` : ''}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label
+                        className={`inline-flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg cursor-pointer ${replacingFile ? 'bg-gray-200 text-gray-500 cursor-wait' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}
+                        data-testid="replace-source-file-label"
+                      >
+                        {replacingFile ? 'Replacing…' : 'Replace Source File'}
+                        <input
+                          type="file"
+                          accept=".pdf,.doc,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
+                          className="hidden"
+                          disabled={replacingFile}
+                          onChange={handleReplaceSourceFile}
+                          data-testid="replace-source-file-input"
+                        />
+                      </label>
+                      <span className="text-xs text-gray-500">
+                        PDF / DOC / DOCX · up to 100MB · DOC/DOCX auto-converted to PDF
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* AI Generator */}
               {/* {!isEditMode && (<> */}

@@ -36,13 +36,19 @@ class PDFOverlayService:
             verification_id: Phase 76 — if supplied, stamped at the top of every
                 page as `{verification_label}: {id}` for authenticity tracking.
             verification_label: Prefix for the verification stamp (e.g.,
-                "Template Verification ID" or "Package Verification ID").
+                "DocFlow Verification ID" or "DocFlow Package Verification ID").
 
         Returns:
             PDF bytes with fields overlaid
         """
         try:
             logger.info(f"Overlaying {len(field_placements)} fields onto PDF")
+
+            # Phase 81.71 — apply authored radio defaults so groups the signer
+            # never interacted with still render their `defaultChecked: True`
+            # option in the final PDF.
+            from .field_defaults import apply_radio_defaults
+            field_values = apply_radio_defaults(field_placements or [], field_values or {})
 
             # Read original PDF
             input_pdf = PdfReader(io.BytesIO(pdf_bytes))
@@ -57,22 +63,26 @@ class PDFOverlayService:
                     fields_by_page[page_idx] = []
                 fields_by_page[page_idx].append(field)
 
+            total_pages = len(input_pdf.pages)
+            last_page_idx = total_pages - 1
+
             # Process each page
-            for page_num in range(len(input_pdf.pages)):
+            for page_num in range(total_pages):
                 original_page = input_pdf.pages[page_num]
 
                 page_fields = fields_by_page.get(page_num, [])
-                # Phase 76: always create an overlay when we have either fields
-                # on this page OR a verification_id to stamp. The overlay stamp
-                # is rendered on every page (DocuSign-style audit trail).
-                should_overlay = bool(page_fields) or bool(verification_id)
+                # Phase 81: stamp verification ID on EVERY page (bottom-right
+                # corner). Replaces the previous "last page only" logic to
+                # ensure auditability throughout the entire document.
+                stamp_on_this_page = bool(verification_id)
+                should_overlay = bool(page_fields) or stamp_on_this_page
                 if should_overlay:
                     overlay_bytes = self._create_overlay_for_page(
                         page_fields,
                         field_values,
                         signatures,
                         original_page,
-                        verification_id=verification_id,
+                        verification_id=verification_id if stamp_on_this_page else None,
                         verification_label=verification_label,
                     )
 
@@ -118,15 +128,18 @@ class PDFOverlayService:
             # Make canvas transparent
             c.setFillAlpha(1.0)
 
-            # Phase 76: stamp verification ID at top-left of every page
-            # (DocuSign-style audit trail). Small gray helvetica, above content.
+            # Phase 81: stamp verification ID at BOTTOM-RIGHT. Small gray
+            # helvetica, above content, never overlaps fields. Applied to all
+            # pages to ensure auditability.
             if verification_id:
                 try:
                     c.saveState()
                     c.setFont("Helvetica", 8)
                     c.setFillColorRGB(0.4, 0.4, 0.4)
-                    # 18pt inset from top-left corner (PDF origin = bottom-left)
-                    c.drawString(18, page_height - 14, f"{verification_label}: {verification_id}")
+                    stamp_text = f"{verification_label}: {verification_id}"
+                    # 18pt right-margin / 12pt bottom-margin (PDF origin = bottom-left)
+                    # `drawRightString` aligns the text's right edge to the x anchor.
+                    c.drawRightString(page_width - 18, 12, stamp_text)
                     c.restoreState()
                 except Exception as stamp_err:
                     logger.warning(f"Verification stamp failed: {stamp_err}")
@@ -150,22 +163,26 @@ class PDFOverlayService:
                 # Convert y coordinate (PDF coordinate system has origin at bottom-left)
                 y_pdf = page_height - y_pixel - height
 
+                # Phase 81.69 — pass `scale` through so every draw method applies
+                # the SAME font-size, padding, checkbox/radio glyph scaling as
+                # the frontend signing UI. Without this, backend text was ~30%
+                # larger than the preview because font sizes were not scaled.
                 if field_type == 'signature':
                     self._draw_signature_field(c, x, y_pdf, width, height, field_id, field_values, field)
                 elif field_type == 'text':
-                    self._draw_text_field(c, x, y_pdf, width, height, field_id, field_values, field)
+                    self._draw_text_field(c, x, y_pdf, width, height, field_id, field_values, field, scale=scale)
                 elif field_type == 'date':
-                    self._draw_date_field(c, x, y_pdf, width, height, field_id, field_values, field)
+                    self._draw_date_field(c, x, y_pdf, width, height, field_id, field_values, field, scale=scale)
                 elif field_type == 'checkbox':
-                    self._draw_checkbox_field(c, x, y_pdf, width, height, field_id, field_values, field)
+                    self._draw_checkbox_field(c, x, y_pdf, width, height, field_id, field_values, field, scale=scale)
                 elif field_type == 'radio':
-                    self._draw_radio_field(c, x, y_pdf, width, height, field, field_values)
+                    self._draw_radio_field(c, x, y_pdf, width, height, field, field_values, scale=scale)
                 elif field_type == 'initials':
                     self._draw_initials_field(c, x, y_pdf, width, height, field_id, field_values, field)
-                elif field_type == 'merge':
-                    self._draw_merge_field(c, x, y_pdf, width, height, field, field_values)
+                elif field_type == 'merge' or field_type == 'dropdown':
+                    self._draw_merge_field(c, x, y_pdf, width, height, field, field_values, scale=scale)
                 elif field_type == 'label':
-                    self._draw_label_field(c, x, y_pdf, width, height, field)
+                    self._draw_label_field(c, x, y_pdf, width, height, field, scale=scale)
 
             c.save()
             buffer.seek(0)
@@ -234,8 +251,17 @@ class PDFOverlayService:
         'Trebuchet MS': 'Helvetica',
     }
 
-    def _apply_field_style(self, c: canvas.Canvas, field: Dict[str, Any], height: float, default_size: float = 10):
-        """Apply field styling (font, color, weight, italic) from the style dict."""
+    def _apply_field_style(self, c: canvas.Canvas, field: Dict[str, Any], height: float, default_size: float = 10, scale: float = 1.0, width: float = 0):
+        """Apply field styling (font, color, weight, italic) from the style dict.
+
+        Phase 81.69 — matches the frontend signing-UI font math exactly so the
+        final PDF has the same glyph size as the signing preview:
+
+        * base_font_size = (css px) * scale
+        * h_cap          = max(6, (height - 4) * 0.70)
+        * w_cap          = max(6, width / 3)   (only when width is known)
+        * final          = max(6, min(base, h_cap, w_cap, 24))
+        """
         style = field.get('style') or {}
         font_family = style.get('fontFamily', 'Arial')
         font_size_raw = style.get('fontSize', str(int(default_size)))
@@ -249,8 +275,18 @@ class PDFOverlayService:
         except (ValueError, TypeError):
             font_size = default_size
 
-        # Cap font size to fit height
-        font_size = min(font_size, height * 0.8)
+        # Phase 81.69 — match the signing-UI font math exactly:
+        #   baseFs = css_px * scale
+        #   hCap   = (height - 4) * 0.85   (height is ALREADY scaled)
+        #   wCap   = width / 2.5           (width is ALREADY scaled)
+        #   final  = max(6.0, min(base_fs, hCap, wCap, 72.0))
+        base_fs = font_size * scale
+        h_cap = max(6.0, (height - 4.0) * 0.85)
+        if width and width > 0:
+            w_cap = max(6.0, width / 2.5)
+        else:
+            w_cap = 1e9
+        font_size = max(6.0, min(base_fs, h_cap, w_cap, 72.0))
 
         # Map CSS font to ReportLab font
         base_font = self.FONT_MAP.get(font_family, 'Helvetica')
@@ -298,65 +334,166 @@ class PDFOverlayService:
         return font_size, style
 
     def _draw_text_with_style(self, c: canvas.Canvas, x: float, y: float, width: float,
-                               height: float, text: str, field: Dict[str, Any]):
-        """Draw text with full styling applied (alignment, underline)."""
-        font_size, style = self._apply_field_style(c, field, height)
+                               height: float, text: str, field: Dict[str, Any], scale: float = 1.0):
+        """Draw text with full styling applied (alignment, underline).
+
+        Phase 81.9 — text WRAPS inside the field box (word-wrap then char-wrap
+        if needed) and renders as multiple lines stacked from the top.  Text
+        never overflows the field horizontally.
+
+        Phase 81.41 — Single-line text fields (Visual Builder Field Type =
+        Single-Line Text) STAY on one line: text is truncated with an
+        ellipsis when too long. Multi-line fields keep the existing wrap
+        behaviour.
+
+        Phase 81.69 — Baseline + padding math now mirrors the frontend
+        signing UI (`y + ptHeight/2 - fSize*0.35`, padding = `5*scale`) so
+        the final PDF visually matches the preview pixel-for-pixel.
+        """
+        font_size, style = self._apply_field_style(c, field, height, scale=scale, width=width)
         text_align = style.get('textAlign', 'left')
         text_decoration = style.get('textDecoration', 'none')
-        pad = 3
+        pad_x = 5.0 * scale
+        pad_y = 2.0 * scale
+        line_height = max(font_size * 1.2, font_size + 2)
+        max_text_width = max(width - 2 * pad_x, 1)
 
-        text_y = y + (height - font_size) / 2 + 1
-
-        # Draw aligned text
-        text_width = c.stringWidth(text, c._fontname, c._fontsize)
-        if text_align == 'center':
-            text_x = x + (width - text_width) / 2
-        elif text_align == 'right':
-            text_x = x + width - text_width - pad
+        # Phase 81.41 — explicit subtype wins; fall back to legacy `multiline`
+        # for back-compat with templates created before the dropdown shipped.
+        sub_type = (field or {}).get('fieldSubType') or (field or {}).get('field_sub_type')
+        if sub_type == 'single-line':
+            is_multiline = False
+        elif sub_type == 'multi-line':
+            is_multiline = True
         else:
-            text_x = x + pad
+            is_multiline = bool((field or {}).get('multiline'))
 
-        c.drawString(text_x, text_y, text)
+        # Single-line: truncate to fit width, no wrapping, ellipsis suffix.
+        if not is_multiline:
+            single = str(text or '').replace('\n', ' ').replace('\r', ' ')
+            # Truncate with ellipsis if it overflows.
+            if c.stringWidth(single, c._fontname, c._fontsize) > max_text_width:
+                ellipsis = '…'
+                lo, hi = 0, len(single)
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if c.stringWidth(single[:mid] + ellipsis, c._fontname, c._fontsize) <= max_text_width:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                single = single[: max(0, lo - 1)] + ellipsis
+            text_width = c.stringWidth(single, c._fontname, c._fontsize)
+            if text_align == 'center':
+                text_x = x + (width - text_width) / 2
+            elif text_align == 'right':
+                text_x = x + width - text_width - pad_x
+            else:
+                text_x = x + pad_x
+            # Phase 81.69 — match frontend baseline formula exactly:
+            # `y + ptHeight/2 - fSize*0.35`. This visually centers the text
+            # glyph within the field rect the same way the signing preview
+            # does, eliminating the 2-4pt upward offset seen in the final PDF.
+            text_y = y + (height / 2) - (font_size * 0.35)
+            c.drawString(text_x, text_y, single)
+            if text_decoration == 'underline':
+                c.setLineWidth(0.5)
+                c.line(text_x, text_y - 1.5, text_x + text_width, text_y - 1.5)
+            return
 
-        # Draw underline if needed
-        if text_decoration == 'underline':
-            c.setLineWidth(0.5)
-            c.line(text_x, text_y - 1.5, text_x + text_width, text_y - 1.5)
+        # Word-wrap (with char-wrap fallback for very long unbroken tokens).
+        def _wrap(s: str) -> list:
+            lines = []
+            for paragraph in (s or '').split('\n'):
+                words = paragraph.split(' ')
+                cur = ''
+                for w in words:
+                    candidate = (cur + ' ' + w).strip() if cur else w
+                    if c.stringWidth(candidate, c._fontname, c._fontsize) <= max_text_width:
+                        cur = candidate
+                        continue
+                    if cur:
+                        lines.append(cur)
+                    # Word itself longer than field → char-wrap it.
+                    if c.stringWidth(w, c._fontname, c._fontsize) > max_text_width:
+                        chunk = ''
+                        for ch in w:
+                            if c.stringWidth(chunk + ch, c._fontname, c._fontsize) <= max_text_width:
+                                chunk += ch
+                            else:
+                                if chunk:
+                                    lines.append(chunk)
+                                chunk = ch
+                        cur = chunk
+                    else:
+                        cur = w
+                if cur:
+                    lines.append(cur)
+                # Preserve explicit blank lines from \n
+                if not paragraph and not (lines and lines[-1] == ''):
+                    lines.append('')
+            return lines or ['']
+
+        wrapped = _wrap(str(text))
+        # Cap to fit vertically — never spill below the field box.
+        max_lines = max(1, int((height - 2 * pad_y) // line_height))
+        if len(wrapped) > max_lines:
+            wrapped = wrapped[:max_lines]
+
+        # Top of first baseline (PDF coords: origin at bottom-left)
+        first_baseline = y + height - pad_y - font_size
+        for i, ln in enumerate(wrapped):
+            text_width = c.stringWidth(ln, c._fontname, c._fontsize)
+            if text_align == 'center':
+                text_x = x + (width - text_width) / 2
+            elif text_align == 'right':
+                text_x = x + width - text_width - pad_x
+            else:
+                text_x = x + pad_x
+            text_y = first_baseline - i * line_height
+            c.drawString(text_x, text_y, ln)
+            if text_decoration == 'underline':
+                c.setLineWidth(0.5)
+                c.line(text_x, text_y - 1.5, text_x + text_width, text_y - 1.5)
 
     def _draw_text_field(self, c: canvas.Canvas, x: float, y: float, width: float,
                         height: float, field_id: str, field_values: Dict[str, Any],
-                        field: Dict[str, Any] = None):
-        """Draw text field value on PDF"""
-        if not field_values or field_id not in field_values:
-            return
+                        field: Dict[str, Any] = None, scale: float = 1.0):
+        """Draw text field value on PDF — wraps inside field bounds."""
+        value = (field_values or {}).get(field_id)
+        if not value:
+            # Fallback to defaultValue for Read-Only or static fields
+            value = (field or {}).get('defaultValue') or (field or {}).get('default_value')
         
-        value = str(field_values[field_id])
         if not value:
             return
-        
+
+        value = str(value)
+
         try:
-            if field and field.get('style'):
-                self._draw_text_with_style(c, x, y, width, height, value, field)
-            else:
-                c.setFont("Helvetica", 10)
-                c.setFillColorRGB(0, 0, 0)
-                text_y = y + (height / 2) - 3
-                c.drawString(x + 5, text_y, value)
-            
-            logger.info(f"Drew text field '{value}' at ({x}, {y})")
+            # Phase 81.9 — always go through the wrapping path so plain text
+            # fields without an explicit `style` also wrap inside the box.
+            self._draw_text_with_style(
+                c, x, y, width, height, value,
+                field if field else {"style": {"fontSize": "10px"}},
+                scale=scale,
+            )
+            logger.info(f"Drew text field '{value[:40]}' at ({x}, {y})")
         except Exception as e:
             logger.error(f"Error drawing text field: {e}")
     
     def _draw_date_field(self, c: canvas.Canvas, x: float, y: float, width: float,
                         height: float, field_id: str, field_values: Dict[str, Any],
-                        field: Optional[Dict[str, Any]] = None):
+                        field: Optional[Dict[str, Any]] = None, scale: float = 1.0):
         """Draw date field value on PDF — honors field.dateFormat + field.style.textAlign (Phase 58)."""
-        if not field_values or field_id not in field_values:
-            return
-
-        value = str(field_values[field_id])
+        value = (field_values or {}).get(field_id)
+        if not value:
+            # Fallback to defaultValue for Read-Only or static fields
+            value = (field or {}).get('defaultValue') or (field or {}).get('default_value')
+        
         if not value:
             return
+
+        value = str(value)
 
         try:
             from datetime import datetime
@@ -389,11 +526,13 @@ class PDFOverlayService:
 
             # Use the shared styled-text renderer so alignment + font work.
             if fld.get('style'):
-                self._draw_text_with_style(c, x, y, width, height, value, fld)
+                self._draw_text_with_style(c, x, y, width, height, value, fld, scale=scale)
             else:
-                c.setFont("Helvetica", 10)
+                # Phase 81.69 — mirror frontend baseline math.
+                fs = max(6.0, min(10 * scale, (height - 4) * 0.85, width / 2.5, 72.0))
+                c.setFont("Helvetica", fs)
                 c.setFillColorRGB(0, 0, 0)
-                c.drawString(x + 5, y + (height / 2) - 3, value)
+                c.drawString(x + 5 * scale, y + (height / 2) - (fs * 0.35), value)
 
             logger.info(f"Drew date field '{value}' at ({x}, {y}) fmt={date_fmt}")
         except Exception as e:
@@ -401,33 +540,61 @@ class PDFOverlayService:
     
     def _draw_checkbox_field(self, c: canvas.Canvas, x: float, y: float, width: float,
                             height: float, field_id: str, field_values: Dict[str, Any],
-                            field: Optional[Dict[str, Any]] = None):
+                            field: Optional[Dict[str, Any]] = None, scale: float = 1.0):
         """Draw checkbox — box always visible; check mark only when checked.
 
         Phase 62 (DocuSign-style): the label text (field.checkboxLabel) is
         NEVER drawn in the final PDF. It lives in the field definition for
         backend/reference purposes only.
+
+        Phase 81.69 — glyph sizing now mirrors the frontend signing UI
+        (`Math.min(14 * scale, ptHeight - 4 * scale)`) so the final PDF
+        checkbox matches the preview exactly.
         """
         field = field or {}
         is_checked = (field_values or {}).get(field_id) in [True, 'true', '1', 'yes', 'checked']
 
         try:
-            box_size = min(height - 4, 14)
-            # Phase 73: Center the checkbox horizontally within the field
-            # bounding box (matches signing view's justify-center).
+            # Phase 81.69 — match frontend: min(14*scale, ptHeight - 4*scale).
+            # Width is NOT a cap on the frontend, so we keep the geometry
+            # consistent (the UI centers a 14*scale-pt glyph in the rect).
+            box_size = max(6.0, min(14.0 * scale, height - 4.0 * scale))
+            # Safety: if the author drew an extremely narrow box, still fit
+            # inside the width.
+            if width > 0:
+                box_size = min(box_size, width - 2.0 * scale)
+            box_size = max(6.0, box_size)
             box_x = x + (width - box_size) / 2
             box_y = y + (height - box_size) / 2
 
-            # Always draw the box outline (visibility)
-            c.setStrokeColorRGB(0, 0, 0)
-            c.setLineWidth(1.2)
+            # Phase 81.73 — tight CENTERED mask (not full rect) so adjacent
+            # label text is preserved when authors drew the field wider than
+            # the glyph. Sized to just cover any baked native ☒/☐ glyph.
+            c.saveState()
+            c.setFillColorRGB(1.0, 1.0, 1.0)
+            c.setStrokeColorRGB(1.0, 1.0, 1.0)
+            mask_size = max(box_size + 2.0 * scale, 14.0 * scale)
+            mask_size = min(mask_size, width, height)
+            mcx = x + width / 2
+            mcy = y + height / 2
+            c.rect(mcx - mask_size / 2, mcy - mask_size / 2, mask_size, mask_size, stroke=0, fill=1)
+            c.restoreState()
+
+            # Hairline outline (0.4pt) — barely visible, matches print weight.
+            c.setStrokeColorRGB(0.13, 0.13, 0.16)
+            c.setLineWidth(0.4)
             c.rect(box_x, box_y, box_size, box_size)
 
             if is_checked:
-                c.setStrokeColorRGB(0, 0, 0)
-                c.setLineWidth(2)
-                c.line(box_x + 3, box_y + box_size/2, box_x + box_size/2, box_y + 3)
-                c.line(box_x + box_size/2, box_y + 3, box_x + box_size - 3, box_y + box_size - 3)
+                # Crisp check stroke — kept slightly heavier than border so the
+                # tick reads clearly at print resolution.
+                c.setStrokeColorRGB(0.13, 0.13, 0.16)
+                c.setLineWidth(0.7)
+                # Proportional check geometry (0.22→0.44→0.78).
+                c.line(box_x + box_size * 0.22, box_y + box_size * 0.50,
+                       box_x + box_size * 0.44, box_y + box_size * 0.28)
+                c.line(box_x + box_size * 0.44, box_y + box_size * 0.28,
+                       box_x + box_size * 0.78, box_y + box_size * 0.72)
 
             logger.info(f"Drew checkbox (checked={is_checked}) at ({x}, {y})")
         except Exception as e:
@@ -435,7 +602,7 @@ class PDFOverlayService:
 
     def _draw_radio_field(self, c: canvas.Canvas, x: float, y: float, width: float,
                          height: float, field: Dict[str, Any],
-                         field_values: Dict[str, Any]):
+                         field_values: Dict[str, Any], scale: float = 1.0):
         """
         Draw radio field. Supports TWO models:
           1) NEW single-option-per-field: { groupName, optionValue, optionLabel }
@@ -448,9 +615,9 @@ class PDFOverlayService:
             option_value_new = field.get('optionValue') or field.get('option_value')
             is_legacy = bool(options_legacy) and not option_value_new
 
-            c.setStrokeColorRGB(0, 0, 0)
-            c.setFillColorRGB(0, 0, 0)
-            c.setLineWidth(1)
+            c.setStrokeColorRGB(0.13, 0.13, 0.16)
+            c.setFillColorRGB(0.13, 0.13, 0.16)
+            c.setLineWidth(0.4)  # Phase 81.2 — hairline ring
 
             if is_legacy:
                 selected = str((field_values or {}).get(field_id) or field.get('selectedOption') or '')
@@ -468,6 +635,17 @@ class PDFOverlayService:
                         continue
                     cx = opt_x + size / 2
                     cy = opt_y - size / 2
+                    # Phase 81.40 — Mask underlying empty PDF radio with white
+                    # using a circle EXACTLY the radio's outer-circle size
+                    # (zero padding). Prevents nearby text from being erased
+                    # when the author drew a wide field bounding box.
+                    c.saveState()
+                    c.setFillColorRGB(1.0, 1.0, 1.0)
+                    c.setStrokeColorRGB(1.0, 1.0, 1.0)
+                    c.circle(cx, cy, size / 2, stroke=0, fill=1)
+                    c.restoreState()
+                    c.setStrokeColorRGB(0.13, 0.13, 0.16)
+                    c.setFillColorRGB(0.13, 0.13, 0.16)
                     c.circle(cx, cy, size / 2, stroke=1, fill=0)
                     c.circle(cx, cy, (size / 2) - 2, stroke=0, fill=1)
                     # Label intentionally NOT drawn.
@@ -478,18 +656,36 @@ class PDFOverlayService:
                 group_val = (field_values or {}).get(group)
                 checked = str(group_val) == str(option_value)
 
-                # Phase 58: Draw the circle ONLY when selected. Unselected radio
-                # fields are omitted entirely from the final PDF, matching the
-                # DocuSign-style "selected-only" output of the other PDF paths.
-                if not checked:
-                    return
-                size = min(height - 4, 12)
-                # Phase 73: Center the radio circle horizontally within the
-                # field bounding box (matches signing view's justify-center).
+                # Phase 81.72 — ALWAYS draw the outer ring (even when unselected)
+                # so the PDF shows empty ○ for unchecked options and ● for
+                # checked. Previously we returned early on unchecked, which
+                # left the native PDF ☒/☐ glyph visible underneath.
+                size = max(6.0, min(12.0 * scale, height - 4.0 * scale))
+                if width > 0:
+                    size = min(size, width - 2.0 * scale)
+                size = max(6.0, size)
                 cx = x + width / 2
                 cy = y + height / 2
+
+                # Phase 81.73 — tight CENTERED mask (not full rect) so
+                # adjacent label text is preserved when authors drew the
+                # field wider than the glyph. Sized to just cover any baked
+                # native ○/● glyph in the source PDF.
+                c.saveState()
+                c.setFillColorRGB(1.0, 1.0, 1.0)
+                c.setStrokeColorRGB(1.0, 1.0, 1.0)
+                mask_size = max(size + 2.0 * scale, 14.0 * scale)
+                mask_size = min(mask_size, width, height)
+                c.rect(cx - mask_size / 2, cy - mask_size / 2, mask_size, mask_size, stroke=0, fill=1)
+                c.restoreState()
+
+                c.setStrokeColorRGB(0.13, 0.13, 0.16)
+                c.setFillColorRGB(0.13, 0.13, 0.16)
+                c.setLineWidth(0.4)
                 c.circle(cx, cy, size / 2, stroke=1, fill=0)
-                c.circle(cx, cy, (size / 2) - 2.5, stroke=0, fill=1)
+                if checked:
+                    inner_r = max(0.5, size / 2 - 2.5 * scale)
+                    c.circle(cx, cy, inner_r, stroke=0, fill=1)
                 # Label intentionally NOT drawn.
 
             logger.info(f"Drew radio field ({'legacy' if is_legacy else 'group'}) at ({x}, {y})")
@@ -565,7 +761,8 @@ class PDFOverlayService:
     
 
     def _draw_merge_field(self, c: canvas.Canvas, x: float, y: float, width: float,
-                          height: float, field: Dict[str, Any], field_values: Dict[str, Any]):
+                          height: float, field: Dict[str, Any], field_values: Dict[str, Any],
+                          scale: float = 1.0):
         """Draw merge field value on PDF"""
         field_id = field.get('id') or field.get('name', '')
         merge_obj = field.get('merge_object') or field.get('mergeObject', '')
@@ -576,30 +773,30 @@ class PDFOverlayService:
         value = (field_values.get(field_id)
                  or field_values.get(full_key)
                  or field_values.get(merge_field)
+                 or field.get('defaultValue')
+                 or field.get('default_value')
                  or '')
 
         if not value:
             return
 
         try:
-            # Removed white background to make merge fields transparent
-            # c.setFillColor(colors.white)
-            # c.rect(x, y, width, height, fill=True, stroke=False)
             if field.get('style'):
-                self._draw_text_with_style(c, x, y, width, height, str(value)[:100], field)
+                self._draw_text_with_style(c, x, y, width, height, str(value)[:100], field, scale=scale)
             else:
-                font_size = min(10, height * 0.7)
+                # Phase 81.69 — mirror frontend: baseFs*scale, padding = 2*scale.
+                fs = max(6.0, min(10 * scale, (height - 4) * 0.85, width / 2.5, 72.0))
                 c.setFillColor(colors.HexColor('#1a1a2e'))
-                c.setFont("Helvetica", font_size)
-                text_y = y + (height - font_size) / 2 + 1
-                c.drawString(x + 3, text_y, str(value)[:100])
+                c.setFont("Helvetica", fs)
+                text_y = y + (height / 2) - (fs * 0.35)
+                c.drawString(x + 2 * scale, text_y, str(value)[:100])
 
             logger.info(f"Drew merge field '{field_id}' = '{value}' at ({x}, {y})")
         except Exception as e:
             logger.error(f"Error drawing merge field: {e}")
 
     def _draw_label_field(self, c: canvas.Canvas, x: float, y: float, width: float,
-                          height: float, field: Dict[str, Any]):
+                          height: float, field: Dict[str, Any], scale: float = 1.0):
         """Draw a static label on PDF with styling."""
         text = field.get('text') or field.get('label', '')
         if not text:
@@ -607,12 +804,13 @@ class PDFOverlayService:
 
         try:
             if field.get('style'):
-                self._draw_text_with_style(c, x, y, width, height, text, field)
+                self._draw_text_with_style(c, x, y, width, height, text, field, scale=scale)
             else:
-                c.setFont("Helvetica", 10)
+                fs = max(6.0, min(12 * scale, (height - 4) * 0.85, width / 2.5, 72.0))
+                c.setFont("Helvetica", fs)
                 c.setFillColorRGB(0, 0, 0)
-                text_y = y + (height / 2) - 3
-                c.drawString(x + 3, text_y, text)
+                text_y = y + (height / 2) - (fs * 0.35)
+                c.drawString(x + 2 * scale, text_y, text)
 
             logger.info(f"Drew label '{text}' at ({x}, {y})")
         except Exception as e:

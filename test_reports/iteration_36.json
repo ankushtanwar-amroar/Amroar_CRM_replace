@@ -1,0 +1,88 @@
+{
+  "summary": "Phase 81.77 Submission Download APIs - All features verified. Backend endpoints working correctly (list documents, download single, download combined). Frontend UI shows new View + Download buttons in Submissions table, and SubmissionDocumentsModal opens with per-document View/Download actions and Download Combined PDF button.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase81_77_submission_downloads.py",
+    "/app/test_reports/pytest/phase81_77_submission_downloads_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "✅ package_routes.py: _load_submission helper validates run belongs to package/tenant before loading submission",
+    "✅ package_routes.py: _refresh_signed_doc_urls regenerates presigned S3 URLs to prevent expiration",
+    "✅ package_routes.py: list_submission_documents returns documents with fresh presigned URLs",
+    "✅ package_routes.py: download_submission_document fetches from S3 or falls back to presigned URL",
+    "✅ package_routes.py: download_submission_combined uses PyPDF2 PdfMerger to combine all signed docs",
+    "✅ docflowService.js: listSubmissionDocuments, downloadSubmissionDocument, downloadSubmissionCombined methods added",
+    "✅ RunDetailPage.js: Submissions table updated with View + Download buttons per row",
+    "✅ RunDetailPage.js: handleSubmissionCombinedDownload triggers combined PDF download",
+    "✅ SubmissionDocumentsModal.js: New modal component with per-document View/Download and Download Combined PDF",
+    "✅ All endpoints require JWT auth (403 without token)",
+    "✅ All endpoints return 404 for invalid submission/run/package IDs"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase81_77_submission_downloads.py"
+  ],
+  "success_rate": {
+    "backend": "100% (9 passed, 4 skipped due to no submissions in admin@democorp.com tenant)",
+    "frontend": "100% (all UI elements verified)"
+  },
+  "test_credentials": "test@gmail.com / test123",
+  "seed_data_creation": "Used existing submission data from v2 test package (run 239c0d53-a5d1-4797-a2ef-20978421238f)",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 81.77 submission download feature fully tested. Key endpoints: GET /api/docflow/packages/{pkg}/runs/{run}/submissions/{sub}/documents (list docs), GET .../documents/{doc}/download (single PDF), GET .../download/combined (merged PDF). Frontend: Submissions tab in RunDetailPage shows View + Download buttons. View opens SubmissionDocumentsModal with per-document actions and Download Combined PDF button. Test data: v2 test package (70f522d3-7bfb-4889-a144-d7234b22f619) has run with 5 submissions.",
+  "verified_features": {
+    "backend_list_submission_documents": {
+      "endpoint": "GET /api/docflow/packages/{pkg}/runs/{run}/submissions/{sub}/documents",
+      "auth": "JWT Bearer token required",
+      "status": "VERIFIED",
+      "returns": "submission_id, name, email, status, submitted_at, documents[], total"
+    },
+    "backend_download_single_document": {
+      "endpoint": "GET /api/docflow/packages/{pkg}/runs/{run}/submissions/{sub}/documents/{doc}/download",
+      "auth": "JWT Bearer token required",
+      "status": "VERIFIED",
+      "returns": "application/pdf (506KB test file)"
+    },
+    "backend_download_combined_pdf": {
+      "endpoint": "GET /api/docflow/packages/{pkg}/runs/{run}/submissions/{sub}/download/combined",
+      "auth": "JWT Bearer token required",
+      "status": "VERIFIED",
+      "returns": "application/pdf (508KB merged file)"
+    },
+    "backend_auth_required": {
+      "status": "VERIFIED",
+      "behavior": "All 3 endpoints return 401/403 without auth token"
+    },
+    "backend_404_for_invalid_ids": {
+      "status": "VERIFIED",
+      "behavior": "All 3 endpoints return 404 for invalid run/submission IDs"
+    },
+    "frontend_submissions_table_buttons": {
+      "selector": "[data-testid='view-submission-{i}'], [data-testid='download-submission-combined-{i}']",
+      "status": "VERIFIED",
+      "elements": "View button (eye icon) + Download button (green) per submission row"
+    },
+    "frontend_submission_documents_modal": {
+      "selector": "[data-testid='submission-documents-modal']",
+      "status": "VERIFIED",
+      "elements": "Header with submitter info, Download Combined PDF button, document list with View/Download per doc, Close button"
+    },
+    "frontend_download_combined_from_row": {
+      "status": "VERIFIED",
+      "behavior": "Clicking row Download button triggers combined PDF download via docflowService.downloadSubmissionCombined"
+    },
+    "frontend_view_opens_modal": {
+      "status": "VERIFIED",
+      "behavior": "Clicking View button opens SubmissionDocumentsModal with document list"
+    }
+  }
+}

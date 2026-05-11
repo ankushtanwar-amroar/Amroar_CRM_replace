@@ -1,0 +1,63 @@
+{
+  "summary": "Phase 81 SMS Mode Endpoint Testing completed. All 9 tests passed. Verified: (1) POST /api/public/packages/send sms_mode validation (400 when phone missing, 200 with phones), (2) POST /api/v1/documents/generate-links sms_mode validation (400 when phone missing, 200 with phones), (3) Package SMS OTP endpoints (send-otp returns stubbed:true, verify-otp rejects wrong code with 400, verify-otp accepts correct code and marks recipient sms_verified=true).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase81_sms_endpoints.py",
+    "/app/test_reports/pytest/phase81_sms_endpoints_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "VERIFIED: POST /api/public/packages/send correctly validates sms_mode - returns 400 with 'phone required when sms_mode=true' when recipient missing phone",
+    "VERIFIED: POST /api/public/packages/send with sms_mode=false (default) works without phone numbers",
+    "VERIFIED: POST /api/public/packages/send with sms_mode=true and all recipients having phone succeeds, run.sms_mode=true stored",
+    "VERIFIED: POST /api/v1/documents/generate-links correctly validates sms_mode - returns 400 when phone missing",
+    "VERIFIED: POST /api/v1/documents/generate-links with sms_mode=true and phones succeeds, document.sms_mode=true",
+    "VERIFIED: POST /api/v1/documents/generate-links with sms_mode=false (baseline) works correctly",
+    "VERIFIED: POST /api/docflow/packages/public/{token}/sms/send-otp returns stubbed:true (Twilio not configured)",
+    "VERIFIED: POST /api/docflow/packages/public/{token}/sms/verify-otp returns 400 'Incorrect code' for wrong OTP",
+    "VERIFIED: POST /api/docflow/packages/public/{token}/sms/verify-otp with correct OTP returns success:true and marks recipient.sms_verified=true in DB",
+    "VERIFIED: Child docflow_documents recipients also get sms_verified=true propagated after package OTP verification"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase81_sms_endpoints.py"
+  ],
+  "success_rate": {
+    "backend": "100% (9/9 tests passed)",
+    "frontend": "N/A - backend only testing requested"
+  },
+  "test_credentials": "test@gmail.com / test123",
+  "seed_data_creation": "Created test package 'SMS Test Package' and multiple package runs with sms_mode=true/false for testing",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 81 SMS mode endpoints fully verified. Twilio is NOT configured (intentional for testing) - all SMS endpoints run in stub mode with stubbed:true. OTP is stored in recipient.sms_otp field in MongoDB. To verify OTP in tests, read directly from db.docflow_packages (with _type='run') or db.docflow_package_runs. The sms_verified flag propagates from package recipients to child docflow_documents recipients.",
+  "mocked_api": {
+    "Twilio SMS": "MOCKED - stub mode; OTP returned in response (stubbed:true) and stored in DB; read recipients.sms_otp directly to verify"
+  },
+  "tests_executed": {
+    "POST /api/public/packages/send": {
+      "sms_mode_missing_phone_rejected": "PASSED - Returns 400 with phone required error",
+      "sms_mode_false_success": "PASSED - Works without phone numbers",
+      "sms_mode_true_with_phones_success": "PASSED - Creates run with sms_mode=true"
+    },
+    "POST /api/v1/documents/generate-links": {
+      "sms_mode_missing_phone_rejected": "PASSED - Returns 400 with phone required error",
+      "sms_mode_true_with_phones_success": "PASSED - Creates document with sms_mode=true",
+      "sms_mode_false_success": "PASSED - Baseline works correctly"
+    },
+    "POST /api/docflow/packages/public/{token}/sms/send-otp": {
+      "stub_mode": "PASSED - Returns stubbed:true, OTP stored in DB"
+    },
+    "POST /api/docflow/packages/public/{token}/sms/verify-otp": {
+      "wrong_code_rejected": "PASSED - Returns 400 'Incorrect code'",
+      "correct_code_success": "PASSED - Returns success:true, recipient.sms_verified=true"
+    }
+  }
+}

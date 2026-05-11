@@ -32,6 +32,126 @@ package_service = PackageService(db)
 webhook_service = WebhookService(db)
 
 
+# Phase 81.65 — Shared field-shape helper used by both the LIST and DETAIL
+# endpoints so external integrators see a consistent, lean response with
+# merge metadata baked in.
+def _build_public_field(fp: dict, *, include_extras: bool = False) -> dict:
+    """Map a stored field_placement to the public-API shape.
+
+    Removes implementation-detail keys ("assigned_role", "position") that
+    third parties don't need (Phase 81.65). For merge fields, attaches a
+    `merge_source` block so CRMs (Salesforce, etc.) can map data without
+    parsing template patterns.
+    """
+    raw_type = (fp.get("type") or fp.get("field_type") or "text").lower()
+    # Normalize external-facing type label for merge fields.
+    field_type = "merge" if raw_type in ("merge", "merge_field") else raw_type
+
+    out = {
+        "field_id": fp.get("id"),
+        "field_name": fp.get("label") or fp.get("name", ""),
+        "field_type": field_type,
+        "required": bool(fp.get("required", False)),
+    }
+
+    if field_type == "merge":
+        merge_object = fp.get("merge_object") or fp.get("mergeObject") or ""
+        merge_field_name = fp.get("merge_field") or fp.get("mergeField") or ""
+        # If only a dotted alias / pattern exists, split it.
+        if not merge_object or not merge_field_name:
+            pattern = (
+                fp.get("mergePattern")
+                or fp.get("merge_pattern")
+                or fp.get("merge_token")
+                or fp.get("mergeToken")
+                or ""
+            )
+            cleaned = str(pattern or "").strip().strip("{}").strip()
+            if cleaned and "." in cleaned and not (merge_object and merge_field_name):
+                obj_part, _, fld_part = cleaned.partition(".")
+                merge_object = merge_object or obj_part
+                merge_field_name = merge_field_name or fld_part
+        if merge_object or merge_field_name:
+            out["merge_source"] = {
+                "object": merge_object or None,
+                "field_name": merge_field_name or None,
+            }
+
+    if include_extras:
+        # DETAIL endpoint may expose a few helpful authoring hints.
+        if fp.get("placeholder"):
+            out["placeholder"] = fp["placeholder"]
+        if fp.get("validation") and fp["validation"] != "none":
+            out["validation"] = fp["validation"]
+        if fp.get("defaultValue"):
+            out["default_value"] = fp["defaultValue"]
+
+    return out
+
+
+async def _auto_assign_package_recipients(
+    recipients: List[Dict[str, Any]],
+    template_ids: List[str],
+    tenant_id: str,
+) -> None:
+    """Auto-assign unclaimed signable fields to public API package recipients.
+
+    Mirrors the internal DocFlow package send behavior so public API runs
+    have identical recipient/field ownership rules.
+    """
+    NON_ASSIGNABLE_TYPES = {"merge", "label"}
+
+    for template_id in template_ids:
+        if not template_id:
+            continue
+
+        template = await db.docflow_templates.find_one(
+            {"id": template_id, "tenant_id": tenant_id},
+            {"_id": 0, "field_placements": 1},
+        )
+        field_placements = (template or {}).get("field_placements") or []
+        assignable_ids = [
+            fp.get("id") for fp in field_placements
+            if fp.get("id") and (fp.get("type") or "").lower() not in NON_ASSIGNABLE_TYPES
+        ]
+        if not assignable_ids:
+            continue
+
+        claimed = set()
+        for pr in recipients:
+            existing = (pr.get("assigned_components") or {}).get(template_id) or []
+            if existing:
+                claimed.update(existing)
+
+        for pr in sorted(recipients, key=lambda x: x.get("routing_order") or 1):
+            amap = pr.get("assigned_components") or {}
+            if amap.get(template_id):
+                continue
+            unclaimed = [fid for fid in assignable_ids if fid not in claimed]
+            if not unclaimed:
+                continue
+            amap[template_id] = unclaimed
+            pr["assigned_components"] = amap
+            claimed.update(unclaimed)
+            logger.info(
+                f"[public-api] auto-assign: recipient='{pr.get('name')}' "
+                f"doc={template_id} empty → auto-assigned {len(unclaimed)} field(s)"
+            )
+
+        leftover = [fid for fid in assignable_ids if fid not in claimed]
+        if leftover and recipients:
+            first_pr = sorted(recipients, key=lambda x: x.get("routing_order") or 1)[0]
+            amap = first_pr.get("assigned_components") or {}
+            merged = list(dict.fromkeys((amap.get(template_id) or []) + leftover))
+            amap[template_id] = merged
+            first_pr["assigned_components"] = amap
+            claimed.update(leftover)
+            logger.info(
+                f"[public-api] auto-assign sweep: doc={template_id} appended "
+                f"{len(leftover)} leftover field(s) to first recipient '{first_pr.get('name')}'"
+            )
+
+
 # ── API Key Auth ──
 
 def _hash_key(raw_key: str) -> str:
@@ -207,20 +327,7 @@ async def list_packages(
             fields = []
             if template:
                 for fp in template.get("field_placements", []):
-                    fields.append({
-                        "field_id": fp.get("id"),
-                        "field_name": fp.get("label") or fp.get("name", ""),
-                        "field_type": fp.get("type", "text"),
-                        "page": fp.get("page", 1),
-                        "position": {
-                            "x": fp.get("x", 0),
-                            "y": fp.get("y", 0),
-                            "width": fp.get("width", 150),
-                            "height": fp.get("height", 40),
-                        },
-                        "required": fp.get("required", False),
-                        "assigned_role": fp.get("assigned_to") or fp.get("recipient_id") or None,
-                    })
+                    fields.append(_build_public_field(fp))
 
             enriched_docs.append({
                 "template_id": tmpl_id,
@@ -381,6 +488,7 @@ class SendPackageRecipient(BaseModel):
     id: Optional[str] = None
     name: str
     email: Optional[str] = None
+    phone: Optional[str] = None  # Phase 81 — required when sms_mode=true
     role: str = "signer"  # signer, approver, reviewer, receive_copy
     routing_order: int = 1
     wave: Optional[int] = None
@@ -409,6 +517,8 @@ class SendPackageRequest(BaseModel):
     field_assignments: List[SendPackageTemplateAssignment] = []
     authentication: Optional[SendPackageAuth] = None
     template_merge_fields: Optional[List[TemplateMergeFields]] = None
+    sms_mode: Optional[bool] = False  # Phase 81 — controls whether SMS is sent to recipients
+    sms_consent: Optional[bool] = False  # controls whether the SMS disclaimer popup is shown
 
 
 SEND_ROLE_MAP = {
@@ -470,6 +580,9 @@ async def send_package(
             errors.append(f"Recipient '{r.name}' has invalid role '{r.role}'. Valid: signer, approver, reviewer, receive_copy")
         if needs_email and not r.email and r.role != "receive_copy":
             errors.append(f"Recipient '{r.name}': email required for email delivery mode")
+        # Phase 81 — when sms_mode=true, every recipient must carry a phone.
+        if req.sms_mode and not (r.phone or "").strip() and r.role != "receive_copy":
+            errors.append(f"Recipient '{r.name}': phone required when sms_mode=true")
 
     # ── 5. Validate field_assignments ──
     template_ids = {d.get("template_id") for d in package.get("documents", [])}
@@ -549,11 +662,16 @@ async def send_package(
         pkg_recipients.append({
             "name": r.name,
             "email": r.email or "",
+            "phone": (r.phone or "").strip() or None,
             "role_type": role,
             "routing_order": routing_order,
             "assigned_components": assignment_map.get(ext_id, {}),
             "email_template_id": r.email_template_id,
         })
+
+    if pkg_recipients:
+        template_ids = [d.get("template_id") for d in package.get("documents", []) if d.get("template_id")]
+        await _auto_assign_package_recipients(pkg_recipients, template_ids, tenant_id)
 
     routing_config = {
         "mode": req.routing_mode if req.routing_mode != "mixed" else "sequential",
@@ -578,6 +696,8 @@ async def send_package(
             user_id=api_key.get("created_by", "api"),
             tenant_id=tenant_id,
             template_merge_fields=merge_fields_map,
+            sms_mode=bool(req.sms_mode),
+            sms_consent=bool(req.sms_consent),
         )
     except Exception as e:
         logger.error(f"Public API send_package failed: {e}")
@@ -677,23 +797,7 @@ async def get_package(
         fields = []
         if template:
             for fp in template.get("field_placements", []):
-                fields.append({
-                    "field_id": fp.get("id"),
-                    "field_name": fp.get("label") or fp.get("name", ""),
-                    "field_type": fp.get("type", "text"),
-                    "page": fp.get("page", 1),
-                    "position": {
-                        "x": fp.get("x", 0),
-                        "y": fp.get("y", 0),
-                        "width": fp.get("width", 150),
-                        "height": fp.get("height", 40),
-                    },
-                    "required": fp.get("required", False),
-                    "assigned_role": fp.get("assigned_to") or fp.get("recipient_id") or None,
-                    "placeholder": fp.get("placeholder", ""),
-                    "validation": fp.get("validation", "none"),
-                    "default_value": fp.get("defaultValue", ""),
-                })
+                fields.append(_build_public_field(fp, include_extras=True))
 
         enriched_docs.append({
             "template_id": tmpl_id,
@@ -861,6 +965,10 @@ async def create_package(
             "assigned_components": assignment_map.get(ext_id, {}),
             "email_template_id": getattr(r, 'email_template_id', None),
         })
+
+    if pkg_recipients:
+        template_ids = [vt["template_id"] for vt in validated_templates if vt.get("template_id")]
+        await _auto_assign_package_recipients(pkg_recipients, template_ids, tenant_id)
 
     # Routing config
     routing_config = {

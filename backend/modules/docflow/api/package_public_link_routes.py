@@ -307,6 +307,10 @@ async def submit_public_link(
             )
             field_placements = (template or {}).get("field_placements", [])
 
+            # Phase 81.71 — apply authored radio defaults.
+            from ..services.field_defaults import apply_radio_defaults
+            field_data_for_doc = apply_radio_defaults(field_placements, field_data_for_doc)
+
             from ..services.s3_service import S3Service
             s3_service = S3Service()
 
@@ -327,6 +331,18 @@ async def submit_public_link(
                 field_id = field.get("id")
                 field_type = field.get("type")
                 field_value = field_data_for_doc.get(field_id)
+
+                # Phase 81.16 — merge field key fallbacks. The signing UI
+                # may store the value under the field id OR under the
+                # `Object.field` merge key; honour both.
+                if not field_value and field_type == "merge":
+                    merge_obj = field.get("merge_object") or field.get("mergeObject", "")
+                    merge_fld = field.get("merge_field") or field.get("mergeField", "")
+                    full_key = f"{merge_obj}.{merge_fld}" if merge_obj and merge_fld else ""
+                    field_value = (field_data_for_doc.get(full_key)
+                                   or field_data_for_doc.get(merge_fld)
+                                   or "")
+
                 if not field_value and field_value is not False:
                     continue
 
@@ -377,24 +393,66 @@ async def submit_public_link(
 
                 elif field_type in ("text", "date") and field_value:
                     try:
+                        # Phase 81.70 — mirror frontend signing-UI centered
+                        # baseline: single-line uses `insert_text` at
+                        # `y + h/2 + fs*0.35`; multi-line uses a centered band
+                        # rect to keep `insert_textbox` word-wrap while still
+                        # vertically centering the content.
                         base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
                         font_size = base_fs * scale
-                        height_cap = max(6, (h - 4 * scale) * 0.70)
-                        width_cap  = max(6, w / 3)
-                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
-                        text_str = str(field_value)
-                        align = (field.get("style") or {}).get("textAlign") or "left"
-                        try:
-                            text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
-                        except Exception:
-                            text_w = 0
-                        if align == "center":
-                            tx = x + max(0, (w - text_w) / 2)
-                        elif align == "right":
-                            tx = x + max(0, w - text_w - 2 * scale)
+                        height_cap = max(6, (h - 4) * 0.70)
+                        is_multiline_text = (
+                            field_type == "text"
+                            and (
+                                field.get("fieldSubType") == "multi-line"
+                                or field.get("field_sub_type") == "multi-line"
+                                or field.get("multiline") is True
+                            )
+                        )
+                        if is_multiline_text:
+                            font_size = max(6, min(font_size, height_cap, 24))
                         else:
-                            tx = x + 2 * scale
-                        page.insert_text(fitz.Point(tx, y + h - 4 * scale), text_str, fontsize=font_size, color=(0, 0, 0))
+                            width_cap = max(6, w / 3)
+                            font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        text_str = str(field_value)
+                        align_str = (field.get("style") or {}).get("textAlign") or "left"
+                        align_map = {"left": 0, "center": 1, "right": 2}
+
+                        if is_multiline_text:
+                            line_h = max(font_size * 1.2, font_size + 2)
+                            est_lines = max(1, int((h - 4 * scale) / line_h))
+                            band_h = min(h - 4 * scale, est_lines * line_h)
+                            band_top = y + (h - band_h) / 2
+                            rect = fitz.Rect(
+                                x + 5 * scale,
+                                band_top,
+                                x + w - 5 * scale,
+                                band_top + band_h,
+                            )
+                            page.insert_textbox(
+                                rect, text_str, fontsize=font_size, fontname="helv",
+                                color=(0, 0, 0), align=align_map.get(align_str, 0),
+                            )
+                        else:
+                            try:
+                                text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
+                            except Exception:
+                                text_w = 0
+                            pad = 5 * scale
+                            if align_str == "center":
+                                tx = x + max(pad, (w - text_w) / 2)
+                            elif align_str == "right":
+                                tx = x + max(pad, w - text_w - pad)
+                            else:
+                                tx = x + pad
+                            baseline_y = y + h / 2 + font_size * 0.35
+                            page.insert_text(
+                                fitz.Point(tx, baseline_y),
+                                text_str,
+                                fontsize=font_size,
+                                fontname="helv",
+                                color=(0, 0, 0),
+                            )
                     except Exception as e:
                         logger.warning(f"Failed to embed text for field {field_id}: {e}")
 
@@ -405,53 +463,154 @@ async def submit_public_link(
                         selected_val = field_data_for_doc.get(group) if group else None
                         if selected_val is None:
                             selected_val = field_data_for_doc.get(field_id)
-                        if selected_val != option_value:
-                            continue
-                        radius = min(7 * scale, (h / 2) - 2 * scale)
-                        # Phase 73: Center the radio circle horizontally
-                        # within the field bounding box (matches signing view).
+                        is_selected = (selected_val == option_value)
+
+                        # Phase 81.73 — tight centered mask (not full rect) so
+                        # adjacent label text is preserved.
+                        opt_size = max(6.0, min(12.0 * scale, h - 4.0 * scale))
+                        if w > 0:
+                            opt_size = min(opt_size, w - 2.0 * scale)
+                        opt_size = max(6.0, opt_size)
+                        radius = opt_size / 2
                         cx = x + w / 2
                         cy = y + h / 2
-                        page.draw_circle(fitz.Point(cx, cy), radius, color=(0, 0, 0), width=1 * scale)
-                        page.draw_circle(fitz.Point(cx, cy), radius * 0.55, color=(0, 0, 0), fill=(0, 0, 0), width=0)
-                        # Phase 56: option labels never drawn in final PDF.
+                        mask_size = max(opt_size + 2.0 * scale, 14.0 * scale)
+                        mask_size = min(mask_size, w, h)
+                        mx = cx - mask_size / 2
+                        my = cy - mask_size / 2
+                        page.draw_rect(
+                            fitz.Rect(mx, my, mx + mask_size, my + mask_size),
+                            color=None, fill=(1, 1, 1), width=0,
+                        )
+                        page.draw_circle(fitz.Point(cx, cy), radius, color=(0.13, 0.13, 0.16), width=0.4)
+                        if is_selected:
+                            inner_r = max(0.5, radius - 2.5 * scale)
+                            page.draw_circle(fitz.Point(cx, cy), inner_r, color=(0.13, 0.13, 0.16), fill=(0.13, 0.13, 0.16), width=0)
                     except Exception as e:
                         logger.warning(f"Failed to embed radio field {field_id}: {e}")
 
                 elif field_type == "checkbox":
                     try:
                         is_checked = field_value in (True, "true", "True")
-                        box_size = min(14 * scale, h - 4 * scale)
-                        # Phase 73: Center the checkbox horizontally within the
-                        # field bounding box (matches signing view's justify-center).
+                        # Phase 81.70 — match frontend glyph size.
+                        box_size = max(6.0, min(14.0 * scale, h - 4.0 * scale))
+                        if w > 0:
+                            box_size = min(box_size, w - 2.0 * scale)
+                        box_size = max(6.0, box_size)
                         bx = x + (w - box_size) / 2
                         by = y + (h - box_size) / 2
                         box_rect = fitz.Rect(bx, by, bx + box_size, by + box_size)
-                        page.draw_rect(box_rect, color=(0, 0, 0), width=1)
+
+                        # Phase 81.73 — tight centered mask.
+                        mask_size = max(box_size + 2.0 * scale, 14.0 * scale)
+                        mask_size = min(mask_size, w, h)
+                        cx = x + w / 2
+                        cy = y + h / 2
+                        mx = cx - mask_size / 2
+                        my = cy - mask_size / 2
+                        page.draw_rect(
+                            fitz.Rect(mx, my, mx + mask_size, my + mask_size),
+                            color=None, fill=(1, 1, 1), width=0,
+                        )
+
+                        page.draw_rect(box_rect, color=(0.13, 0.13, 0.16), width=0.4)
                         if is_checked:
-                            p1 = fitz.Point(bx + 2 * scale, by + box_size * 0.5)
-                            p2 = fitz.Point(bx + box_size * 0.4, by + box_size - 2 * scale)
-                            p3 = fitz.Point(bx + box_size - 2 * scale, by + 2 * scale)
+                            p1 = fitz.Point(bx + box_size * 0.22, by + box_size * 0.50)
+                            p2 = fitz.Point(bx + box_size * 0.44, by + box_size * 0.72)
+                            p3 = fitz.Point(bx + box_size * 0.78, by + box_size * 0.28)
                             shape = page.new_shape()
                             shape.draw_line(p1, p2)
                             shape.draw_line(p2, p3)
-                            shape.finish(color=(0, 0, 0), width=1.5)
+                            shape.finish(color=(0.13, 0.13, 0.16), width=0.7)
                             shape.commit()
                     except Exception as e:
                         logger.warning(f"Failed to embed checkbox for field {field_id}: {e}")
 
-            # Phase 76: stamp Package Verification ID at top-left of every
-            # page (DocuSign-style audit trail) — public-link submission flow.
+                elif field_type == "merge" and field_value:
+                    # Phase 81.70 — centered baseline to match signing UI.
+                    try:
+                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
+                        font_size = base_fs * scale
+                        height_cap = max(6, (h - 4) * 0.70)
+                        width_cap  = max(6, w / 3)
+                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        text_str = str(field_value)
+                        align_str = (field.get("style") or {}).get("textAlign") or "left"
+                        try:
+                            text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
+                        except Exception:
+                            text_w = 0
+                        pad = 2 * scale
+                        if align_str == "center":
+                            tx = x + max(pad, (w - text_w) / 2)
+                        elif align_str == "right":
+                            tx = x + max(pad, w - text_w - pad)
+                        else:
+                            tx = x + pad
+                        baseline_y = y + h / 2 + font_size * 0.35
+                        page.insert_text(
+                            fitz.Point(tx, baseline_y),
+                            text_str,
+                            fontsize=font_size,
+                            fontname="helv",
+                            color=(0.05, 0.05, 0.15),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to embed merge field {field_id}: {e}")
+
+                elif field_type == "dropdown" and field_value:
+                    # Phase 81.70 — centered baseline to match signing UI.
+                    try:
+                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
+                        font_size = base_fs * scale
+                        height_cap = max(6, (h - 4) * 0.70)
+                        width_cap  = max(6, w / 3)
+                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        text_str = str(field_value)
+                        align_str = (field.get("style") or {}).get("textAlign") or "left"
+                        try:
+                            text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
+                        except Exception:
+                            text_w = 0
+                        pad = 5 * scale
+                        if align_str == "center":
+                            tx = x + max(pad, (w - text_w) / 2)
+                        elif align_str == "right":
+                            tx = x + max(pad, w - text_w - pad)
+                        else:
+                            tx = x + pad
+                        baseline_y = y + h / 2 + font_size * 0.35
+                        page.insert_text(
+                            fitz.Point(tx, baseline_y),
+                            text_str,
+                            fontsize=font_size,
+                            fontname="helv",
+                            color=(0, 0, 0),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to embed dropdown for field {field_id}: {e}")
+
+            # Phase 81 — verification ID stamp applied to EVERY page of the PDF
+            # to ensure auditability across the entire document.
             try:
                 package_verification_id = str(package.get("id") or "").upper()
-                if package_verification_id:
-                    stamp_text = f"Package Verification ID: {package_verification_id}"
-                    for _pg in pdf_doc:
-                        _pg.insert_text(
-                            fitz.Point(18, 14),
+                if package_verification_id and len(pdf_doc) > 0:
+                    stamp_text = f"DocFlow Package Verification ID: {package_verification_id}"
+                    fontsize = 8
+                    try:
+                        text_w = fitz.get_text_length(stamp_text, fontname="helv", fontsize=fontsize)
+                    except Exception:
+                        text_w = len(stamp_text) * 4.2
+
+                    for page_idx in range(len(pdf_doc)):
+                        page = pdf_doc[page_idx]
+                        pw = page.rect.width
+                        ph = page.rect.height
+                        page.insert_text(
+                            fitz.Point(max(18, pw - text_w - 18), ph - 12),
                             stamp_text,
                             fontname="helv",
-                            fontsize=8,
+                            fontsize=fontsize,
                             color=(0.4, 0.4, 0.4),
                         )
             except Exception as stamp_err:

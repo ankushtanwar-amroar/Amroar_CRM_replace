@@ -110,12 +110,27 @@ async def get_user_or_api_key(
 class RecipientInput(BaseModel):
     name: str = Field(..., description="Full name")
     email: Optional[str] = Field(default="", description="Email (required for email delivery)")
+    phone: Optional[str] = Field(default=None, description="Phone in E.164 format (required when sms_mode=true)")
     role: str = Field(default="signer", description="Role: signer, approver, viewer")
     role_type: Optional[str] = Field(default=None, description="Package role: SIGN, VIEW_ONLY, APPROVE_REJECT, RECEIVE_COPY")
     routing_order: int = Field(default=1, ge=1)
     assigned_components: Optional[List[str]] = Field(default_factory=list, description="IDs of template fields assigned to this recipient (basic mode)")
     assigned_components_map: Optional[Dict[str, List[str]]] = Field(default=None, description="Package mode: {template_id: [field_ids]}")
     email_template_id: Optional[str] = Field(default=None, description="Custom email template ID to use when notifying this recipient")
+    # Phase 81.24/81.25 — Per-recipient pending-signature reminder schedule.
+    # Two equivalent shapes are accepted:
+    #   1. Object form: reminder_config={ enabled, interval_value, interval_unit,
+    #      max_count?, end_at? }
+    #   2. Public-API flat form: reminder_enabled / reminder_frequency
+    #      (daily|weekly|monthly|custom) / reminder_custom_value /
+    #      reminder_custom_unit (seconds|minutes|hours|days|weeks|months|years) /
+    #      max_reminders.
+    reminder_config: Optional[Dict[str, Any]] = Field(default=None, description="Per-recipient reminder schedule (nested form)")
+    reminder_enabled: Optional[bool] = Field(default=None, description="Public-API: enable pending-signature reminders for this recipient")
+    reminder_frequency: Optional[str] = Field(default=None, description="Public-API: 'daily' | 'weekly' | 'monthly' | 'custom'")
+    reminder_custom_value: Optional[int] = Field(default=None, description="Public-API: required when reminder_frequency='custom' (>0)")
+    reminder_custom_unit: Optional[str] = Field(default=None, description="Public-API: required when reminder_frequency='custom' (seconds|minutes|hours|days|weeks|months|years)")
+    max_reminders: Optional[int] = Field(default=None, description="Public-API: optional max number of reminders to send")
 
 
 class PackageDocumentInput(BaseModel):
@@ -154,6 +169,8 @@ class GenerateLinksRequest(BaseModel):
     merge_fields: Optional[Dict[str, Any]] = Field(default_factory=dict)
     expires_at: Optional[str] = Field(default=None, description="ISO datetime string for expiry, null for no expiry")
     require_auth: bool = Field(default=True, description="Whether OTP authentication is required for document access")
+    sms_mode: Optional[bool] = Field(default=False, description="Phase 81 — when true, every recipient must have a phone and SMS is sent during the signing flow")
+    sms_consent: Optional[bool] = Field(default=False, description="Controls whether the SMS disclaimer popup is shown in the public signing flow, independent of sms_mode")
 
     # Package mode fields (new)
     send_mode: str = Field(default="basic", description="basic (single doc) or package (multi doc)")
@@ -184,6 +201,24 @@ class GenerateLinksRequest(BaseModel):
         if v not in ('basic', 'package'):
             raise ValueError("send_mode must be 'basic' or 'package'")
         return v
+
+
+
+def _build_reminder_config_from_recipient(r) -> Optional[Dict[str, Any]]:
+    """Phase 81.25 — Translate a `RecipientInput` into the dict shape the
+    service-layer `normalize_reminder_config` expects.  Honours BOTH the
+    nested `reminder_config` form AND the flat public-API form."""
+    if r.reminder_config:
+        return r.reminder_config
+    if r.reminder_enabled:
+        return {
+            "reminder_enabled": True,
+            "reminder_frequency": r.reminder_frequency,
+            "reminder_custom_value": r.reminder_custom_value,
+            "reminder_custom_unit": r.reminder_custom_unit,
+            "max_reminders": r.max_reminders,
+        }
+    return None
 
 
 def error_response(msg: str, errors: List[str] = None, code: int = 400):
@@ -217,6 +252,12 @@ def _auto_assign_unclaimed_fields(
     - Then for every recipient with empty assignments (processed in routing_order),
       fill in the remaining (unclaimed) field IDs and mark them as claimed so
       subsequent empty recipients don't duplicate.
+    - Final sweep (Phase 81.1): if any signable field remains unclaimed AFTER all
+      explicit + empty-recipient passes (e.g. sender manually assigned SIGNATURE
+      to recipient A but forgot to pick the checkbox/radio fields), append the
+      leftovers onto the FIRST recipient (lowest routing_order) so every signable
+      field has at least one owner. This guarantees checkbox/radio/text fields
+      stay visible on the signer page instead of getting hidden by Phase 50.
     - Signable types only (signature/initials/date/text/checkbox/radio/dropdown) —
       merge and label fields are document-level and don't need per-recipient routing.
     """
@@ -260,6 +301,30 @@ def _auto_assign_unclaimed_fields(
         logger.info(
             f"[{log_prefix}] auto-assign: recipient '{getattr(r, 'name', None) or (r.get('name') if isinstance(r, dict) else '')}' "
             f"had empty assigned_components → auto-assigned {len(unclaimed)} field(s)"
+        )
+
+    # Phase 81.1 — final sweep: dump any remaining unclaimed signable fields
+    # onto the first recipient. Without this, manually-partially-assigned
+    # templates leave checkbox/radio fields with no owner → Phase 50 hides
+    # them entirely from the signing UI.
+    leftover = [fid for fid in template_field_ids if fid not in claimed]
+    if leftover and sorted_recipients:
+        first = sorted_recipients[0]
+        existing = list(get_assigned(first) or [])
+        merged = list(dict.fromkeys(existing + leftover))  # preserve order, dedupe
+        if set_assigned:
+            set_assigned(first, merged)
+        else:
+            try:
+                first.assigned_components = merged
+            except Exception:
+                if isinstance(first, dict):
+                    first["assigned_components"] = merged
+        claimed.update(leftover)
+        first_name = getattr(first, 'name', None) or (first.get('name') if isinstance(first, dict) else 'first recipient')
+        logger.info(
+            f"[{log_prefix}] auto-assign sweep: {len(leftover)} unclaimed signable field(s) "
+            f"appended to first recipient '{first_name}' to keep them visible to the signer"
         )
 
 
@@ -359,17 +424,36 @@ async def generate_links(
             delivery_channels.append("email")  # Reuse email channel for recipient token generation
 
         # ── 6. Build recipients for service ──
+        # Phase 81.25 — Public-API style reminder fields (`reminder_enabled` /
+        # `reminder_frequency` / `reminder_custom_value` / `reminder_custom_unit`
+        # / `max_reminders`) are accepted as a flat alternative to
+        # `reminder_config`. We pass them through unchanged and let the
+        # service-layer `normalize_reminder_config` consume either shape.
         recipients_data = []
         for r in (req.recipients or []):
             recipients_data.append({
                 "name": r.name,
                 "email": r.email or "",
+                "phone": (r.phone or "").strip() or None,
                 "role": r.role,
                 "routing_order": r.routing_order,
                 "is_required": True,
                 "assigned_field_ids": r.assigned_components or [],
                 "email_template_id": r.email_template_id,
+                # Phase 81.24/81.25 — propagate reminder configuration.
+                "reminder_config": _build_reminder_config_from_recipient(r),
             })
+
+        # Phase 81 — SMS mode validation: every recipient must carry a phone.
+        if req.sms_mode and recipients_data:
+            missing = [rd.get("name") or rd.get("email") or "Unnamed"
+                       for rd in recipients_data if not rd.get("phone")]
+            if missing:
+                return error_response(
+                    "SMS mode is enabled but the following recipient(s) have no phone number: "
+                    f"{', '.join(missing)}. Add a phone number for each recipient or disable SMS mode.",
+                    [f"Missing phone for recipient: {n}" for n in missing],
+                )
 
         # Structured log: final recipient plan (post auto-assign)
         for rd in recipients_data:
@@ -423,6 +507,8 @@ async def generate_links(
             expires_at=parsed_expires_at,
             require_auth=req.require_auth,
             delivery_mode=req.delivery_mode,
+            sms_mode=bool(req.sms_mode),
+            sms_consent=bool(req.sms_consent),
         )
 
         # ── 8. Build response ──
@@ -603,9 +689,13 @@ async def _handle_package_mode(
             pkg_recipients.append({
                 "name": r.name,
                 "email": r.email or "",
+                "phone": (r.phone or "").strip() or "",
                 "role_type": r.role_type or r.role.upper() if r.role else "SIGN",
                 "routing_order": r.routing_order,
                 "assigned_components": r.assigned_components_map or {},
+                # Phase 81.24/81.25 — reminder schedule per recipient (nested
+                # OR flat public-API form via `_build_reminder_config_from_recipient`).
+                "reminder_config": _build_reminder_config_from_recipient(r),
             })
 
         # Structured log: final package recipient plan (post auto-assign)
@@ -664,6 +754,8 @@ async def _handle_package_mode(
             user_id=current_user.id,
             tenant_id=current_user.tenant_id,
             webhook_config=req.webhook_config,
+            sms_mode=bool(req.sms_mode),
+            sms_consent=bool(req.sms_consent),
         )
 
         # Build response

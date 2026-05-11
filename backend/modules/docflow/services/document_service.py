@@ -216,14 +216,29 @@ class DocumentService:
         query = {"tenant_id": tenant_id}
         if template_id:
             query["template_id"] = template_id
-        if status:
-            query["status"] = status
+        # Phase 81.85 — Status filter is applied AFTER aggregate_status is
+        # computed (see below). DB-level status filter was previously a
+        # different code path that didn't match the UI's aggregate_status
+        # chip — e.g., a doc with raw status='generated' but a recipient
+        # marked 'viewed' shows "In Progress" in the UI but the
+        # `in_progress` filter required `doc.status IN [partially_signed,
+        # in_progress, sent, pending]` which excluded it. We now mirror the
+        # UI's logic exactly.
+        ui_status = (status or "").lower().strip()
+        if ui_status in ("all", ""):
+            ui_status = None
         if search:
+            # Phase 81.34 — broaden search across send id, template name, CRM
+            # object type, AND nested recipient name/email arrays so the
+            # Documents tab finds matches by any signer's name/email too.
             query["$or"] = [
+                {"id": {"$regex": search, "$options": "i"}},
                 {"template_name": {"$regex": search, "$options": "i"}},
                 {"crm_object_type": {"$regex": search, "$options": "i"}},
                 {"recipient_email": {"$regex": search, "$options": "i"}},
-                {"recipient_name": {"$regex": search, "$options": "i"}}
+                {"recipient_name": {"$regex": search, "$options": "i"}},
+                {"recipients.name": {"$regex": search, "$options": "i"}},
+                {"recipients.email": {"$regex": search, "$options": "i"}},
             ]
         if not include_children:
             # Phase 79: exclude per-recipient children (their parent covers them)
@@ -234,8 +249,6 @@ class DocumentService:
                     {"parent_document_id": ""},
                 ]}
             ]
-
-        skip = (page - 1) * limit
 
         # Sort direction
         sort_dir = -1 if sort_order == "newest" else 1
@@ -274,18 +287,26 @@ class DocumentService:
             # Exclude: audit_trail, signatures, field_data (large fields)
         }
         
-        # OPTIMIZATION: Run count and find in parallel
-        import asyncio
-        total_task = self.collection.count_documents(query)
-        documents_task = self.collection.find(query, projection).sort("created_at", sort_dir).skip(skip).limit(limit).to_list(length=limit)
-        
-        total, documents = await asyncio.gather(total_task, documents_task)
+        # OPTIMIZATION: Use projection to exclude large fields (audit_trail, signatures, field_data)
+        # Phase 81.85 — Fetch ALL matching docs (no pagination yet), enrich,
+        # then filter by ui_status (matches the UI's aggregate_status chip),
+        # then paginate the filtered set. The DB-level status filter approach
+        # diverged from the UI's chip and caused mismatched filter results.
+        documents = await self.collection.find(query, projection).sort(
+            "created_at", sort_dir
+        ).to_list(length=None)
+
+        # Phase 81.34 — Treat approve/reject/review as terminal "done" states
+        # alongside signed/completed when computing rollup counters and the
+        # aggregate status chip. This matches the user's spec: a doc whose
+        # final routing step is approved/rejected/reviewed is "Completed".
+        TERMINAL_DONE = ("signed", "completed", "approved", "rejected", "reviewed")
 
         # Phase 79 — enrich each doc with derived rollup fields for the UI.
         for doc in documents:
             recipients = doc.get("recipients") or []
             total_recipients = len(recipients)
-            signed_count = sum(1 for r in recipients if r.get("status") in ("signed", "completed") or r.get("signed_at"))
+            signed_count = sum(1 for r in recipients if r.get("status") in TERMINAL_DONE or r.get("signed_at"))
             viewed_count = sum(1 for r in recipients if r.get("status") == "viewed")
             voided_count = sum(1 for r in recipients if r.get("voided") or r.get("status") == "voided")
             pending_count = max(0, total_recipients - signed_count - voided_count)
@@ -331,6 +352,35 @@ class DocumentService:
                 or doc.get("updated_at")
                 or doc.get("created_at")
             )
+
+        # Phase 81.85 — Apply UI-level status filter AFTER aggregation so the
+        # filter chip on the dashboard always matches the badges shown.
+        # ui_status values come from the UI: all / in_progress / pending /
+        # completed / voided. We also accept legacy values like 'sent',
+        # 'viewed', 'signed', 'declined', 'closed', 'active' for callers that
+        # still pass raw statuses.
+        if ui_status:
+            def matches(d):
+                agg = (d.get("aggregate_status") or "").lower()
+                if ui_status in ("in_progress", "in-progress"):
+                    return agg == "in_progress"
+                if ui_status == "pending":
+                    return agg == "pending"
+                if ui_status == "completed":
+                    return agg == "completed"
+                if ui_status == "voided":
+                    return agg in ("voided", "closed")
+                if ui_status == "active":
+                    return agg in ("active", "active_with_submissions")
+                if ui_status == "declined":
+                    return agg == "declined"
+                # Fallback: equality on aggregate_status OR raw doc.status
+                return agg == ui_status or (d.get("status") or "").lower() == ui_status
+            documents = [d for d in documents if matches(d)]
+
+        total = len(documents)
+        skip = (page - 1) * limit
+        documents = documents[skip: skip + limit]
 
         return {
             "documents": documents,

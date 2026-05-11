@@ -64,6 +64,18 @@ class Recipient(BaseModel):
     user_agent: Optional[str] = None
     reject_reason: Optional[str] = None  # Rejection reason for this recipient
 
+    # Phase 81 — SMS verification fields. `phone` is required when the
+    # parent document has `sms_mode=true`; otherwise optional.
+    phone: Optional[str] = None
+    sms_verified: Optional[bool] = False
+    sms_verified_at: Optional[datetime] = None
+
+    # Phase 81.29 — Pending-signature reminder configuration and state.
+    # The scheduler scans both docflow_package_runs and docflow_documents
+    # for due reminders, so template-flow documents need the same shape.
+    reminder_config: Optional[Dict[str, Any]] = None
+    reminder_state: Optional[Dict[str, Any]] = None
+
 
 class Signature(BaseModel):
     id: str
@@ -119,3 +131,8 @@ class DocumentGenerate(BaseModel):
     # Multi-recipient signing will use the `recipients` list.
     recipient_email: Optional[str] = None
     recipient_name: Optional[str] = None
+
+    # Phase 81 — SMS-mode flag. When true, every recipient must provide a
+    # phone number and pass an SMS OTP challenge before the document can be
+    # opened/signed. When false (default), no SMS step is shown.
+    sms_mode: Optional[bool] = False

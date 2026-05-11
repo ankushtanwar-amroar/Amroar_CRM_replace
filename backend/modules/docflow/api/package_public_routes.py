@@ -34,6 +34,182 @@ webhook_service = WebhookService(db)
 routing_engine = RoutingEngine(db, audit_service=audit_service, webhook_service=webhook_service)
 session_service = SessionService(db)
 
+logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Phase 81 — SMS verification endpoints for PACKAGE recipients (public, token-scoped)
+# Mirrors the template-flow endpoints but operates on docflow_packages /
+# docflow_package_runs collections.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _PkgSmsVerifyRequest(BaseModel):
+    code: str
+
+
+async def _find_pkg_run_by_token(token: str):
+    """Look up a package run + active recipient by recipient public_token.
+    Searches both `docflow_package_runs` and the duplicated `docflow_packages`
+    collection (where runs are stored with `_type='run'`)."""
+    run = await db.docflow_package_runs.find_one(
+        {"recipients.public_token": token}, {"_id": 0}
+    )
+    if not run:
+        run = await db.docflow_packages.find_one(
+            {"recipients.public_token": token, "_type": "run"}, {"_id": 0}
+        )
+    if not run:
+        return None, None
+    rec = next(
+        (r for r in (run.get("recipients") or []) if r.get("public_token") == token),
+        None,
+    )
+    return run, rec
+
+
+@router.post("/{token}/sms/send-otp")
+async def package_sms_send_otp(token: str):
+    """Generate + send a 6-digit OTP for a package recipient. Idempotent
+    inside a 60-second window. Returns `stubbed: true` if Twilio not configured."""
+    from ..services.sms_service import generate_otp, send_otp_sms
+
+    run, recipient = await _find_pkg_run_by_token(token)
+    if not run:
+        raise HTTPException(status_code=404, detail="Invalid signing link")
+    if not run.get("sms_mode"):
+        raise HTTPException(status_code=400, detail="SMS verification is not enabled for this package")
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+
+    phone = recipient.get("phone")
+    if not phone:
+        raise HTTPException(status_code=400, detail="Recipient has no phone number on file")
+
+    now = datetime.now(timezone.utc)
+    existing = recipient.get("sms_otp")
+    existing_at_raw = recipient.get("sms_otp_issued_at")
+    existing_at = None
+    if existing_at_raw:
+        try:
+            existing_at = datetime.fromisoformat(str(existing_at_raw).replace("Z", "+00:00"))
+        except Exception:
+            existing_at = None
+
+    if existing and existing_at and (now - existing_at).total_seconds() < 60:
+        otp = existing
+    else:
+        otp = generate_otp(6)
+        update_payload = {
+            "$set": {
+                "recipients.$.sms_otp": otp,
+                "recipients.$.sms_otp_issued_at": now.isoformat(),
+                "recipients.$.sms_otp_attempts": 0,
+            }
+        }
+        # Write to BOTH copies of the run (package_runs + packages duplicate).
+        await db.docflow_package_runs.update_one(
+            {"id": run["id"], "recipients.public_token": token}, update_payload
+        )
+        await db.docflow_packages.update_one(
+            {"id": run["id"], "recipients.public_token": token, "_type": "run"}, update_payload
+        )
+
+    result = await send_otp_sms(phone, otp, document_name=run.get("name"))
+    return {
+        "success": result.get("success", False),
+        "stubbed": bool(result.get("stubbed")),
+        "expires_in_seconds": 600,
+    }
+
+
+@router.post("/{token}/sms/verify-otp")
+async def package_sms_verify_otp(token: str, body: _PkgSmsVerifyRequest):
+    """Verify the OTP and mark the package recipient as sms_verified=true."""
+    run, recipient = await _find_pkg_run_by_token(token)
+    if not run:
+        raise HTTPException(status_code=404, detail="Invalid signing link")
+    if not run.get("sms_mode"):
+        raise HTTPException(status_code=400, detail="SMS verification is not enabled for this package")
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Recipient not found")
+    if recipient.get("sms_verified"):
+        return {"success": True, "already_verified": True}
+
+    issued_raw = recipient.get("sms_otp_issued_at")
+    issued_at = None
+    if issued_raw:
+        try:
+            issued_at = datetime.fromisoformat(str(issued_raw).replace("Z", "+00:00"))
+        except Exception:
+            issued_at = None
+    if not recipient.get("sms_otp") or not issued_at:
+        raise HTTPException(status_code=400, detail="No active code. Request a new one.")
+    if (datetime.now(timezone.utc) - issued_at).total_seconds() > 600:
+        raise HTTPException(status_code=400, detail="Code has expired. Request a new one.")
+
+    attempts = int(recipient.get("sms_otp_attempts") or 0)
+    if attempts >= 5:
+        raise HTTPException(status_code=429, detail="Too many attempts. Request a new code.")
+
+    submitted = (body.code or "").strip()
+    if submitted != recipient.get("sms_otp"):
+        bump = {"$inc": {"recipients.$.sms_otp_attempts": 1}}
+        await db.docflow_package_runs.update_one(
+            {"id": run["id"], "recipients.public_token": token}, bump
+        )
+        await db.docflow_packages.update_one(
+            {"id": run["id"], "recipients.public_token": token, "_type": "run"}, bump
+        )
+        raise HTTPException(status_code=400, detail="Incorrect code")
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    success_payload = {
+        "$set": {
+            "recipients.$.sms_verified": True,
+            "recipients.$.sms_verified_at": now_iso,
+            "recipients.$.sms_otp": None,
+            "recipients.$.sms_otp_issued_at": None,
+            "recipients.$.sms_otp_attempts": 0,
+        }
+    }
+    await db.docflow_package_runs.update_one(
+        {"id": run["id"], "recipients.public_token": token}, success_payload
+    )
+    await db.docflow_packages.update_one(
+        {"id": run["id"], "recipients.public_token": token, "_type": "run"}, success_payload
+    )
+    # Also propagate to the child docflow_documents recipients so the
+    # template-flow signing endpoint (which checks document.sms_mode +
+    # recipient.sms_verified) accepts the signature.
+    try:
+        for pkg_doc in run.get("documents", []):
+            doc_id = pkg_doc.get("document_id")
+            if not doc_id:
+                continue
+            child = await db.docflow_documents.find_one(
+                {"id": doc_id},
+                {"_id": 0, "recipients": 1},
+            )
+            if not child:
+                continue
+            for cr in child.get("recipients") or []:
+                if (cr.get("email") or "").lower() == (recipient.get("email") or "").lower():
+                    await db.docflow_documents.update_one(
+                        {"id": doc_id, "recipients.id": cr["id"]},
+                        {
+                            "$set": {
+                                "recipients.$.sms_verified": True,
+                                "recipients.$.sms_verified_at": now_iso,
+                            }
+                        },
+                    )
+                    break
+    except Exception as _propagate_err:
+        logger.warning(f"Package→child SMS verified propagation failed: {_propagate_err}")
+
+    return {"success": True, "verified_at": now_iso}
+
 
 @router.get("/{token}/status")
 async def get_package_status(token: str):
@@ -69,6 +245,20 @@ async def _find_package_by_recipient_token(token: str):
             break
 
     return package, active_recipient
+
+
+def _assert_recipient_not_voided(active_recipient: dict):
+    """Phase 81.43 — central guard. Raises 410 when the active recipient has
+    been voided by the sender. Called from every public write endpoint
+    (sign/approve/review/decline/mark-*) to prevent voided recipients from
+    performing any action. The package-wide void is handled separately."""
+    if not active_recipient:
+        return
+    if active_recipient.get("voided") is True or active_recipient.get("status") == "voided":
+        raise HTTPException(
+            status_code=410,
+            detail="Your access to this package has been voided by the sender. Please contact the sender if you believe this is a mistake.",
+        )
 
 
 async def _validate_session_for_request(
@@ -265,9 +455,29 @@ async def get_package_public(
 
     # Check package is accessible
     if package.get("status") == "voided":
-        raise HTTPException(status_code=410, detail="This package has been voided")
+        # Phase 81.67 — structured detail for void; viewer renders banner.
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "package_voided",
+                "message": "This package has been voided by the sender.",
+                "voided_at": package.get("voided_at"),
+                "void_reason": package.get("void_reason") or "",
+                "package_name": package.get("name") or "",
+            },
+        )
     if package.get("status") == "expired":
         raise HTTPException(status_code=410, detail="This package has expired")
+
+    # Phase 81.43 — Per-recipient void guard. If the sender voided THIS
+    # recipient (even though the package is still in progress), block their
+    # signing link entirely so they can't open the package, sign, approve,
+    # review or decline. Other active recipients continue normally.
+    if active_recipient.get("voided") is True or active_recipient.get("status") == "voided":
+        raise HTTPException(
+            status_code=410,
+            detail="Your access to this package has been voided by the sender. Please contact the sender if you believe this is a mistake.",
+        )
 
     require_auth = package.get("security_settings", {}).get("require_auth", True)
     has_valid_session = False
@@ -363,6 +573,38 @@ async def get_package_public(
     sign_recipients = [r for r in recipients if r.get("role_type") == "SIGN"]
     all_signing_complete = all(r.get("status") == "completed" for r in sign_recipients) if sign_recipients else False
 
+    # Phase 81 — surface SMS state to the package signing UI.
+    # sms_required is driven by sms_consent (popup visibility), not sms_mode.
+    # Phase 81.4 — only flag `sms_required=true` when the active recipient
+    # still has a pending action (signer or approver). Viewers, completed
+    # signers, decided approvers, voided/declined/expired recipients, and
+    # terminal package runs never trigger the disclaimer popup.
+    sms_required = False
+    sms_verified = False
+    recipient_phone_masked = ""
+    if package.get("sms_consent"):
+        try:
+            from ..services.sms_service import mask_phone
+            ar_role = str(active_recipient.get("role_type") or active_recipient.get("role") or "SIGN").upper()
+            ar_status = str(active_recipient.get("status") or "").lower()
+            pkg_status = str(package.get("status") or "").lower()
+            actionable_role = ar_role in {"SIGN", "SIGNER", "APPROVE_REJECT", "APPROVER"}
+            terminal_recipient = ar_status in {"signed", "completed", "approved", "rejected", "declined", "voided", "expired", "skipped"}
+            terminal_pkg = pkg_status in {"completed", "signed", "voided", "expired", "declined", "cancelled"}
+            should_show = (
+                actionable_role
+                and not terminal_recipient
+                and not terminal_pkg
+                and not all_signing_complete
+                and not active_recipient.get("voided")
+            )
+            if should_show:
+                sms_required = True
+                sms_verified = bool(active_recipient.get("sms_verified"))
+                recipient_phone_masked = mask_phone(active_recipient.get("phone"))
+        except Exception as _sms_err:
+            logger.warning(f"Package SMS state resolution failed: {_sms_err}")
+
     return {
         "package_id": package["id"],
         "package_name": package.get("name", ""),
@@ -373,6 +615,10 @@ async def get_package_public(
         "documents": documents,
         "all_signing_complete": all_signing_complete,
         "sender": sender_info,
+        "sms_required": sms_required,
+        "sms_mode": bool(package.get("sms_mode", False)),
+        "sms_verified": sms_verified,
+        "recipient_phone_masked": recipient_phone_masked,
         "active_recipient": {
             "id": active_recipient.get("id"),
             "name": active_recipient.get("name", ""),
@@ -419,6 +665,9 @@ async def mark_signed(
     if not active_recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
 
+    # Phase 81.43 — block voided recipient from performing any action.
+    _assert_recipient_not_voided(active_recipient)
+
     # Session validation
     require_auth = package.get("security_settings", {}).get("require_auth", True)
     if require_auth:
@@ -440,8 +689,15 @@ async def mark_signed(
             detail=f"Recipient role is '{active_recipient.get('role_type')}', not SIGN"
         )
 
-    # Validate recipient status (must be notified or in_progress)
-    if active_recipient.get("status") not in ("notified", "in_progress"):
+    # Validate recipient status (must be an active pre-signing state).
+    # Phase 81.45 — broadened from {notified, in_progress} to include
+    # pending/sent/viewed. Email-delivered recipients often stay in
+    # `pending` until they click their link, and some delivery backends
+    # never flip to `notified`; the old guard rejected legitimate sign
+    # attempts with "Recipient already 'pending'". Terminal / voided
+    # statuses (signed/completed/approved/rejected/reviewed/declined/voided)
+    # remain blocked correctly since they're not in this whitelist.
+    if active_recipient.get("status") not in ("pending", "sent", "notified", "viewed", "in_progress"):
         raise HTTPException(
             status_code=400,
             detail=f"Recipient already '{active_recipient.get('status')}'"
@@ -480,9 +736,6 @@ class SignWithFieldsRequest(BaseModel):
     documents_field_data: Dict[str, Dict[str, Any]] = {}  # { doc_id: { field_id: value } }
 
 
-logger = logging.getLogger(__name__)
-
-
 @router.post("/{token}/sign-with-fields")
 async def sign_with_fields(
     token: str,
@@ -502,6 +755,9 @@ async def sign_with_fields(
     if not active_recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
 
+    # Phase 81.43 — block voided recipient from performing any action.
+    _assert_recipient_not_voided(active_recipient)
+
     # Session validation
     require_auth = package.get("security_settings", {}).get("require_auth", True)
     if require_auth:
@@ -517,9 +773,13 @@ async def sign_with_fields(
     if active_recipient.get("role_type") != "SIGN":
         raise HTTPException(status_code=400, detail=f"Recipient role is '{active_recipient.get('role_type')}', not SIGN")
 
-    # Validate recipient status
-    if active_recipient.get("status") not in ("notified", "in_progress"):
+    # Validate recipient status — Phase 81.45 broadened whitelist.
+    if active_recipient.get("status") not in ("pending", "sent", "notified", "viewed", "in_progress"):
         raise HTTPException(status_code=400, detail=f"Recipient already '{active_recipient.get('status')}'")
+
+    # Phase 81.7 — SMS verification block removed. Disclaimer popup is the
+    # only SMS-related UX gate; signing endpoints no longer enforce OTP
+    # verification at the API layer.
 
     signer_name = req.signer_name or active_recipient.get("name", "")
     signer_email = req.signer_email or active_recipient.get("email", "")
@@ -568,6 +828,21 @@ async def sign_with_fields(
                     for r in all_recipients_on_pkg
                     if r.get("status") in ("signed", "completed") and r.get("template_recipient_id")
                 }
+                # Phase 81.30 — Per-recipient `assigned_components` (set at
+                # send time) is the authoritative ownership signal. Build a
+                # field_id → tpl_rid map for THIS template/document so we can
+                # block cross-recipient writes even when the template-level
+                # `assigned_to` is empty (the common case for checkbox/radio).
+                active_assigned_set = set(
+                    (active_recipient.get("assigned_components") or {}).get(template_id, [])
+                )
+                ownership_by_field_id = {}
+                for r in all_recipients_on_pkg:
+                    tpl_rid = r.get("template_recipient_id")
+                    fids = (r.get("assigned_components") or {}).get(template_id, [])
+                    for fid in (fids or []):
+                        if fid and tpl_rid:
+                            ownership_by_field_id.setdefault(fid, tpl_rid)
                 existing_fd_preview = document.get("field_data", {}) or {}
                 filtered = {}
                 for fid, val in (field_data_for_doc or {}).items():
@@ -576,17 +851,19 @@ async def sign_with_fields(
                         filtered[fid] = val  # unknown placement — pass through
                         continue
                     assigned_to = p.get("assigned_to") or p.get("recipient_id")
-                    if not assigned_to:
+                    runtime_owner = ownership_by_field_id.get(fid)
+                    effective_owner = assigned_to or runtime_owner
+                    if not effective_owner:
                         filtered[fid] = val
                         continue
-                    if assigned_to == active_tpl_rid:
+                    if effective_owner == active_tpl_rid or fid in active_assigned_set:
                         filtered[fid] = val
-                    elif assigned_to in signed_tpl_rids and fid in existing_fd_preview:
+                    elif effective_owner in signed_tpl_rids and fid in existing_fd_preview:
                         filtered[fid] = existing_fd_preview[fid]  # preserve signed owner
                     else:
                         logger.warning(
                             f"Package sign: rejected cross-recipient write "
-                            f"doc={doc_id} field={fid} assigned_to={assigned_to} "
+                            f"doc={doc_id} field={fid} owner={effective_owner} "
                             f"active={active_tpl_rid}"
                         )
                 field_data_for_doc = filtered
@@ -614,9 +891,21 @@ async def sign_with_fields(
                 if field_placements:
                     logger.info(f"sign-with-fields: Resolved {len(field_placements)} fields from latest template version")
 
-            # Filter fields: assigned fields + non-assignable fields (merge, checkbox, radio, label)
+            # Phase 81.71 — populate missing radio-group selections from the
+            # authored `defaultChecked: True` option so the PDF matches the
+            # signing-UI preview even when the signer never interacted.
+            from ..services.field_defaults import apply_radio_defaults
+            combined_field_data = apply_radio_defaults(field_placements, combined_field_data)
+
+            # Filter fields: assigned fields + truly document-level types
+            # (merge fields = CRM data, label = static doc text). Phase 81.30 —
+            # checkbox + radio are now per-recipient assignable; they're no
+            # longer in NON_ASSIGNABLE_TYPES so each signing pass only stamps
+            # the boxes/options the active recipient actually owns. Prior
+            # signers' picks are already burned into the previously-signed PDF
+            # we just downloaded as `base_key`, so cumulative output is intact.
             assigned_field_ids = set(assigned_components.get(template_id, []))
-            NON_ASSIGNABLE_TYPES = {"merge", "checkbox", "radio", "label"}
+            NON_ASSIGNABLE_TYPES = {"merge", "label"}
             if assigned_field_ids:
                 relevant_fields = [
                     f for f in field_placements
@@ -677,7 +966,11 @@ async def sign_with_fields(
                                 break
 
                 if not field_value and field_value is not False:
-                    continue
+                    # Fallback to defaultValue for Read-Only or static fields
+                    # to ensure they are burned into the final signed PDF.
+                    field_value = field.get("defaultValue") or field.get("default_value")
+                    if not field_value and field_value is not False:
+                        continue
 
                 page_num = (field.get("page", 1) or 1) - 1
                 if page_num < 0 or page_num >= len(pdf_doc):
@@ -740,69 +1033,132 @@ async def sign_with_fields(
                 elif field_type in ("text", "date") and field_value:
                     try:
                         base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
-                        # Scale from 800px canvas to PDF points, then clamp to the
-                        # field's own bounding box so text never outgrows the
-                        # author-designed rectangle (matches frontend
-                        # resolveResponsiveFontSize in InteractiveDocumentViewer).
+                        # Phase 81.70 — mirror frontend signing-UI font math:
+                        #   baseFs = css_px * scale
+                        #   hCap   = max(6, (h - 4) * 0.70)
+                        #   wCap   = max(6, w / 3)   (single-line only)
+                        #   final  = max(6, min(base, hCap, wCap, 24))
                         font_size = base_fs * scale
-                        height_cap = max(6, (h - 4 * scale) * 0.70)
-                        width_cap  = max(6, w / 3)
-                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
-                        # Honour field alignment (left / center / right) in the final PDF.
-                        text_str = str(field_value)
-                        align = (field.get("style") or {}).get("textAlign") or "left"
-                        try:
-                            text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
-                        except Exception:
-                            text_w = 0
-                        if align == "center":
-                            tx = x + max(0, (w - text_w) / 2)
-                        elif align == "right":
-                            tx = x + max(0, w - text_w - 2 * scale)
-                        else:
-                            tx = x + 2 * scale
-                        text_point = fitz.Point(tx, y + h - 4 * scale)
-                        page.insert_text(
-                            text_point,
-                            text_str,
-                            fontsize=font_size,
-                            color=(0, 0, 0)
+                        height_cap = max(6, (h - 4) * 0.70)
+                        is_multiline_text = (
+                            field_type == "text"
+                            and (
+                                field.get("fieldSubType") == "multi-line"
+                                or field.get("field_sub_type") == "multi-line"
+                                or field.get("multiline") is True
+                            )
                         )
+                        if is_multiline_text:
+                            font_size = max(6, min(font_size, height_cap, 24))
+                        else:
+                            width_cap = max(6, w / 3)
+                            font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        text_str = str(field_value)
+                        align_str = (field.get("style") or {}).get("textAlign") or "left"
+                        align_map = {"left": 0, "center": 1, "right": 2}
+
+                        # Phase 81.70 — VERTICAL CENTERING FIX:
+                        # PyMuPDF's `insert_textbox` renders from the TOP of the
+                        # rect, which caused values to "float above the line"
+                        # vs the frontend preview (which centers). Single-line
+                        # fields now use `insert_text` with an explicit baseline
+                        # at `y + h/2 + fs*0.35` (matches the frontend's
+                        # `y + ptHeight/2 - fs*0.35` in pdf-lib's bottom-up
+                        # coord system). Multi-line keeps `insert_textbox` for
+                        # word-wrap but shrinks the rect to a centered band
+                        # sized for the clamped font.
+                        if is_multiline_text:
+                            # Centered multi-line band: start from middle-top.
+                            line_h = max(font_size * 1.2, font_size + 2)
+                            est_lines = max(1, int((h - 4 * scale) / line_h))
+                            band_h = min(h - 4 * scale, est_lines * line_h)
+                            band_top = y + (h - band_h) / 2
+                            rect = fitz.Rect(
+                                x + 5 * scale,
+                                band_top,
+                                x + w - 5 * scale,
+                                band_top + band_h,
+                            )
+                            page.insert_textbox(
+                                rect,
+                                text_str,
+                                fontsize=font_size,
+                                fontname="helv",
+                                color=(0, 0, 0),
+                                align=align_map.get(align_str, 0),
+                            )
+                        else:
+                            # Single-line: compute centered baseline + manual
+                            # alignment so output matches the signing preview
+                            # pixel-for-pixel.
+                            try:
+                                text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
+                            except Exception:
+                                text_w = 0
+                            pad = 5 * scale
+                            if align_str == "center":
+                                tx = x + max(pad, (w - text_w) / 2)
+                            elif align_str == "right":
+                                tx = x + max(pad, w - text_w - pad)
+                            else:
+                                tx = x + pad
+                            baseline_y = y + h / 2 + font_size * 0.35
+                            page.insert_text(
+                                fitz.Point(tx, baseline_y),
+                                text_str,
+                                fontsize=font_size,
+                                fontname="helv",
+                                color=(0, 0, 0),
+                            )
                     except Exception as e:
                         logger.warning(f"Failed to embed text for field {field_id}: {e}")
 
                 elif field_type == "checkbox":
                     try:
                         is_checked = field_value in (True, "true", "True")
-                        box_size = min(14 * scale, h - 4 * scale)
-                        # Phase 73: Center the checkbox horizontally within the
-                        # field bounding box (matches signing view's justify-center).
+                        # Phase 81.70 — match frontend signing-UI checkbox glyph:
+                        box_size = max(6.0, min(14.0 * scale, h - 4.0 * scale))
+                        if w > 0:
+                            box_size = min(box_size, w - 2.0 * scale)
+                        box_size = max(6.0, box_size)
                         bx = x + (w - box_size) / 2
                         by = y + (h - box_size) / 2
                         box_rect = fitz.Rect(bx, by, bx + box_size, by + box_size)
-                        page.draw_rect(box_rect, color=(0, 0, 0), width=1)
+
+                        # Phase 81.73 — Tight centered mask (not full rect) so
+                        # label text adjacent to the box is preserved when the
+                        # author drew the field wider than the glyph itself.
+                        mask_size = max(box_size + 2.0 * scale, 14.0 * scale)
+                        mask_size = min(mask_size, w, h)
+                        cx = x + w / 2
+                        cy = y + h / 2
+                        mx = cx - mask_size / 2
+                        my = cy - mask_size / 2
+                        page.draw_rect(
+                            fitz.Rect(mx, my, mx + mask_size, my + mask_size),
+                            color=None, fill=(1, 1, 1), width=0,
+                        )
+
+                        page.draw_rect(box_rect, color=(0.13, 0.13, 0.16), width=0.4)
                         if is_checked:
-                            # Draw checkmark
-                            p1 = fitz.Point(bx + 2 * scale, by + box_size * 0.5)
-                            p2 = fitz.Point(bx + box_size * 0.4, by + box_size - 2 * scale)
-                            p3 = fitz.Point(bx + box_size - 2 * scale, by + 2 * scale)
+                            # Hairline check stroke — kept slightly heavier than border.
+                            p1 = fitz.Point(bx + box_size * 0.22, by + box_size * 0.50)
+                            p2 = fitz.Point(bx + box_size * 0.44, by + box_size * 0.72)
+                            p3 = fitz.Point(bx + box_size * 0.78, by + box_size * 0.28)
                             shape = page.new_shape()
                             shape.draw_line(p1, p2)
                             shape.draw_line(p2, p3)
-                            shape.finish(color=(0, 0, 0), width=1.5)
+                            shape.finish(color=(0.13, 0.13, 0.16), width=0.7)
                             shape.commit()
                     except Exception as e:
                         logger.warning(f"Failed to embed checkbox for field {field_id}: {e}")
 
                 elif field_type == "merge" and field_value:
                     try:
-                        # Removed white background to make merge fields transparent
-                        #     bg_rect = fitz.Rect(x, y, x + w, y + h)
-                        # page.draw_rect(bg_rect, color=None, fill=(1, 1, 1))
-                        
                         base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
+                        # Phase 81.70 — same font-size clamp as text/date.
                         font_size = base_fs * scale
-                        height_cap = max(6, (h - 4 * scale) * 0.70)
+                        height_cap = max(6, (h - 4) * 0.70)
                         width_cap  = max(6, w / 3)
                         font_size = max(6, min(font_size, height_cap, width_cap, 24))
                         text_str = str(field_value)
@@ -811,27 +1167,33 @@ async def sign_with_fields(
                             text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
                         except Exception:
                             text_w = 0
+                        pad = 2 * scale
                         if align == "center":
-                            tx = x + max(0, (w - text_w) / 2)
+                            tx = x + max(pad, (w - text_w) / 2)
                         elif align == "right":
-                            tx = x + max(0, w - text_w - 2 * scale)
+                            tx = x + max(pad, w - text_w - pad)
                         else:
-                            tx = x + 2 * scale
-                        text_point = fitz.Point(tx, y + h - 4 * scale)
+                            tx = x + pad
+                        # Phase 81.70 — CENTER baseline to match frontend preview.
+                        # Previously `y + h - 4*scale` planted text near the BOTTOM
+                        # of the rect (DocuSign-style anchor), diverging from the
+                        # signing UI which centers vertically.
+                        baseline_y = y + h / 2 + font_size * 0.35
                         page.insert_text(
-                            text_point,
+                            fitz.Point(tx, baseline_y),
                             text_str,
                             fontsize=font_size,
-                            color=(0.05, 0.05, 0.15)
+                            fontname="helv",
+                            color=(0.05, 0.05, 0.15),
                         )
                     except Exception as e:
                         logger.warning(f"Failed to embed merge field {field_id}: {e}")
 
                 elif field_type == "radio":
                     # Radio: multiple fields share a group (field.groupName).
-                    # Only draw the option whose optionValue matches the stored
-                    # group selection. Unselected options are omitted from the
-                    # final PDF to keep it clean (matches `hideLabelOnFinal` UX).
+                    # Phase 81.73 — mask only the glyph area (centered square),
+                    # NOT the full rect, so adjacent label text isn't erased
+                    # when the author drew the field rect wider than needed.
                     try:
                         group = field.get("groupName") or field.get("group_name")
                         option_value = field.get("optionValue") or field.get("option_value") or field_id
@@ -839,44 +1201,95 @@ async def sign_with_fields(
                         if group:
                             selected_val = combined_field_data.get(group)
                         if selected_val is None:
-                            # Fallback: stored directly under the field's own id
                             selected_val = combined_field_data.get(field_id)
                         is_selected = (selected_val == option_value)
-                        if not is_selected:
-                            # Skip unchecked options — avoids unwanted overlays on the base PDF.
-                            continue
 
-                        # Phase 73: Center the radio circle horizontally
-                        # within the field bounding box (matches signing view).
-                        # Previously `cx = x + radius + 2 * scale` left-aligned
-                        # the circle, producing visible shift on the final PDF
-                        # that grew with field distance from page origin.
-                        radius = min(7 * scale, (h / 2) - 2 * scale)
+                        # Phase 81.70 — match frontend glyph size.
+                        opt_size = max(6.0, min(12.0 * scale, h - 4.0 * scale))
+                        if w > 0:
+                            opt_size = min(opt_size, w - 2.0 * scale)
+                        opt_size = max(6.0, opt_size)
+                        radius = opt_size / 2
                         cx = x + w / 2
                         cy = y + h / 2
-                        # Outer ring
-                        page.draw_circle(fitz.Point(cx, cy), radius, color=(0, 0, 0), width=1 * scale)
-                        # Inner filled dot
-                        page.draw_circle(fitz.Point(cx, cy), radius * 0.55, color=(0, 0, 0), fill=(0, 0, 0), width=0)
+
+                        # Phase 81.73 — Centered tight mask: just big enough to
+                        # cover any baked-in native ○/● glyph in the source PDF
+                        # without erasing adjacent label text.
+                        mask_size = max(opt_size + 2.0 * scale, 14.0 * scale)
+                        mask_size = min(mask_size, w, h)
+                        mx = cx - mask_size / 2
+                        my = cy - mask_size / 2
+                        page.draw_rect(
+                            fitz.Rect(mx, my, mx + mask_size, my + mask_size),
+                            color=None, fill=(1, 1, 1), width=0,
+                        )
+
+                        # Outer ring — always drawn so unselected shows empty ○.
+                        page.draw_circle(fitz.Point(cx, cy), radius, color=(0.13, 0.13, 0.16), width=0.4)
+                        if is_selected:
+                            inner_r = max(0.5, radius - 2.5 * scale)
+                            page.draw_circle(fitz.Point(cx, cy), inner_r, color=(0.13, 0.13, 0.16), fill=(0.13, 0.13, 0.16), width=0)
 
                         # Phase 56: Option label is NEVER drawn in the final PDF
                         # (DocuSign-style — circle-only, clean output).
                     except Exception as e:
                         logger.warning(f"Failed to embed radio field {field_id}: {e}")
 
-            # Phase 76: stamp Package Verification ID at top-left of every
-            # page (DocuSign-style audit trail). Runs once per page regardless
-            # of whether that page has fields.
+                elif field_type == "dropdown" and field_value:
+                    # Phase 81.16 — render dropdown selection as text in PDF.
+                    # Phase 81.70 — centered baseline to match frontend preview.
+                    try:
+                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
+                        font_size = base_fs * scale
+                        height_cap = max(6, (h - 4) * 0.70)
+                        width_cap  = max(6, w / 3)
+                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        text_str = str(field_value)
+                        align_str = (field.get("style") or {}).get("textAlign") or "left"
+                        try:
+                            text_w = fitz.get_text_length(text_str, fontname="helv", fontsize=font_size)
+                        except Exception:
+                            text_w = 0
+                        pad = 5 * scale
+                        if align_str == "center":
+                            tx = x + max(pad, (w - text_w) / 2)
+                        elif align_str == "right":
+                            tx = x + max(pad, w - text_w - pad)
+                        else:
+                            tx = x + pad
+                        baseline_y = y + h / 2 + font_size * 0.35
+                        page.insert_text(
+                            fitz.Point(tx, baseline_y),
+                            text_str,
+                            fontsize=font_size,
+                            fontname="helv",
+                            color=(0, 0, 0),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to embed dropdown for field {field_id}: {e}")
+
+            # Phase 81 — verification ID stamp applied to EVERY page of the PDF
+            # to ensure auditability across the entire document.
             try:
                 package_verification_id = str(package.get("id") or "").upper()
-                if package_verification_id:
+                if package_verification_id and len(pdf_doc) > 0:
                     stamp_text = f"Package Verification ID: {package_verification_id}"
-                    for _pg in pdf_doc:
-                        _pg.insert_text(
-                            fitz.Point(18, 14),
+                    fontsize = 8
+                    try:
+                        text_w = fitz.get_text_length(stamp_text, fontname="helv", fontsize=fontsize)
+                    except Exception:
+                        text_w = len(stamp_text) * 4.2
+
+                    for page_idx in range(len(pdf_doc)):
+                        page = pdf_doc[page_idx]
+                        pw = page.rect.width
+                        ph = page.rect.height
+                        page.insert_text(
+                            fitz.Point(max(18, pw - text_w - 18), ph - 12),
                             stamp_text,
                             fontname="helv",
-                            fontsize=8,
+                            fontsize=fontsize,
                             color=(0.4, 0.4, 0.4),
                         )
             except Exception as stamp_err:
@@ -901,11 +1314,39 @@ async def sign_with_fields(
                 existing_field_data = document.get("field_data", {}) or {}
                 merged_field_data = {**existing_field_data, **combined_field_data}
 
+                # Phase 81.7 — Merge field "convert to text fallback" persistence.
+                # Mirror the template-flow behaviour: persist signer-typed values
+                # under both `field_data[merge_id]` AND `merge_field_values[<alias>]`
+                # so the final PDF render and webhook payload both surface them.
+                updated_merge_values = dict(document.get("merge_field_values") or {})
+                try:
+                    for _p in (relevant_fields or []):
+                        if (_p.get("type") or "").lower() != "merge":
+                            continue
+                        _pid = _p.get("id")
+                        if not _pid:
+                            continue
+                        _typed = merged_field_data.get(_pid)
+                        if _typed in (None, ""):
+                            continue
+                        _m_obj = _p.get("merge_object") or _p.get("mergeObject") or ""
+                        _m_fld = _p.get("merge_field") or _p.get("mergeField") or ""
+                        _alias = (
+                            f"{_m_obj}.{_m_fld}".strip(".")
+                            if (_m_obj and _m_fld)
+                            else (_m_fld or _p.get("merge_token") or _p.get("mergePattern") or "").strip("{}").strip()
+                        )
+                        if _alias:
+                            updated_merge_values[_alias] = _typed
+                except Exception as _mv_err:
+                    logger.warning(f"Package merge-value persistence soft-failed: {_mv_err}")
+
                 # Update document record
                 update_data = {
                     "signed_s3_key": new_signed_key,
                     "signed_file_url": signed_url,
                     "field_data": merged_field_data,
+                    "merge_field_values": updated_merge_values,
                     "updated_at": now.isoformat(),
                 }
 
@@ -913,6 +1354,177 @@ async def sign_with_fields(
                     {"id": doc_id},
                     {"$set": update_data}
                 )
+
+                # Phase 81.49 / Phase 2 — Interlinked Fields fanout. After
+                # persisting this document's field_data, propagate values to
+                # sibling documents in the same package_run whose placements
+                # carry `linked_to.field_id` referencing a field in THIS doc
+                # AND whose owner matches the source field's owner
+                # (same-recipient scope).
+                #
+                # Phase 2 additions:
+                #   • Radio: source/target storage key is the placement's
+                #     groupName (not its id) because the renderer reads
+                #     field_data[groupName] for new-model radios. We compute
+                #     a `value_key_for(p)` helper that returns groupName for
+                #     radios, else the placement id.
+                #   • Checkbox: storage key is the placement id; values are
+                #     plain booleans (passthrough).
+                #   • Two-way reverse: when this doc's saved field_data
+                #     contains a value for a placement that is itself a
+                #     two-way TARGET (linked_to.direction === 'two_way'),
+                #     also write that value into the SOURCE doc's field_data
+                #     (same-recipient scope), then forward-fanout from the
+                #     source so other targets stay in sync.
+                try:
+                    def value_key_for(p):
+                        t = (p or {}).get("type") or (p or {}).get("field_type") or ""
+                        if (t or "").lower() == "radio":
+                            return p.get("groupName") or p.get("group_name") or p.get("id")
+                        return p.get("id")
+
+                    sibling_doc_ids = [
+                        d.get("document_id") for d in package.get("documents", [])
+                        if d.get("document_id") and d.get("document_id") != doc_id
+                    ]
+                    # Always run if the saved doc has linked-source candidates,
+                    # even if no sibling docs (defensive for single-doc edge).
+                    sibling_docs = []
+                    if sibling_doc_ids:
+                        sibling_docs = await db.docflow_documents.find(
+                            {"id": {"$in": sibling_doc_ids}},
+                            {"_id": 0}
+                        ).to_list(length=None)
+
+                    # Load this doc's template once.
+                    tpl_cache = {}
+                    this_tpl = await db.docflow_templates.find_one(
+                        {"id": template_id},
+                        {"_id": 0, "field_placements": 1, "recipients": 1}
+                    )
+                    tpl_cache[template_id] = this_tpl or {}
+                    source_placements = (this_tpl or {}).get("field_placements", []) or []
+                    source_placements_by_id = {p.get("id"): p for p in source_placements}
+
+                    # Build "source value" map keyed by placement id. For
+                    # radios we read field_data[groupName]; for the rest the
+                    # placement id IS the storage key.
+                    source_values_by_pid = {}
+                    for sp in source_placements:
+                        pid = sp.get("id")
+                        if not pid:
+                            continue
+                        vk = value_key_for(sp)
+                        if vk in field_data_for_doc:
+                            source_values_by_pid[pid] = field_data_for_doc[vk]
+
+                    # FORWARD FANOUT: this doc as SOURCE → siblings as TARGETS.
+                    for sib in sibling_docs:
+                        sib_tpl_id = sib.get("template_id")
+                        if not sib_tpl_id:
+                            continue
+                        if sib_tpl_id not in tpl_cache:
+                            t = await db.docflow_templates.find_one(
+                                {"id": sib_tpl_id},
+                                {"_id": 0, "field_placements": 1}
+                            )
+                            tpl_cache[sib_tpl_id] = t or {}
+                        sib_placements = tpl_cache[sib_tpl_id].get("field_placements", []) or []
+                        sib_updates = {}
+                        for p in sib_placements:
+                            link = p.get("linked_to") or {}
+                            if not (link.get("enabled") and link.get("field_id")):
+                                continue
+                            src_fid = link["field_id"]
+                            if src_fid not in source_values_by_pid:
+                                continue
+                            src_placement = source_placements_by_id.get(src_fid) or {}
+                            src_owner = src_placement.get("assigned_to") or src_placement.get("recipient_id")
+                            tgt_owner = p.get("assigned_to") or p.get("recipient_id")
+                            if src_owner and tgt_owner and src_owner != tgt_owner:
+                                continue
+                            tgt_key = value_key_for(p)
+                            sib_updates[f"field_data.{tgt_key}"] = source_values_by_pid[src_fid]
+                        if sib_updates:
+                            sib_updates["updated_at"] = now.isoformat()
+                            await db.docflow_documents.update_one(
+                                {"id": sib["id"]},
+                                {"$set": sib_updates}
+                            )
+                            logger.info(f"[Interlink] Forward fanout {len(sib_updates)-1} value(s) from doc={doc_id[:8]} → doc={sib['id'][:8]}")
+
+                    # REVERSE FANOUT: this doc has TWO-WAY targets → write back
+                    # to source doc(s) and propagate from there.
+                    two_way_triggers = []
+                    for p in source_placements:
+                        link = p.get("linked_to") or {}
+                        if not (link.get("enabled") and link.get("field_id")):
+                            continue
+                        if link.get("direction") != "two_way":
+                            continue
+                        if link.get("read_only_target") is True:
+                            continue  # locked target; reverse not allowed
+                        vk = value_key_for(p)
+                        if vk not in field_data_for_doc:
+                            continue
+                        two_way_triggers.append({
+                            "target_placement": p,
+                            "value": field_data_for_doc[vk],
+                            "source_field_id": link["field_id"],
+                        })
+
+                    for trig in two_way_triggers:
+                        # Find which sibling doc holds the source field id.
+                        for sib in sibling_docs:
+                            sib_tpl_id = sib.get("template_id")
+                            if not sib_tpl_id:
+                                continue
+                            sib_placements = tpl_cache.get(sib_tpl_id, {}).get("field_placements", []) or []
+                            src_p = next((sp for sp in sib_placements if sp.get("id") == trig["source_field_id"]), None)
+                            if not src_p:
+                                continue
+                            tgt_owner = (trig["target_placement"] or {}).get("assigned_to") or (trig["target_placement"] or {}).get("recipient_id")
+                            src_owner = src_p.get("assigned_to") or src_p.get("recipient_id")
+                            if src_owner and tgt_owner and src_owner != tgt_owner:
+                                break  # cross-recipient → silently skip
+                            src_key = value_key_for(src_p)
+                            new_val = trig["value"]
+                            # Write back to source.
+                            reverse_updates = {
+                                f"field_data.{src_key}": new_val,
+                                "updated_at": now.isoformat(),
+                            }
+                            await db.docflow_documents.update_one(
+                                {"id": sib["id"]},
+                                {"$set": reverse_updates}
+                            )
+                            logger.info(f"[Interlink] Reverse fanout (two-way) doc={doc_id[:8]} → source doc={sib['id'][:8]} key={src_key}")
+                            # Forward-fanout from the source to any other
+                            # targets pointing at the same source field.
+                            for other_sib in sibling_docs:
+                                if other_sib.get("id") == sib.get("id"):
+                                    continue
+                                other_tpl_id = other_sib.get("template_id")
+                                other_placements = tpl_cache.get(other_tpl_id, {}).get("field_placements", []) or []
+                                other_updates = {}
+                                for op in other_placements:
+                                    olink = op.get("linked_to") or {}
+                                    if not (olink.get("enabled") and olink.get("field_id") == trig["source_field_id"]):
+                                        continue
+                                    o_tgt_owner = op.get("assigned_to") or op.get("recipient_id")
+                                    if src_owner and o_tgt_owner and src_owner != o_tgt_owner:
+                                        continue
+                                    other_updates[f"field_data.{value_key_for(op)}"] = new_val
+                                if other_updates:
+                                    other_updates["updated_at"] = now.isoformat()
+                                    await db.docflow_documents.update_one(
+                                        {"id": other_sib["id"]},
+                                        {"$set": other_updates}
+                                    )
+                                    logger.info(f"[Interlink] Two-way cascade from source doc={sib['id'][:8]} → doc={other_sib['id'][:8]}")
+                            break  # found source doc; move to next trigger
+                except Exception as _link_err:
+                    logger.warning(f"Interlink fanout soft-failed: {_link_err}")
 
                 # Log audit event
                 await audit_service.log_event(
@@ -1090,6 +1702,7 @@ async def sign_with_fields(
         "documents_signed": signed_doc_count,
         "signed_documents": signed_doc_urls,
     }
+@router.post("/{token}/mark-reviewed")
 async def mark_reviewed(
     token: str,
     req: MarkReviewedRequest,
@@ -1106,6 +1719,9 @@ async def mark_reviewed(
         raise HTTPException(status_code=404, detail="Package not found or link expired")
     if not active_recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
+
+    # Phase 81.43 — block voided recipient from performing any action.
+    _assert_recipient_not_voided(active_recipient)
 
     # Session validation
     require_auth = package.get("security_settings", {}).get("require_auth", True)
@@ -1128,8 +1744,15 @@ async def mark_reviewed(
             detail=f"Recipient role is '{active_recipient.get('role_type')}', not VIEW_ONLY or REVIEWER"
         )
 
-    # Validate recipient status (must be notified or in_progress)
-    if active_recipient.get("status") not in ("notified", "in_progress"):
+    # Validate recipient status (must be an active pre-signing state).
+    # Phase 81.45 — broadened from {notified, in_progress} to include
+    # pending/sent/viewed. Email-delivered recipients often stay in
+    # `pending` until they click their link, and some delivery backends
+    # never flip to `notified`; the old guard rejected legitimate sign
+    # attempts with "Recipient already 'pending'". Terminal / voided
+    # statuses (signed/completed/approved/rejected/reviewed/declined/voided)
+    # remain blocked correctly since they're not in this whitelist.
+    if active_recipient.get("status") not in ("pending", "sent", "notified", "viewed", "in_progress"):
         raise HTTPException(
             status_code=400,
             detail=f"Recipient already '{active_recipient.get('status')}'"
@@ -1189,6 +1812,9 @@ async def approve_package(
     if not active_recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
 
+    # Phase 81.43 — block voided recipient from performing any action.
+    _assert_recipient_not_voided(active_recipient)
+
     # Session validation
     require_auth = package.get("security_settings", {}).get("require_auth", True)
     if require_auth:
@@ -1208,7 +1834,8 @@ async def approve_package(
             detail=f"Recipient role is '{active_recipient.get('role_type')}', not APPROVE_REJECT"
         )
 
-    if active_recipient.get("status") not in ("notified", "in_progress"):
+    # Phase 81.45 — broadened whitelist to include pending/sent/viewed.
+    if active_recipient.get("status") not in ("pending", "sent", "notified", "viewed", "in_progress"):
         raise HTTPException(
             status_code=400,
             detail=f"Recipient already '{active_recipient.get('status')}'"
@@ -1290,6 +1917,9 @@ async def reject_package(
     if not active_recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
 
+    # Phase 81.43 — block voided recipient from performing any action.
+    _assert_recipient_not_voided(active_recipient)
+
     # Session validation
     require_auth = package.get("security_settings", {}).get("require_auth", True)
     if require_auth:
@@ -1309,7 +1939,8 @@ async def reject_package(
             detail=f"Recipient role is '{active_recipient.get('role_type')}', not APPROVE_REJECT"
         )
 
-    if active_recipient.get("status") not in ("notified", "in_progress"):
+    # Phase 81.45 — broadened whitelist to include pending/sent/viewed.
+    if active_recipient.get("status") not in ("pending", "sent", "notified", "viewed", "in_progress"):
         raise HTTPException(
             status_code=400,
             detail=f"Recipient already '{active_recipient.get('status')}'"
@@ -1425,6 +2056,9 @@ async def void_package_public(
         raise HTTPException(status_code=404, detail="Package not found or link expired")
     if not active_recipient:
         raise HTTPException(status_code=404, detail="Recipient not found")
+
+    # Phase 81.43 — block voided recipient from performing any action.
+    _assert_recipient_not_voided(active_recipient)
 
     # Session validation
     require_auth = package.get("security_settings", {}).get("require_auth", True)

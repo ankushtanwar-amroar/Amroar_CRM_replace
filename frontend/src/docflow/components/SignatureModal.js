@@ -10,7 +10,7 @@ const SIGNATURE_FONTS = [
   { name: 'Smooth', family: "'Pacifico', cursive", weight: 400 },
 ];
 
-const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, assignedSignatureFieldIds = [], signerName = '' }) => {
+const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, assignedSignatureFieldIds = [], signerName = '', fieldStyle = null }) => {
   const [mode, setMode] = useState('type');
   const [typedText, setTypedText] = useState('');
   const [selectedFont, setSelectedFont] = useState(0);
@@ -94,23 +94,64 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, 
     setHasDrawn(false);
   };
 
+  // Trim transparent whitespace from a canvas so the stored image tightly
+  // wraps the ink. Without trimming, object-contain scales the whole canvas
+  // (including empty margins) to fit the field box, making the actual content
+  // appear much smaller than the configured font size.
+  const trimCanvasToContent = (canvas, padding = 6) => {
+    const ctx = canvas.getContext('2d');
+    const { width, height } = canvas;
+    const { data } = ctx.getImageData(0, 0, width, height);
+    let top = height, bottom = 0, left = width, right = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (data[(y * width + x) * 4 + 3] > 10) {
+          if (y < top) top = y;
+          if (y > bottom) bottom = y;
+          if (x < left) left = x;
+          if (x > right) right = x;
+        }
+      }
+    }
+    if (top > bottom || left > right) return canvas.toDataURL('image/png');
+    top = Math.max(0, top - padding);
+    bottom = Math.min(height - 1, bottom + padding);
+    left = Math.max(0, left - padding);
+    right = Math.min(width - 1, right + padding);
+    const tw = right - left + 1;
+    const th = bottom - top + 1;
+    const trimmed = document.createElement('canvas');
+    trimmed.width = tw;
+    trimmed.height = th;
+    trimmed.getContext('2d').drawImage(canvas, left, top, tw, th, 0, 0, tw, th);
+    return trimmed.toDataURL('image/png');
+  };
+
   const generateTypedSignatureImage = (text, fontIndex) => {
     const font = SIGNATURE_FONTS[fontIndex];
     const canvas = document.createElement('canvas');
     canvas.width = 400;
-    canvas.height = 100;
+    canvas.height = 120;
     const ctx = canvas.getContext('2d');
 
-    // Phase 3: Ensure transparency by NOT filling with white background
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const fontSize = isInitials ? 36 : 44;
+    // Use authored font size scaled to fill the canvas well, so the trimmed
+    // image contains the text at the correct proportional weight.
+    let fontSize = isInitials ? 36 : 44;
+    if (fieldStyle?.fontSize) {
+      const authored = Number(fieldStyle.fontSize.toString().replace('px', '')) || (isInitials ? 36 : 44);
+      fontSize = Math.min(72, Math.max(20, authored * 1.8));
+    }
     ctx.font = `${font.weight} ${fontSize}px ${font.family}`;
     ctx.fillStyle = '#1a1a2e';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-    return canvas.toDataURL('image/png');
+
+    // Trim transparent margins so object-contain fills the field at the
+    // correct visual size rather than shrinking to accommodate whitespace.
+    return trimCanvasToContent(canvas);
   };
 
   const removeWhiteBackground = (canvas) => {
@@ -132,7 +173,7 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, 
       if (!hasDrawn) { alert('Please draw your signature first'); return; }
       const canvas = canvasRef.current;
       removeWhiteBackground(canvas);
-      signatureData = canvas.toDataURL('image/png');
+      signatureData = trimCanvasToContent(canvas);
     } else if (mode === 'type') {
       if (!typedText.trim()) { alert('Please type your signature first'); return; }
       signatureData = generateTypedSignatureImage(typedText, selectedFont);

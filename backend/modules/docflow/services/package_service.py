@@ -42,6 +42,8 @@ class PackageService:
         user_id: str,
         tenant_id: str,
         webhook_config: Optional[Dict[str, Any]] = None,
+        sms_mode: bool = False,
+        sms_consent: bool = False,
     ) -> dict:
         """
         Create a package, generate all documents, initialize routing.
@@ -91,6 +93,8 @@ class PackageService:
             "status": "draft",
             "send_mode": "package",
             "delivery_mode": delivery_mode,
+            "sms_mode": bool(sms_mode),
+            "sms_consent": bool(sms_consent),
             "public_link_token": public_link_token,
             "documents": package_documents,
             "recipients": package_recipients,
@@ -167,6 +171,8 @@ class PackageService:
                     expires_at=expires_at,
                     require_auth=security.get("require_auth", True) if security else True,
                     delivery_mode=delivery_mode,
+                    sms_mode=bool(sms_mode),
+                    sms_consent=bool(sms_consent),
                 )
 
                 doc_id = document.get("id")
@@ -330,18 +336,36 @@ class PackageService:
         user_id: str,
         tenant_id: str,
         template_merge_fields: Optional[Dict[str, Dict[str, Any]]] = None,
+        sms_mode: bool = False,
+        sms_consent: bool = False,
     ) -> dict:
         """Create a new run/execution for a reusable package blueprint."""
         now = datetime.now(timezone.utc)
         run_id = str(uuid4())
 
         # Build recipient objects with tokens
+        # Phase 81.24/81.25 — attach normalized reminder_config + initial
+        # reminder_state so the scheduler picks up due reminders. Validation
+        # errors raised by normalize_reminder_config bubble up as 400 via
+        # the existing FastAPI exception handler in the calling route.
+        from .reminder_service import normalize_reminder_config, initial_reminder_state
+        from fastapi import HTTPException
         run_recipients = []
         for r in recipients:
+            try:
+                rcfg = normalize_reminder_config(r.get("reminder_config"))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            rstate = initial_reminder_state(rcfg) if rcfg else None
             run_recipients.append({
                 "id": str(uuid4()),
                 "name": r.get("name", ""),
                 "email": r.get("email", ""),
+                # Phase 81 — phone stored on every recipient; required when
+                # parent run has sms_mode=true (validated by API caller).
+                "phone": (r.get("phone") or "").strip() or None,
+                "sms_verified": False,
+                "sms_verified_at": None,
                 "role_type": r.get("role_type", "SIGN"),
                 "routing_order": r.get("routing_order", 1),
                 "status": "pending",
@@ -352,6 +376,8 @@ class PackageService:
                 "public_token": str(uuid4()),
                 "notified_at": None,
                 "email_template_id": r.get("email_template_id"),
+                "reminder_config": rcfg,
+                "reminder_state": rstate,
             })
 
         # Build documents from the blueprint
@@ -381,6 +407,8 @@ class PackageService:
             "status": "draft",
             "send_mode": "package",
             "delivery_mode": delivery_mode,
+            "sms_mode": bool(sms_mode),
+            "sms_consent": bool(sms_consent),
             "public_link_token": public_link_token,
             "documents": run_documents,
             "recipients": run_recipients,
@@ -432,6 +460,7 @@ class PackageService:
                     doc_recipients.append({
                         "name": pr["name"],
                         "email": pr["email"],
+                        "phone": pr.get("phone"),
                         "role": pr.get("role_type", "SIGN").lower(),
                         "routing_order": pr["routing_order"],
                         "is_required": True,
@@ -458,6 +487,8 @@ class PackageService:
                     expires_at=None,
                     require_auth=security.get("require_auth", True),
                     delivery_mode=delivery_mode,
+                    sms_mode=bool(sms_mode),
+                    sms_consent=bool(sms_consent),
                 )
 
                 doc_id = document.get("id")

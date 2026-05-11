@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Plus, Search, FileText, Edit, Trash2, Send, Clock, CheckCircle, LayoutGrid, List, Filter,
   ArrowUpDown, ChevronDown, Sparkles, Eye, Mail, MoreVertical, Download, GitBranch, History,
   Layers, Package, XCircle, AlertTriangle, Ban, Users, Loader2, Code, MessageSquare, Copy,
-  Link as LinkIcon
+  Link as LinkIcon, Settings
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
@@ -12,6 +12,8 @@ import TemplateAnalytics from '../components/TemplateAnalytics';
 import EmailHistoryTable from '../components/EmailHistoryTable';
 import DeveloperSettingsPage from './DeveloperSettingsPage';
 import EmailTemplatesPage from './EmailTemplatesPage';
+import TemplatesModulePage from './TemplatesModulePage';
+import ContentConfigPage from './ContentConfigPage';
 
 const TEMPLATE_TYPE_COLORS = {
   quotation: { bg: 'bg-blue-100', text: 'text-blue-700', border: 'border-blue-200', dot: 'bg-blue-500' },
@@ -65,6 +67,11 @@ const DocFlowDashboard = () => {
   const [docSortOrder, setDocSortOrder] = useState('newest');
   const [docPageSize, setDocPageSize] = useState(10);
   const [docPage, setDocPage] = useState(1);
+  // Phase 81.14 — separate loading state for the Documents tab so a page-size
+  // change shows an instant skeleton instead of waiting on the 10s polling
+  // refresh. `silent` reloads (background polling) skip the skeleton so the
+  // table doesn't flash every 10 seconds.
+  const [documentsLoading, setDocumentsLoading] = useState(false);
 
   // Package listing
   const [packages, setPackages] = useState([]);
@@ -140,22 +147,47 @@ const DocFlowDashboard = () => {
     }
   };
 
-  const loadDocuments = async (page = 1, status = docStatusFilter, search = searchQuery, sort = docSortOrder) => {
+  // Phase 81.14 — abortable + skeleton-aware document loader.
+  // - `silent` skips the skeleton flash for background polling.
+  // - In-flight request is cancelled when params change rapidly (e.g. user
+  //   spamming the page-size dropdown) so only the latest response wins.
+  const docLoadAbortRef = useRef(null);
+  const loadDocuments = useCallback(async (
+    page = 1,
+    status = docStatusFilter,
+    search = searchQuery,
+    sort = docSortOrder,
+    limit = docPageSize,
+    { silent = false } = {}
+  ) => {
     try {
+      // Cancel any in-flight request; latest call always wins.
+      if (docLoadAbortRef.current) {
+        try { docLoadAbortRef.current.abort(); } catch (_) { /* noop */ }
+      }
+      const controller = new AbortController();
+      docLoadAbortRef.current = controller;
+
+      if (!silent) setDocumentsLoading(true);
       const params = {
         page,
-        limit: docPageSize,
+        limit,
         status: status === 'all' ? undefined : status,
         search: search || undefined,
-        sort_order: sort
+        sort_order: sort,
       };
-      const docData = await docflowService.getDocuments(params);
+      const docData = await docflowService.getDocuments(params, { signal: controller.signal });
+      // Drop the response if a newer request superseded this one.
+      if (controller.signal.aborted) return;
       setDocuments(docData.documents || []);
       setDocTotal(docData.total || 0);
     } catch (e) {
+      if (e?.name === 'CanceledError' || e?.code === 'ERR_CANCELED' || e?.name === 'AbortError') return;
       console.error('Error loading documents:', e);
+    } finally {
+      if (!silent) setDocumentsLoading(false);
     }
-  };
+  }, [docStatusFilter, searchQuery, docSortOrder, docPageSize]);
 
   const loadPackages = async () => {
     try {
@@ -243,20 +275,21 @@ const DocFlowDashboard = () => {
 
   useEffect(() => {
     if (activeTab === 'documents') {
-      loadDocuments(docPage, docStatusFilter, searchQuery, docSortOrder);
+      loadDocuments(docPage, docStatusFilter, searchQuery, docSortOrder, docPageSize);
     }
-  }, [activeTab, docPage, docStatusFilter, searchQuery, docSortOrder]);
+  }, [activeTab, docPage, docPageSize, docStatusFilter, searchQuery, docSortOrder, loadDocuments]);
 
   // Real-time status updates for Documents tab
   useEffect(() => {
     let interval = null;
     if (activeTab === 'documents') {
       interval = setInterval(() => {
-        loadDocuments(docPage, docStatusFilter, searchQuery, docSortOrder);
+        // Silent refresh: don't show skeleton or interrupt user interaction.
+        loadDocuments(docPage, docStatusFilter, searchQuery, docSortOrder, docPageSize, { silent: true });
       }, 10000); // Poll every 10 seconds
     }
     return () => { if (interval) clearInterval(interval); };
-  }, [activeTab, docPage, docStatusFilter, searchQuery, docSortOrder]);
+  }, [activeTab, docPage, docPageSize, docStatusFilter, searchQuery, docSortOrder, loadDocuments]);
 
   const handleDeleteTemplate = async (templateId) => {
     if (!window.confirm('Are you sure you want to delete this template?')) return;
@@ -529,7 +562,8 @@ const DocFlowDashboard = () => {
               { id: 'documents', label: 'Documents', icon: Send },
               { id: 'analytics', label: 'Analytics', icon: Eye },
               { id: 'emails', label: 'Email History', icon: Mail },
-              { id: 'email_templates', label: 'Email Templates', icon: Mail },
+              { id: 'email_templates', label: 'Notifications', icon: Mail },
+              { id: 'content_config', label: 'Content Config', icon: Settings },
               { id: 'developer', label: 'Developer', icon: Code },
             ].map(tab => (
               <button
@@ -1018,18 +1052,26 @@ const DocFlowDashboard = () => {
             {/* Document Filters Bar */}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4 bg-white px-5 py-3 rounded-xl border border-gray-200" data-testid="doc-filters-bar">
               <div className="flex flex-wrap items-center gap-2">
-                {['all', 'generated', 'sent', 'viewed', 'signed', 'completed'].map(status => (
+                {/* Phase 81.35 — pared down to the 5 statuses senders actually
+                    triage by: All / In Progress / Pending / Completed / Voided. */}
+                {[
+                  { id: 'all', label: 'All' },
+                  { id: 'in_progress', label: 'In Progress' },
+                  { id: 'pending', label: 'Pending' },
+                  { id: 'completed', label: 'Completed' },
+                  { id: 'voided', label: 'Voided' },
+                ].map(({ id, label }) => (
                   <button
-                    key={status}
-                    onClick={() => { setDocStatusFilter(status); setDocPage(1); }}
-                    className={`px-3 py-1.5 text-xs font-semibold rounded-full capitalize transition-colors ${
-                      docStatusFilter === status
+                    key={id}
+                    onClick={() => { setDocStatusFilter(id); setDocPage(1); }}
+                    className={`px-3 py-1.5 text-xs font-semibold rounded-full transition-colors ${
+                      docStatusFilter === id
                         ? 'bg-indigo-100 text-indigo-700'
                         : 'text-gray-500 hover:bg-gray-100'
                     }`}
-                    data-testid={`doc-filter-${status}`}
+                    data-testid={`doc-filter-${id}`}
                   >
-                    {status}
+                    {label}
                   </button>
                 ))}
               </div>
@@ -1064,12 +1106,56 @@ const DocFlowDashboard = () => {
                   <option value={10}>10 / page</option>
                   <option value={20}>20 / page</option>
                   <option value={50}>50 / page</option>
+                  <option value={100}>100 / page</option>
                 </select>
               </div>
             </div>
 
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-            {paginatedDocuments.length === 0 ? (
+            {documentsLoading ? (
+              /* Phase 81.14 — skeleton rows while documents fetch is in
+                 flight (page-size change, filter change, page change). The
+                 table chrome stays mounted so layout doesn't jump. */
+              <table className="w-full" data-testid="documents-skeleton">
+                <thead className="bg-gray-50 border-b border-gray-200">
+                  <tr>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Document</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Type</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Recipients</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Status</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Created</th>
+                    <th className="px-5 py-3 text-left text-xs font-semibold text-gray-600 uppercase">Last Updated</th>
+                    <th className="px-5 py-3 text-right text-xs font-semibold text-gray-600 uppercase">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {Array.from({ length: Math.min(docPageSize, 8) }).map((_, i) => (
+                    <tr key={`sk-${i}`} className="animate-pulse">
+                      <td className="px-5 py-4">
+                        <div className="flex items-center gap-3">
+                          <div className="h-9 w-9 rounded-lg bg-gray-100" />
+                          <div className="space-y-1.5">
+                            <div className="h-3 w-48 bg-gray-100 rounded" />
+                            <div className="h-2 w-24 bg-gray-100 rounded" />
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-5 py-4"><div className="h-5 w-16 bg-gray-100 rounded-full" /></td>
+                      <td className="px-5 py-4"><div className="h-3 w-20 bg-gray-100 rounded" /></td>
+                      <td className="px-5 py-4"><div className="h-5 w-20 bg-gray-100 rounded-full" /></td>
+                      <td className="px-5 py-4"><div className="h-3 w-12 bg-gray-100 rounded" /></td>
+                      <td className="px-5 py-4"><div className="h-3 w-12 bg-gray-100 rounded" /></td>
+                      <td className="px-5 py-4">
+                        <div className="flex justify-end gap-2">
+                          <div className="h-7 w-20 bg-gray-100 rounded" />
+                          <div className="h-7 w-7 bg-gray-100 rounded" />
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : paginatedDocuments.length === 0 ? (
               <div className="text-center py-16">
                 <Send className="h-12 w-12 text-gray-300 mx-auto mb-4" />
                 <h3 className="text-lg font-semibold text-gray-700 mb-2">
@@ -1191,15 +1277,15 @@ const DocFlowDashboard = () => {
                               <Eye className="h-3.5 w-3.5" />
                               View Details
                             </button>
-                            <button
+                            {/* <button
                               onClick={() => handleDownload(doc.id, 'unsigned')}
                               className="p-1.5 text-gray-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50"
                               title="Download Original"
                               data-testid={`doc-download-${doc.id}`}
                             >
                               <Download className="h-4 w-4" />
-                            </button>
-                            {(agg === 'completed' || doc.status === 'signed' || doc.status === 'completed') && (
+                            </button> */}
+                            {/* {(agg === 'completed' || doc.status === 'signed' || doc.status === 'completed') && (
                               <button
                                 onClick={() => handleDownload(doc.id, 'signed')}
                                 className="p-1.5 text-green-500 hover:text-green-700 rounded-lg hover:bg-green-50"
@@ -1208,7 +1294,7 @@ const DocFlowDashboard = () => {
                               >
                                 <CheckCircle className="h-4 w-4" />
                               </button>
-                            )}
+                            )} */}
                           </div>
                         </td>
                       </tr>
@@ -1540,7 +1626,11 @@ const DocFlowDashboard = () => {
         )}
 
         {activeTab === 'email_templates' && (
-          <EmailTemplatesPage />
+          <TemplatesModulePage />
+        )}
+
+        {activeTab === 'content_config' && (
+          <ContentConfigPage />
         )}
       </div>
 

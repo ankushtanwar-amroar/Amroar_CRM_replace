@@ -1,0 +1,840 @@
+{
+  "info": {
+    "_postman_id": "df-public-apis-phase-81-66",
+    "name": "DocFlow Public APIs",
+    "description": "DocFlow public-facing APIs for tenant integrations.\n\nCovers:\n\u2022 Templates\n\u2022 Packages (list / detail / send)\n\u2022 Generate Links (single doc & package mode)\n\nEvery routing_mode \u00d7 delivery_mode combination is included as a separate, ready-to-import request. Authentication is via the `X-API-Key` header \u2014 when present, the backend auto-resolves the tenant (Phase 81.64). The legacy `?tenant_id=...` query param remains supported for backward compatibility.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://template-api-pub.preview.emergentagent.com",
+      "type": "string",
+      "description": "DocFlow API base URL \u2014 change to your tenant's host (e.g. https://app.example.com)."
+    },
+    {
+      "key": "x_api_key",
+      "value": "REPLACE_WITH_YOUR_API_KEY",
+      "type": "string",
+      "description": "Issued from Settings \u2192 API Keys. Bound to a tenant_id; auto-resolves the tenant on every request."
+    },
+    {
+      "key": "tenant_id",
+      "value": "",
+      "type": "string",
+      "description": "Optional. Only needed when X-API-Key is NOT used (legacy)."
+    },
+    {
+      "key": "template_id",
+      "value": "REPLACE_WITH_TEMPLATE_ID",
+      "type": "string",
+      "description": "Template UUID. Pull from `GET /api/docflow/public/templates`."
+    },
+    {
+      "key": "package_id",
+      "value": "REPLACE_WITH_PACKAGE_ID",
+      "type": "string",
+      "description": "Package run UUID. Pull from `GET /api/public/packages`."
+    },
+    {
+      "key": "document_id",
+      "value": "<your-document-id>",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "X-API-Key",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{x_api_key}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Templates",
+      "description": "Public template metadata. Use the response's `field_placements` to wire up CRM mappings \u2014 merge fields ship a `merge_source: { object, field_name }` block (Phase 81.65).",
+      "item": [
+        {
+          "name": "List Active Templates",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/docflow/public/templates",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "docflow",
+                "public",
+                "templates"
+              ]
+            },
+            "description": "Returns active+latest templates for the tenant bound to the API key.\n\nLegacy fallback: pass `?tenant_id={{tenant_id}}` if not using a key."
+          }
+        },
+        {
+          "name": "List Active Templates (Legacy tenant_id query)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/docflow/public/templates?tenant_id={{tenant_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "docflow",
+                "public",
+                "templates"
+              ],
+              "query": [
+                {
+                  "key": "tenant_id",
+                  "value": "{{tenant_id}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Packages",
+      "description": "Read & send package runs.",
+      "item": [
+        {
+          "name": "List Packages",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Package Detail",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/{{package_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "{{package_id}}"
+              ]
+            }
+          }
+        },
+        {
+          "name": "Send Package - Sequential - Email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"sequential\",\n  \"delivery_mode\": \"email\",\n  \"recipients\": [\n    {\n      \"id\": \"r1\",\n      \"name\": \"Alice Signer\",\n      \"email\": \"alice@example.com\",\n      \"phone\": \"+15551112222\",\n      \"role\": \"signer\",\n      \"routing_order\": 1\n    },\n    {\n      \"id\": \"r2\",\n      \"name\": \"Bob Approver\",\n      \"email\": \"bob@example.com\",\n      \"phone\": \"+15553334444\",\n      \"role\": \"approver\",\n      \"routing_order\": 2\n    }\n  ],\n  \"field_assignments\": [\n    {\n      \"template_id\": \"{{template_id}}\",\n      \"fields\": [\n        { \"field_id\": \"signature_1\", \"recipient_id\": \"r1\" },\n        { \"field_id\": \"approval_1\", \"recipient_id\": \"r2\" }\n      ]\n    }\n  ],\n  \"template_merge_fields\": [\n    {\n      \"template_id\": \"{{template_id}}\",\n      \"merge_fields\": {\n        \"first_name\": \"Alice\",\n        \"company\": \"Acme Corp\"\n      }\n    }\n  ],\n  \"authentication\": { \"otp_required\": true }\n}"
+            }
+          }
+        },
+        {
+          "name": "Send Package - Sequential - Public Link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"sequential\",\n  \"delivery_mode\": \"public_link\",\n  \"recipients\": [],\n  \"template_merge_fields\": [\n    {\n      \"template_id\": \"{{template_id}}\",\n      \"merge_fields\": {\n        \"company\": \"Acme Corp\"\n      }\n    }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Send Package - Sequential - Public Recipients",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"sequential\",\n  \"delivery_mode\": \"public_recipients\",\n  \"recipients\": [\n    { \"id\": \"r1\", \"name\": \"Signer 1\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"id\": \"r2\", \"name\": \"Signer 2\", \"role\": \"signer\", \"routing_order\": 2 }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Send Package - Parallel - Email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"parallel\",\n  \"delivery_mode\": \"email\",\n  \"recipients\": [\n    { \"id\": \"r1\", \"name\": \"Signer A\", \"email\": \"a@example.com\", \"phone\": \"+15550001\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"id\": \"r2\", \"name\": \"Signer B\", \"email\": \"b@example.com\", \"phone\": \"+15550002\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"id\": \"r3\", \"name\": \"Signer C\", \"email\": \"c@example.com\", \"phone\": \"+15550003\", \"role\": \"signer\", \"routing_order\": 1 }\n  ],\n  \"template_merge_fields\": [\n    { \"template_id\": \"{{template_id}}\", \"merge_fields\": {} }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Send Package - Parallel - Public Link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"parallel\",\n  \"delivery_mode\": \"public_link\",\n  \"recipients\": []\n}"
+            }
+          }
+        },
+        {
+          "name": "Send Package - Parallel - Public Recipients",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"parallel\",\n  \"delivery_mode\": \"public_recipients\",\n  \"recipients\": [\n    { \"id\": \"r1\", \"name\": \"Signer A\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"id\": \"r2\", \"name\": \"Signer B\", \"role\": \"signer\", \"routing_order\": 1 }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Send Package - Mixed - Email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"mixed\",\n  \"delivery_mode\": \"email\",\n  \"recipients\": [\n    { \"id\": \"r1\", \"name\": \"First Signer\", \"email\": \"first@example.com\", \"phone\": \"+15551111111\", \"role\": \"signer\", \"routing_order\": 1, \"wave\": 1 },\n    { \"id\": \"r2\", \"name\": \"Reviewer\", \"email\": \"reviewer@example.com\", \"phone\": \"+15552222222\", \"role\": \"reviewer\", \"routing_order\": 2, \"wave\": 2 },\n    { \"id\": \"r3\", \"name\": \"Final Signer\", \"email\": \"final@example.com\", \"phone\": \"+15553333333\", \"role\": \"signer\", \"routing_order\": 3, \"wave\": 3 }\n  ],\n  \"field_assignments\": [\n    {\n      \"template_id\": \"{{template_id}}\",\n      \"fields\": [\n        { \"field_id\": \"signature_first\", \"recipient_id\": \"r1\" },\n        { \"field_id\": \"signature_final\", \"recipient_id\": \"r3\" }\n      ]\n    }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Send Package - Mixed - Public Link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"mixed\",\n  \"delivery_mode\": \"public_link\",\n  \"recipients\": []\n}"
+            }
+          }
+        },
+        {
+          "name": "Send Package - Mixed - Public Recipients",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/public/packages/send",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "public",
+                "packages",
+                "send"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"package_id\": \"{{package_id}}\",\n  \"routing_mode\": \"mixed\",\n  \"delivery_mode\": \"public_recipients\",\n  \"recipients\": [\n    { \"id\": \"r1\", \"name\": \"Signer Wave 1\", \"role\": \"signer\", \"routing_order\": 1, \"wave\": 1 },\n    { \"id\": \"r2\", \"name\": \"Reviewer Wave 2\", \"role\": \"reviewer\", \"routing_order\": 2, \"wave\": 2 },\n    { \"id\": \"r3\", \"name\": \"Signer Wave 3\", \"role\": \"signer\", \"routing_order\": 3, \"wave\": 3 }\n  ]\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Generate Links",
+      "description": "Single-document signing links via `/api/v1/documents/generate-links`. Use `routing_type` (sequential / parallel) and `delivery_mode` (email / public_link / public_recipients).\n\nNOTE: This endpoint does NOT support routing_type=`mixed`; use the Packages \u2192 Send (Mixed) request when you need waves.",
+      "item": [
+        {
+          "name": "Generate Link - Sequential - Email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/generate-links",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "generate-links"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_id\": \"{{template_id}}\",\n  \"document_name\": \"Q1 NDA \u2014 Acme\",\n  \"routing_type\": \"sequential\",\n  \"delivery_mode\": \"email\",\n  \"send_email\": true,\n  \"require_auth\": true,\n  \"merge_fields\": {\n    \"first_name\": \"Alice\",\n    \"company\": \"Acme Corp\"\n  },\n  \"recipients\": [\n    { \"name\": \"Alice Signer\", \"email\": \"alice@example.com\", \"phone\": \"+15551112222\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"name\": \"Bob Reviewer\", \"email\": \"bob@example.com\", \"phone\": \"+15553334444\", \"role\": \"reviewer\", \"routing_order\": 2 }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Generate Link - Sequential - Public Link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/generate-links",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "generate-links"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_id\": \"{{template_id}}\",\n  \"document_name\": \"Public Link Demo\",\n  \"routing_type\": \"sequential\",\n  \"delivery_mode\": \"public_link\",\n  \"send_email\": false,\n  \"require_auth\": false,\n  \"merge_fields\": {\n    \"company\": \"Acme Corp\"\n  },\n  \"recipients\": []\n}"
+            }
+          }
+        },
+        {
+          "name": "Generate Link - Sequential - Public Recipients",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/generate-links",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "generate-links"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_id\": \"{{template_id}}\",\n  \"document_name\": \"Public Recipients Demo\",\n  \"routing_type\": \"sequential\",\n  \"delivery_mode\": \"public_recipients\",\n  \"send_email\": false,\n  \"require_auth\": false,\n  \"recipients\": [\n    { \"name\": \"Signer 1\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"name\": \"Signer 2\", \"role\": \"signer\", \"routing_order\": 2 }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Generate Link - Parallel - Email",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/generate-links",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "generate-links"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_id\": \"{{template_id}}\",\n  \"document_name\": \"Parallel Sign Demo\",\n  \"routing_type\": \"parallel\",\n  \"delivery_mode\": \"email\",\n  \"send_email\": true,\n  \"require_auth\": true,\n  \"recipients\": [\n    { \"name\": \"Signer A\", \"email\": \"a@example.com\", \"phone\": \"+15550001\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"name\": \"Signer B\", \"email\": \"b@example.com\", \"phone\": \"+15550002\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"name\": \"Signer C\", \"email\": \"c@example.com\", \"phone\": \"+15550003\", \"role\": \"signer\", \"routing_order\": 1 }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Generate Link - Parallel - Public Link",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/generate-links",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "generate-links"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_id\": \"{{template_id}}\",\n  \"document_name\": \"Public Link \u2014 Parallel\",\n  \"routing_type\": \"parallel\",\n  \"delivery_mode\": \"public_link\",\n  \"send_email\": false,\n  \"require_auth\": false,\n  \"recipients\": []\n}"
+            }
+          }
+        },
+        {
+          "name": "Generate Link - Parallel - Public Recipients",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/generate-links",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "generate-links"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"template_id\": \"{{template_id}}\",\n  \"document_name\": \"Public Recipients \u2014 Parallel\",\n  \"routing_type\": \"parallel\",\n  \"delivery_mode\": \"public_recipients\",\n  \"send_email\": false,\n  \"require_auth\": false,\n  \"recipients\": [\n    { \"name\": \"Signer A\", \"role\": \"signer\", \"routing_order\": 1 },\n    { \"name\": \"Signer B\", \"role\": \"signer\", \"routing_order\": 1 }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Generate Link - Package Mode (multi-doc)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/generate-links",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "documents",
+                "generate-links"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"send_mode\": \"package\",\n  \"package_name\": \"Onboarding Package\",\n  \"delivery_mode\": \"email\",\n  \"send_email\": true,\n  \"require_auth\": true,\n  \"routing_config\": { \"mode\": \"sequential\", \"on_reject\": \"void\" },\n  \"output_mode\": \"separate\",\n  \"documents\": [\n    {\n      \"template_id\": \"{{template_id}}\",\n      \"document_name\": \"Doc 1 \u2014 NDA\",\n      \"order\": 1,\n      \"merge_fields\": { \"company\": \"Acme Corp\" }\n    }\n  ],\n  \"recipients\": [\n    { \"name\": \"Alice\", \"email\": \"alice@example.com\", \"phone\": \"+15551112222\", \"role\": \"signer\", \"routing_order\": 1 }\n  ]\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Void",
+      "description": "Phase 81.67 \u2014 Cascade-void endpoints. Both endpoints are idempotent: re-voiding an already-voided entity returns the existing void info with `already_voided=true`.",
+      "item": [
+        {
+          "name": "Void Document",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Sent to wrong recipient \\u2014 please disregard.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/docflow/public/documents/{{document_id}}/void",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "docflow",
+                "public",
+                "documents",
+                "{{document_id}}",
+                "void"
+              ]
+            },
+            "description": "Void a document. Cascades to all non-terminal recipients (signers/approvers/reviewers still pending), cancels scheduled email reminders, sends 'Signing Request Cancelled' email to active recipients, and writes a `document_voided` audit event. After void, every public access point for this document returns HTTP 410.\n\n**Request body** (all fields optional):\n- `reason`: string \u2014 included in cancellation email + audit log + voided banner.\n\n**Response (200 OK):**\n```\n{\n  \"success\": true,\n  \"already_voided\": false,\n  \"document_id\": \"uuid\",\n  \"voided_at\": \"2026-02-04T11:00:35.377354+00:00\",\n  \"voided_by\": \"api_key:dfk_jAU6AGkv\",\n  \"void_reason\": \"...\",\n  \"cascaded_recipients\": 2\n}\n```\n\n**Notes:**\n- Idempotent \u2014 re-voiding returns the same void info with `already_voided=true`.\n- Allowed at any status (including completed/signed) per product spec.\n- Returns 404 if document doesn't belong to the API key tenant."
+          }
+        },
+        {
+          "name": "Void Package",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{x_api_key}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Contract terms changed \\u2014 package no longer needed.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/docflow/public/packages/{{package_id}}/void",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "docflow",
+                "public",
+                "packages",
+                "{{package_id}}",
+                "void"
+              ]
+            },
+            "description": "Void a package blueprint and cascade to ALL active runs, child documents, and active recipients. Cancels reminders, sends cancellation emails, writes a `package_voided` audit event.\n\n**Cascade scope:**\n- Blueprint package \u2192 status=voided\n- All non-terminal runs (in `docflow_packages` with _type='run' AND `docflow_package_runs`) \u2192 status=voided\n- All child documents tied to those runs \u2192 status=voided\n- All non-terminal recipients on each child document \u2192 status=voided\n\n**Response (200 OK):**\n```\n{\n  \"success\": true,\n  \"already_voided\": false,\n  \"package_id\": \"uuid\",\n  \"voided_at\": \"2026-02-04T11:00:35.377354+00:00\",\n  \"voided_by\": \"api_key:dfk_jAU6AGkv\",\n  \"void_reason\": \"...\",\n  \"cascaded_documents\": 4,\n  \"cascaded_run_ids\": [\"pkg-blueprint-uuid\", \"run-uuid-1\", ...]\n}\n```\n\n**Notes:**\n- Idempotent \u2014 re-calling on already-voided package returns original void info.\n- Returns 404 if package not found or belongs to a different tenant.\n- After void, public package URL returns HTTP 410 with structured detail `{code:'package_voided', message, voided_at, void_reason, package_name}`."
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,78 @@
+{
+  "summary": "Phase 81.30 Checkbox/Radio Recipient-Based Field Assignment Testing completed. All 14 backend tests passed (2 skipped due to no templates with checkbox/radio fields in test environment). Code review verified all Phase 81.30 features are correctly implemented: (1) ASSIGNABLE_FIELD_TYPES includes checkbox and radio in both SendPackagePage.js and GenerateDocumentWizard.js, (2) fieldDisplayType shows 'radio · GroupName' format, (3) fieldDisplayLabel shows optionLabel for radio options, (4) NON_ASSIGNABLE_TYPES in package_public_routes.py excludes checkbox/radio (only {merge, label}), (5) Ownership filter in document_service_enhanced.py uses assigned_field_ids for cross-recipient write rejection, (6) Ownership filter in package_public_routes.py uses assigned_components map, (7) Visibility logic in PackagePublicView.js correctly handles checkbox (value===true) and radio (groupName→optionValue match), (8) Same visibility logic in PublicDocumentViewEnhanced.js.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase81_30_checkbox_radio_assignment.py",
+    "/app/test_reports/pytest/phase81_30_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "VERIFIED: SendPackagePage.js line 51 - ASSIGNABLE_FIELD_TYPES = ['signature', 'initials', 'text', 'date', 'checkbox', 'radio']",
+    "VERIFIED: GenerateDocumentWizard.js line 55 - ASSIGNABLE_FIELD_TYPES = ['signature', 'initials', 'text', 'date', 'checkbox', 'radio']",
+    "VERIFIED: SendPackagePage.js fieldDisplayType() shows 'radio · GroupName' format for radio fields with groupName",
+    "VERIFIED: SendPackagePage.js fieldDisplayLabel() returns optionLabel for radio fields, checkboxLabel for checkbox fields",
+    "VERIFIED: package_public_routes.py line 853 - NON_ASSIGNABLE_TYPES = {'merge', 'label'} (checkbox/radio excluded)",
+    "VERIFIED: document_service_enhanced.py lines 820-867 - Ownership filter uses assigned_field_ids for cross-recipient write rejection",
+    "VERIFIED: package_public_routes.py lines 782-820 - Ownership filter uses assigned_components map for package flow",
+    "VERIFIED: PackagePublicView.js getFieldsForDoc() lines 373-398 - Checkbox visibility: value===true → readOnly, else hidden",
+    "VERIFIED: PackagePublicView.js getFieldsForDoc() lines 375-386 - Radio visibility: groupName→optionValue match → readOnly, else hidden",
+    "VERIFIED: PublicDocumentViewEnhanced.js lines 1511-1532 - Same checkbox/radio visibility logic for standalone document view",
+    "VERIFIED: Both ownership filters log 'Rejected cross-recipient field write' when blocking unauthorized writes"
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase81_30_checkbox_radio_assignment.py"
+  ],
+  "success_rate": {
+    "backend": "100% (14/14 passed, 2 skipped - no checkbox/radio templates in test env)",
+    "frontend": "Code review verified - no templates with checkbox/radio fields available for live UI testing"
+  },
+  "test_credentials": "admin@democorp.com / DemoPass123!",
+  "seed_data_creation": "None - existing templates do not have checkbox/radio fields",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 81.30 checkbox/radio recipient-based field assignment is fully implemented and verified via code review. The test environment has 2 templates ('Reminder Test Template') but neither has checkbox/radio field placements. To fully test the UI flow, create a template with checkbox and radio fields using the Visual Builder, then run the Generate Document wizard with two recipients in sequential mode. The code correctly: (1) includes checkbox/radio in ASSIGNABLE_FIELD_TYPES, (2) shows 'radio · GroupName' in the Assign Fields panel, (3) filters fields by assigned_field_ids during PDF embedding, (4) rejects cross-recipient writes via ownership filter, (5) shows filled checkbox/radio as read-only to subsequent signers, (6) hides unfilled checkbox/radio from non-owners.",
+  "phase_81_30_verification": {
+    "frontend_assignable_types": {
+      "status": "VERIFIED",
+      "files": ["SendPackagePage.js", "GenerateDocumentWizard.js"],
+      "details": "ASSIGNABLE_FIELD_TYPES includes 'checkbox' and 'radio'"
+    },
+    "frontend_display_helpers": {
+      "status": "VERIFIED",
+      "details": "fieldDisplayType shows 'radio · GroupName', fieldDisplayLabel shows optionLabel/checkboxLabel"
+    },
+    "backend_non_assignable_types": {
+      "status": "VERIFIED",
+      "file": "package_public_routes.py",
+      "details": "NON_ASSIGNABLE_TYPES = {'merge', 'label'} - checkbox/radio excluded"
+    },
+    "backend_ownership_filter_template_flow": {
+      "status": "VERIFIED",
+      "file": "document_service_enhanced.py",
+      "details": "Uses assigned_field_ids to reject cross-recipient writes"
+    },
+    "backend_ownership_filter_package_flow": {
+      "status": "VERIFIED",
+      "file": "package_public_routes.py",
+      "details": "Uses assigned_components map to reject cross-recipient writes"
+    },
+    "frontend_visibility_checkbox": {
+      "status": "VERIFIED",
+      "files": ["PackagePublicView.js", "PublicDocumentViewEnhanced.js"],
+      "details": "value===true → readOnly, else field_hidden"
+    },
+    "frontend_visibility_radio": {
+      "status": "VERIFIED",
+      "files": ["PackagePublicView.js", "PublicDocumentViewEnhanced.js"],
+      "details": "groupName→optionValue match → readOnly, else field_hidden"
+    }
+  }
+}

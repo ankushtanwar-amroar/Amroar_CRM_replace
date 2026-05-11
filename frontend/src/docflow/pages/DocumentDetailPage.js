@@ -20,6 +20,10 @@ const STATUS_PILL = {
   sent: 'bg-blue-100 text-blue-700 border-blue-200',
   viewed: 'bg-amber-100 text-amber-700 border-amber-200',
   signed: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  // Phase 81.34 — explicit pills for approver/reviewer terminal states.
+  approved: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+  rejected: 'bg-rose-100 text-rose-700 border-rose-200',
+  reviewed: 'bg-emerald-100 text-emerald-700 border-emerald-200',
 };
 
 const STATUS_LABEL = {
@@ -34,6 +38,9 @@ const STATUS_LABEL = {
   sent: 'Sent',
   viewed: 'Viewed',
   signed: 'Signed',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  reviewed: 'Reviewed',
 };
 
 const formatDateTime = (iso) => {
@@ -51,6 +58,10 @@ export default function DocumentDetailPage() {
   const [voidingId, setVoidingId] = useState(null);
   // { kind: 'void' | 'unvoid', recipient: {...} } | null
   const [confirm, setConfirm] = useState(null);
+  // Phase 81.67 — full-document void modal state
+  const [showVoidDocModal, setShowVoidDocModal] = useState(false);
+  const [voidDocReason, setVoidDocReason] = useState('');
+  const [voidingDoc, setVoidingDoc] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -121,6 +132,22 @@ export default function DocumentDetailPage() {
     catch (e) { toast.error('Download failed'); }
   };
 
+  // Phase 81.67 — Void the FULL document (cascades to all recipients).
+  const handleVoidDocument = async () => {
+    try {
+      setVoidingDoc(true);
+      await docflowService.voidDocument(id, voidDocReason.trim() || null);
+      toast.success('Document voided successfully');
+      setShowVoidDocModal(false);
+      setVoidDocReason('');
+      load();
+    } catch (e) {
+      toast.error(e?.response?.data?.detail || 'Failed to void document');
+    } finally {
+      setVoidingDoc(false);
+    }
+  };
+
   const copyLink = (token) => {
     const url = `${window.location.origin}/docflow/view/${token}`;
     navigator.clipboard?.writeText(url);
@@ -149,6 +176,7 @@ export default function DocumentDetailPage() {
   const statusClass = STATUS_PILL[agg] || 'bg-gray-100 text-gray-700 border-gray-200';
   const statusLabel = STATUS_LABEL[agg] || agg;
   const completed = agg === 'completed';
+  const isDocVoided = String(detail.status || '').toLowerCase() === 'voided' || agg === 'voided';
 
   return (
     <div className="min-h-screen bg-gray-50 pb-12" data-testid="document-detail-page">
@@ -231,7 +259,39 @@ export default function DocumentDetailPage() {
               <CheckCircle className="h-4 w-4" /> Download Final Signed PDF
             </button>
           )}
+          {/* Phase 81.67 — Full document void */}
+          {!isDocVoided && (
+            <button
+              onClick={() => setShowVoidDocModal(true)}
+              className="ml-auto inline-flex items-center gap-1.5 px-3 py-2 text-xs sm:text-sm font-semibold text-rose-600 bg-white border border-rose-200 hover:bg-rose-50 rounded-lg shadow-sm"
+              data-testid="void-document-btn"
+            >
+              <Ban className="h-4 w-4" /> Void Document
+            </button>
+          )}
         </div>
+
+        {/* Phase 81.67 — Voided banner */}
+        {isDocVoided && (
+          <div
+            className="mb-6 flex items-start gap-3 rounded-lg border border-rose-200 bg-rose-50 p-4"
+            data-testid="document-voided-banner"
+          >
+            <Ban className="h-5 w-5 text-rose-600 shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-rose-800">This document has been voided</div>
+              {detail.void_reason && (
+                <div className="mt-1 text-xs text-rose-700">
+                  <strong>Reason:</strong> {detail.void_reason}
+                </div>
+              )}
+              <div className="mt-1 text-xs text-rose-600">
+                Voided {detail.voided_at ? `on ${formatDateTime(detail.voided_at)}` : ''}
+                {detail.voided_by ? ` by ${detail.voided_by}` : ''}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm">
@@ -336,6 +396,68 @@ export default function DocumentDetailPage() {
         onUnvoid={handleUnvoid}
         busy={!!voidingId}
       />
+
+      {/* Phase 81.67 — Void Full Document modal */}
+      {showVoidDocModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          data-testid="void-document-modal"
+        >
+          <div className="bg-white rounded-xl max-w-md w-full shadow-2xl">
+            <div className="p-5 border-b border-gray-100 flex items-start gap-3">
+              <div className="h-10 w-10 rounded-lg bg-rose-100 flex items-center justify-center shrink-0">
+                <Ban className="h-5 w-5 text-rose-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-gray-900">Void this document?</h3>
+                <p className="text-sm text-gray-600 mt-1">
+                  All active recipients will be notified, their signing access will be revoked,
+                  and pending reminders will be cancelled. This cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div className="p-5">
+              <label className="block text-xs font-semibold text-gray-700 mb-1.5">
+                Reason (optional)
+              </label>
+              <textarea
+                value={voidDocReason}
+                onChange={(e) => setVoidDocReason(e.target.value)}
+                rows={3}
+                placeholder="e.g., Sent to wrong recipient, contract terms changed…"
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-rose-500 focus:border-rose-500"
+                data-testid="void-document-reason"
+              />
+            </div>
+            <div className="px-5 pb-5 flex justify-end gap-2">
+              <button
+                onClick={() => { setShowVoidDocModal(false); setVoidDocReason(''); }}
+                disabled={voidingDoc}
+                className="px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-100 rounded-lg disabled:opacity-50"
+                data-testid="void-document-cancel-btn"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleVoidDocument}
+                disabled={voidingDoc}
+                className="px-4 py-2 text-sm font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg disabled:opacity-60 inline-flex items-center gap-1.5"
+                data-testid="void-document-confirm-btn"
+              >
+                {voidingDoc ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" /> Voiding…
+                  </>
+                ) : (
+                  <>
+                    <Ban className="h-3.5 w-3.5" /> Confirm Void
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -396,7 +518,7 @@ const RecipientsTable = ({ recipients, isPublic, onResend, resendingId, onCopy, 
               : (STATUS_PILL[rStatus] || 'bg-gray-100 text-gray-700 border-gray-200');
             const pillLabel = isVoided ? 'Voided' : (STATUS_LABEL[rStatus] || rStatus);
             const lastEvent = r.signed_at || r.viewed_at || r.sent_at || r.resent_at || r.voided_at;
-            const isSigned = rStatus === 'signed' || rStatus === 'completed' || !!r.signed_at;
+            const isSigned = ['signed', 'completed', 'approved', 'rejected', 'reviewed', 'declined'].includes(rStatus) || !!r.signed_at;
             const rowOpacity = isVoided ? 'opacity-70' : '';
             return (
               <tr key={r.id || r.email} className={rowOpacity} data-testid={`recipient-row-${r.id || r.email}`}>

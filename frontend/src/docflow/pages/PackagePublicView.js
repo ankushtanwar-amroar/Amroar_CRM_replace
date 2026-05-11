@@ -4,29 +4,34 @@ import {
   Package, FileText, CheckCircle2, Eye, Loader2, AlertCircle,
   XCircle, ChevronRight, CheckSquare, Square,
   ThumbsUp, ThumbsDown, ShieldCheck, Mail, Lock, Clock,
-  Ban, AlertOctagon, Timer, ChevronDown, Download
+  Ban, AlertOctagon, Timer, ChevronDown, Download, Menu
 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
-import InteractiveDocumentViewer from '../components/InteractiveDocumentViewer';
+import PackageDocSection from '../components/PackageDocSection';
+import PackageDocSidebar from '../components/PackageDocSidebar';
 import SignatureModal from '../components/SignatureModal';
 import SignatureReusePrompt from '../components/SignatureReusePrompt';
 import ConsentScreen, { hasAcceptedConsent } from '../components/ConsentScreen';
 import ConfirmSubmitDialog from '../components/ConfirmSubmitDialog';
+import SmsDisclaimerModal from '../components/SmsDisclaimerModal';
+import SmsDeclineScreen from '../components/SmsDeclineScreen';
+import { buildSmsAckKey, hasAcceptedSms, persistSmsAck } from '../utils/smsAck';
 import useSessionSignature from '../hooks/useSessionSignature';
+import { computeHiddenFieldIds } from '../utils/conditionalLogic';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || '';
 
 const ROLE_META = {
-  SIGN:           { label: 'Signer',   icon: FileText,    color: 'bg-indigo-100 text-indigo-700' },
-  VIEW_ONLY:      { label: 'Reviewer', icon: Eye,         color: 'bg-blue-100 text-blue-700' },
-  REVIEWER:       { label: 'Reviewer', icon: Eye,         color: 'bg-blue-100 text-blue-700' },
-  APPROVE_REJECT: { label: 'Approver', icon: ShieldCheck,  color: 'bg-amber-100 text-amber-700' },
+  SIGN: { label: 'Signer', icon: FileText, color: 'bg-indigo-100 text-indigo-700' },
+  VIEW_ONLY: { label: 'Reviewer', icon: Eye, color: 'bg-blue-100 text-blue-700' },
+  REVIEWER: { label: 'Reviewer', icon: Eye, color: 'bg-blue-100 text-blue-700' },
+  APPROVE_REJECT: { label: 'Approver', icon: ShieldCheck, color: 'bg-amber-100 text-amber-700' },
 };
 
 const SESSION_KEY_PREFIX = 'docflow_session_';
 
 const PackagePublicView = () => {
-  const { token } = useParams();
+  const { packageId, token } = useParams();
   const [pkg, setPkg] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -59,9 +64,12 @@ const PackagePublicView = () => {
   // ═══ Signer field state ═══
   const [templateFieldsMap, setTemplateFieldsMap] = useState({}); // { templateId: [fields] }
   const [docFieldValues, setDocFieldValues] = useState({}); // { docId: { fieldId: value } }
+  // Phase 81.60 — Mobile sidebar drawer visibility
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [loadingFields, setLoadingFields] = useState(false);
   const [signatureModalOpen, setSignatureModalOpen] = useState(false);
   const [currentSignFieldId, setCurrentSignFieldId] = useState(null);
+  const [currentSignFieldStyle, setCurrentSignFieldStyle] = useState(null);
   const [currentSignDocId, setCurrentSignDocId] = useState(null);
   const [isInitialsField, setIsInitialsField] = useState(false);
   const [isPackageVoided, setIsPackageVoided] = useState(false);
@@ -74,6 +82,16 @@ const PackagePublicView = () => {
   // `action` encodes the pending action so we know whether the Confirm button
   // should sign / approve / mark reviewed.
   const [confirmDialog, setConfirmDialog] = useState({ open: false, action: null });
+
+  // Phase 81 — SMS disclaimer acknowledgment (not OTP verification).
+  const [smsRequired, setSmsRequired] = useState(false);
+  // smsMode: whether actual SMS sending is enabled (independent of popup).
+  const [smsModeEnabled, setSmsModeEnabled] = useState(false);
+  const [smsAcknowledged, setSmsAcknowledged] = useState(false);
+  // Phase 81.83 — Decline state shows a clean exit screen instead of the
+  // signing UI. Decline is NOT persisted — re-opening the link asks again.
+  const [smsDeclined, setSmsDeclined] = useState(false);
+  const [smsPhoneMasked, setSmsPhoneMasked] = useState('');
 
   // Consent screen acceptance — declared at the top of the component (before any
   // early returns) to satisfy the Rules of Hooks. The key that drives the effect
@@ -89,6 +107,37 @@ const PackagePublicView = () => {
     }
   }, [_pkgConsentKeyForEffect]);
 
+  // Phase 81.15 — Auto-open Document #1 on first entry into the package
+  // signing page. Fires once per session: the moment we know the recipient
+  // is an actionable signer with at least one document, set
+  // `activeDocIndex = 0` if it's still null. The ref guarantees we don't
+  // re-trigger if the user later collapses every doc (returns to null).
+  const autoOpenedRef = useRef(false);
+  useEffect(() => {
+    if (autoOpenedRef.current) return;
+    if (!pkg) return;
+    const ar = pkg.active_recipient || {};
+    const role = String(ar.role_type || ar.role || 'SIGN').toUpperCase();
+    const isSignerRole = role === 'SIGN' || role === 'SIGNER';
+    const isCompleted = ar.status === 'completed' || completed;
+    const docs = pkg.documents || [];
+    if (!isSignerRole) return;          // not a signer → respect existing UX
+    if (isCompleted) return;            // already done → no auto-open
+    if (docs.length === 0) return;      // nothing to open
+    if (activeDocIndex !== null) {      // user already opened something
+      autoOpenedRef.current = true;
+      return;
+    }
+    autoOpenedRef.current = true;
+    setActiveDocIndex(0);
+  }, [pkg, completed, activeDocIndex]);
+
+  // Auto-advance: state + refs for per-doc completion tracking
+  const [autoStartTokens, setAutoStartTokens] = useState({});
+  const _docCompletionRef = useRef({});
+  const _autoAdvanceTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(_autoAdvanceTimerRef.current), []);
+
   // Restore session from sessionStorage on mount
   useEffect(() => {
     const stored = sessionStorage.getItem(`${SESSION_KEY_PREFIX}${token}`);
@@ -96,6 +145,15 @@ const PackagePublicView = () => {
   }, [token]);
 
   useEffect(() => { loadPackage(); }, [token, sessionToken]);
+
+  useEffect(() => {
+    if (pkg?.documents && activeDocIndex !== null) {
+      const doc = pkg.documents[activeDocIndex];
+      if (doc?.document_id && !docFieldValues[doc.document_id]) {
+        loadDocData(doc.document_id);
+      }
+    }
+  }, [activeDocIndex, pkg, docFieldValues]);
 
   // Real-time status polling — detect void/delete
   useEffect(() => {
@@ -156,6 +214,36 @@ const PackagePublicView = () => {
     return headers;
   }, [sessionToken]);
 
+  const loadDocData = async (docId, isInitial = false) => {
+    try {
+      if (!isInitial) setLoading(true);
+      const headers = getSessionHeaders();
+      const res = await fetch(`${API_URL}/api/docflow/documents/${docId}/view/data`, { headers });
+      if (res.status === 401) { handleSessionExpired(); return; }
+      if (res.status === 410) {
+        const err = await res.json().catch(() => ({}));
+        setIsPackageVoided(true);
+        let msg = 'This package has been voided and is no longer available.';
+        if (err && err.detail) {
+          if (typeof err.detail === 'string') msg = err.detail;
+          else if (typeof err.detail === 'object' && err.detail.message) {
+            msg = err.detail.message;
+            if (err.detail.void_reason) msg += ` Reason: ${err.detail.void_reason}`;
+          }
+        }
+        setPackageVoidedMsg(msg);
+        return;
+      }
+      if (!res.ok) throw new Error('Failed to load document data');
+      const data = await res.json();
+      setDocFieldValues(prev => ({ ...prev, [docId]: data.field_data || {} }));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      if (!isInitial) setLoading(false);
+    }
+  };
+
   const loadPackage = async () => {
     try {
       setLoading(true);
@@ -167,7 +255,19 @@ const PackagePublicView = () => {
       if (res.status === 410) {
         const err = await res.json().catch(() => ({}));
         setIsPackageVoided(true);
-        setPackageVoidedMsg(err.detail || 'This package has been voided and is no longer available.');
+        // Phase 81.67 — handle structured detail (object) and legacy string detail.
+        let msg = 'This package has been voided and is no longer available.';
+        if (err && err.detail) {
+          if (typeof err.detail === 'string') {
+            msg = err.detail;
+          } else if (typeof err.detail === 'object' && err.detail.message) {
+            msg = err.detail.message;
+            if (err.detail.void_reason) {
+              msg += ` Reason: ${err.detail.void_reason}`;
+            }
+          }
+        }
+        setPackageVoidedMsg(msg);
         setLoading(false);
         return;
       }
@@ -184,6 +284,46 @@ const PackagePublicView = () => {
       const data = await res.json();
       setPkg(data);
 
+      // If there's an active document, load its data before finishing the initial loader
+      if (data.documents?.length > 0) {
+        const firstDoc = data.documents[0];
+        setActiveDocIndex(0);
+        await loadDocData(firstDoc.document_id, true); // Pass true to indicate it's the initial load
+      }
+
+      // Phase 81 — surface SMS disclaimer requirement to the modal gate.
+      // Phase 81.4 — only when active recipient still has a pending action
+      // (signer or approver). Viewers, completed/approved/declined/voided
+      // recipients, and terminal package states never see the popup.
+      const ar = data?.active_recipient || {};
+      const recRole = String(ar.role_type || ar.role || 'SIGN').toUpperCase();
+      const recStatus = String(ar.status || '').toLowerCase();
+      const pkgStatus = String(data?.package_status || data?.status || '').toLowerCase();
+      const terminalRecipient = ['signed', 'completed', 'approved', 'rejected', 'declined', 'voided', 'expired', 'skipped'].includes(recStatus);
+      const terminalPkg = ['completed', 'signed', 'voided', 'expired', 'declined', 'cancelled'].includes(pkgStatus);
+      const isActionableRole = recRole === 'SIGN' || recRole === 'APPROVE_REJECT' || recRole === 'SIGNER' || recRole === 'APPROVER';
+      const recipientIsActionable = isActionableRole && !terminalRecipient && !terminalPkg && !data?.all_signing_complete && !ar.voided;
+
+      // sms_mode controls SMS sending; sms_required (driven by sms_consent) controls popup.
+      setSmsModeEnabled(!!data?.sms_mode);
+
+      if (data?.sms_required && recipientIsActionable) {
+        setSmsRequired(true);
+        // Phase 81.83 — Honour persisted acceptance: if the recipient already
+        // accepted on this device for this token, skip the disclaimer.
+        const ackKey = buildSmsAckKey({
+          scope: 'pkg',
+          id: packageId,
+          token,
+          extra: ar?.email || ar?.id,
+        });
+        setSmsAcknowledged(hasAcceptedSms(ackKey));
+        setSmsPhoneMasked(data?.recipient_phone_masked || '');
+      } else {
+        setSmsRequired(false);
+        setSmsAcknowledged(true); // Skip to signing flow if SMS not required / not actionable
+      }
+
       if (data.session_required && !sessionToken) {
         setSessionRequired(true);
         if (data.active_recipient?.name) setOtpName(data.active_recipient.name);
@@ -192,18 +332,29 @@ const PackagePublicView = () => {
         setSessionRequired(false);
         // Load field placements if the recipient is a signer
         if (data.active_recipient?.role_type === 'SIGN' &&
-            data.active_recipient?.status !== 'completed' &&
-            data.documents?.length > 0) {
+          data.active_recipient?.status !== 'completed' &&
+          data.documents?.length > 0) {
           loadFieldPlacements(data);
           // Pre-populate field values with merge field data from generated documents
           const initialValues = {};
           for (const doc of data.documents) {
-            const mfv = doc.merge_field_values || doc.field_data || {};
+            // Phase 81.21 — Merge BOTH `merge_field_values` (alias-keyed,
+            // can collide when two converted merges share the same pattern)
+            // AND `field_data` (field-id-keyed, always unique per placement).
+            // `field_data` takes priority on collision so each converted
+            // merge field reliably displays its own previously-saved value
+            // for downstream recipients in sequential signing.
+            const aliasMap = doc.merge_field_values || {};
+            const fieldMap = doc.field_data || {};
+            const mfv = { ...aliasMap, ...fieldMap };
             if (doc.document_id && Object.keys(mfv).length > 0) {
               initialValues[doc.document_id] = { ...mfv };
             }
           }
           if (Object.keys(initialValues).length > 0) {
+            // Phase 81.49 — initial values from field_data set here; linked
+            // field fanout happens in a useEffect after templateFieldsMap is
+            // populated (see below).
             setDocFieldValues(initialValues);
           }
         }
@@ -228,6 +379,10 @@ const PackagePublicView = () => {
     setLoadingFields(true);
     const newMap = {};
     const assignedComponents = pkgData.active_recipient?.assigned_components || {};
+    // True when the backend provided an explicit per-recipient assignment map for
+    // this package. When true, a missing or empty template entry means "zero
+    // fields assigned here" — not backward-compat "all fields assigned to all".
+    const hasPackageLevelAssignments = Object.keys(assignedComponents).length > 0;
 
     for (const doc of (pkgData.documents || [])) {
       const templateId = doc.template_id;
@@ -239,21 +394,33 @@ const PackagePublicView = () => {
           let fields = data.field_placements || [];
 
           const assignedFieldIds = assignedComponents[templateId] || [];
-          // Non-assignable types are always considered "assigned" (document-level elements)
-          const NON_ASSIGNABLE = ['merge', 'checkbox', 'radio', 'label'];
+          // Phase 81.11 — Strict per-recipient isolation for ALL field types
+          // including merge fields. Only `label` (purely static document text)
+          // is treated as "always-visible". Previously `merge`, `checkbox`,
+          // and `radio` were globally assigned, which leaked merge fields
+          // belonging to a future recipient into the current recipient's view.
+          const NON_ASSIGNABLE = ['label'];
+          const fieldType = (f) => (f.type || f.field_type);
           const hasAnyAssignment = fields.some(f => f.assigned_to || f.recipient_id);
 
           fields = fields.map(f => {
             let isAssigned;
             if (assignedFieldIds.length > 0) {
-              // Explicit assigned_components map for this recipient+template
-              isAssigned = assignedFieldIds.includes(f.id) || NON_ASSIGNABLE.includes(f.type);
+              // Explicit non-empty list for this recipient+template.
+              isAssigned = assignedFieldIds.includes(f.id) || NON_ASSIGNABLE.includes(fieldType(f));
+            } else if (hasPackageLevelAssignments) {
+              // Package has assignment data but this template is either absent
+              // from the recipient's map or explicitly empty → they own zero
+              // fields here. Only non-assignable types (labels) pass through.
+              // This fixes the isolation bug where ALL fields in a template
+              // assigned to one recipient were incorrectly exposed to others.
+              isAssigned = NON_ASSIGNABLE.includes(fieldType(f));
             } else if (hasAnyAssignment) {
-              // Template has field-level assignments but no explicit map for this recipient
-              // → only fields without any assignment are considered "assigned to everyone"
-              isAssigned = (!f.assigned_to && !f.recipient_id) || NON_ASSIGNABLE.includes(f.type);
+              // No package-level map, but field-level assigned_to attrs exist.
+              // Only fields with no explicit owner are considered "public".
+              isAssigned = (!f.assigned_to && !f.recipient_id) || NON_ASSIGNABLE.includes(fieldType(f));
             } else {
-              // Backward compat: no assignment data at all → all fields assigned to all
+              // Backward compat: no assignment data at all → all fields visible.
               isAssigned = true;
             }
             return { ...f, __isAssigned: isAssigned };
@@ -270,6 +437,55 @@ const PackagePublicView = () => {
     setLoadingFields(false);
   };
 
+  // Phase 81.49 / Phase 2 — Resolve interlinked targets once
+  // templateFieldsMap is populated. For each placement with `linked_to` that
+  // points at another document's field whose source value already exists,
+  // pre-fill the target (respecting same-recipient scope). Phase 2 extends
+  // this to checkbox + radio: source/target value lookup uses the placement's
+  // groupName as the storage key for radio fields, and the placement id for
+  // text/date/checkbox.
+  useEffect(() => {
+    if (!pkg?.documents?.length || !Object.keys(templateFieldsMap).length) return;
+    const valueKeyFor = (p) => {
+      const t = (p?.type || p?.field_type || '').toLowerCase();
+      if (t === 'radio') return p.groupName || p.group_name || p.id;
+      return p.id;
+    };
+    let changed = false;
+    const next = { ...docFieldValues };
+    for (const d of pkg.documents) {
+      const placements = templateFieldsMap[d.template_id] || [];
+      for (const p of placements) {
+        const link = p.linked_to;
+        if (!link?.enabled || !link.field_id) continue;
+        const targetKey = valueKeyFor(p);
+        const currentVal = next[d.document_id]?.[targetKey];
+        if (currentVal !== undefined && currentVal !== '') continue;
+        let sourceValue;
+        let sourceOwner;
+        for (const other of pkg.documents) {
+          if (other.document_id === d.document_id) continue;
+          const otherPlacements = templateFieldsMap[other.template_id] || [];
+          const srcField = otherPlacements.find(op => op.id === link.field_id);
+          if (!srcField) continue;
+          const sourceKey = valueKeyFor(srcField);
+          const otherVals = next[other.document_id] || {};
+          if (otherVals[sourceKey] !== undefined && otherVals[sourceKey] !== '') {
+            sourceValue = otherVals[sourceKey];
+            sourceOwner = srcField.assigned_to || srcField.recipient_id;
+            break;
+          }
+        }
+        if (sourceValue === undefined) continue;
+        const targetOwner = p.assigned_to || p.recipient_id;
+        if (sourceOwner && targetOwner && sourceOwner !== targetOwner) continue;
+        next[d.document_id] = { ...(next[d.document_id] || {}), [targetKey]: sourceValue };
+        changed = true;
+      }
+    }
+    if (changed) setDocFieldValues(next);
+  }, [pkg, templateFieldsMap]);
+
   // Get filtered fields for a specific document (mapped to its template).
   // Applies per-recipient visibility based on assignment + current values:
   //   - Assigned                → interactive
@@ -278,28 +494,216 @@ const PackagePublicView = () => {
   const getFieldsForDoc = useCallback((doc) => {
     const baseFields = templateFieldsMap[doc.template_id] || [];
     const values = docFieldValues[doc.document_id] || {};
+    // Hide interactive fields (signature/text/date/etc.) from recipients
+    // who don't own them. Merge fields are EXEMPT — see Phase 81.18 below.
     const interactiveTypes = new Set(['signature', 'initials', 'date', 'text', 'checkbox', 'radio', 'dropdown']);
-    
+
     return baseFields.map(f => {
-      if (f.__isAssigned) return f;
-      
-      // Unassigned field: hide interactive fields completely from other recipients
-      // during active signing flow, so they don't see each other's fields.
-      if (interactiveTypes.has(f.type || f.field_type)) {
-        return { ...f, field_hidden: true };
+      // Phase 81.49 / Phase 2 — Interlinked TARGET fields are auto-locked
+      // to read-only ONLY when read_only_target is true (default). In Two-Way
+      // mode we leave the field editable so the recipient can update either
+      // side and have the change sync back to the source. Lock + Two-Way
+      // are mutually exclusive at author time, but we double-guard here so
+      // legacy data with both flags resolves to "Two-Way wins".
+      if (
+        f.linked_to?.enabled &&
+        f.linked_to?.field_id &&
+        f.linked_to?.read_only_target !== false &&
+        f.linked_to?.direction !== 'two_way'
+      ) {
+        return { ...f, readOnly: true, field_hint: '🔗 Synced from linked field' };
       }
-      
+
+      if (f.__isAssigned) {
+        // Phase 81.47/81.48 — author-time readOnly fields stay visible to
+        // their owner as printed text (not editable).
+        return f.readOnly === true ? { ...f, readOnly: true } : f;
+      }
+
+      const t = f.type || f.field_type;
+
+      // Phase 81.48 — REVERT Phase 81.47's hide-from-non-owners rule.
+      // Author-time Read-Only fields are ALWAYS visible to every recipient
+      // as non-editable printed text. "Read Only Fields Must Always Be
+      // Visible" per updated spec.
+      if (f.readOnly === true) {
+        return { ...f, readOnly: true };
+      }
+
+      // Phase 81.18 — Merge fields (plain OR converted-to-input) are ALWAYS
+      // visible to every recipient and rendered read-only when not owned.
+      // Plain merges = CRM-populated contract data everyone should see.
+      // Converted merges = the assigned signer fills it; the value still
+      // remains visible to other signers (so contract context is preserved).
+      // This matches the public-link behaviour and removes the long-standing
+      // mismatch where email-package recipients saw "missing" merge fields.
+      if (t === 'merge') {
+        return { ...f, readOnly: true };
+      }
+
+      // Phase 81.30 — Unassigned interactive field. If a previous signer (or
+      // the system) already filled a value, render it READ-ONLY so the next
+      // signer can see what was done before. If nothing has been filled yet,
+      // hide it entirely (DocuSign-style — signers should never see other
+      // signers' empty placeholders). Radio fields are tricky: the value lives
+      // under `groupName`, not the field id, so consult the group key.
+      if (interactiveTypes.has(t)) {
+        let hasValue = false;
+        if (t === 'radio') {
+          const group = f.groupName || f.group_name;
+          const groupVal = group ? values[group] : undefined;
+          const optionValue = f.optionValue || f.option_value || f.id;
+          // Consider the option "filled" only if THIS specific option is
+          // selected — sibling options stay hidden if not selected.
+          hasValue = groupVal !== undefined && groupVal !== '' && groupVal === optionValue;
+          // Legacy single-field-with-radioOptions model: any non-empty value.
+          if (!hasValue && Array.isArray(f.radioOptions) && f.radioOptions.length > 0) {
+            const v = values[f.id];
+            hasValue = v !== undefined && v !== null && v !== '';
+          }
+        } else if (t === 'checkbox') {
+          // A checkbox is only "shown" to the next recipient when it was
+          // explicitly checked — leaving it unchecked is indistinguishable
+          // from "skipped", so we hide unchecked checkboxes from non-owners.
+          hasValue = values[f.id] === true || values[f.id] === 'true';
+        } else {
+          const v = values[f.id];
+          hasValue = v !== undefined && v !== null && v !== '';
+        }
+        return { ...f, readOnly: true };
+      }
+
       return { ...f, readOnly: true };
     });
   }, [templateFieldsMap, docFieldValues]);
 
   // Handle field value changes for a specific document
-  const handleDocFieldsChange = useCallback((docId, values) => {
-    setDocFieldValues(prev => ({
-      ...prev,
-      [docId]: { ...(prev[docId] || {}), ...values },
-    }));
+  // Phase 81.49 / Phase 2 — Interlinked Fields fanout. When a SOURCE field's
+  // value changes, propagate to every other doc in the package whose
+  // placement has `linked_to.field_id === source.id` AND is assigned to the
+  // same recipient. Cross-recipient links are silently skipped per spec.
+  //
+  // Phase 2 additions:
+  //   • Radio: source/target storage key is `groupName` (not field id) —
+  //     the renderer reads `field_data[groupName]` for new-model radios.
+  //     The incoming `key` from a radio change is the groupName itself.
+  //   • Checkbox: storage key is field id; values are booleans (passthrough).
+  //   • Two-way: when a TARGET field with `direction === 'two_way'` is
+  //     edited, ALSO write the value to the SOURCE doc, then re-fanout
+  //     from the source so any sibling targets stay in sync.
+  const valueKeyFor = useCallback((p) => {
+    const t = (p?.type || p?.field_type || '').toLowerCase();
+    if (t === 'radio') return p.groupName || p.group_name || p.id;
+    return p.id;
   }, []);
+
+  const fanoutLinkedFieldValue = useCallback((sourceDocId, key, newValue) => {
+    if (!pkg?.documents) return {};
+    const sourceDoc = pkg.documents.find(d => d.document_id === sourceDocId);
+    if (!sourceDoc) return {};
+    const sourcePlacements = templateFieldsMap?.[sourceDoc.template_id] || [];
+    // The incoming `key` may be a placement id (text/date/checkbox) OR a
+    // groupName (radio new-model). Find every source placement whose
+    // value-key equals `key`. For radio there are multiple placements per
+    // group — any with `linked_to` pointing back to it from another doc
+    // counts as a match.
+    const matchingSources = sourcePlacements.filter(p => valueKeyFor(p) === key);
+    if (matchingSources.length === 0) return {};
+
+    const updates = {};  // { [docId]: { [key]: value } }
+    for (const otherDoc of pkg.documents) {
+      if (otherDoc.document_id === sourceDocId) continue;
+      const placements = templateFieldsMap?.[otherDoc.template_id] || [];
+      for (const p of placements) {
+        const link = p.linked_to;
+        if (!link?.enabled || !link.field_id) continue;
+        // Match if any of the source placements (sharing `key`) has the id
+        // referenced by the target's linked_to.field_id.
+        const matchSource = matchingSources.find(s => s.id === link.field_id);
+        if (!matchSource) continue;
+        // Same-recipient scope: target owner must match source owner.
+        const sourceOwner = matchSource.assigned_to || matchSource.recipient_id;
+        const targetOwner = p.assigned_to || p.recipient_id;
+        if (sourceOwner && targetOwner && sourceOwner !== targetOwner) continue;
+        const targetKey = valueKeyFor(p);
+        updates[otherDoc.document_id] = { ...(updates[otherDoc.document_id] || {}), [targetKey]: newValue };
+      }
+    }
+    return updates;
+  }, [pkg, templateFieldsMap, valueKeyFor]);
+
+  // Phase 2 — Reverse fanout when a TARGET field with direction='two_way'
+  // is edited. Walks the doc's placements to find any with a `linked_to`
+  // pointing at another doc's source field. Writes the new value to the
+  // source doc, then rolls a forward fanout from the source so sibling
+  // targets stay in sync. Skipped when the link is read_only_target (in
+  // which case the field shouldn't be editable in the first place).
+  const reverseFanoutLinkedFieldValue = useCallback((targetDocId, key, newValue) => {
+    if (!pkg?.documents) return {};
+    const targetDoc = pkg.documents.find(d => d.document_id === targetDocId);
+    if (!targetDoc) return {};
+    const targetPlacements = templateFieldsMap?.[targetDoc.template_id] || [];
+    // Find target placement(s) whose own value key matches the changed key
+    // AND whose linked_to opts into two-way. Multiple radio fields in a
+    // group share a key; pick any one with two-way + a real link.
+    const triggers = targetPlacements.filter(p => {
+      if (valueKeyFor(p) !== key) return false;
+      const lk = p.linked_to;
+      return Boolean(lk?.enabled && lk?.field_id && lk?.direction === 'two_way' && lk?.read_only_target !== true);
+    });
+    if (triggers.length === 0) return {};
+
+    const updates = {};
+    for (const trig of triggers) {
+      const lk = trig.linked_to;
+      // Locate source doc + source field by id.
+      for (const otherDoc of pkg.documents) {
+        if (otherDoc.document_id === targetDocId) continue;
+        const placements = templateFieldsMap?.[otherDoc.template_id] || [];
+        const srcField = placements.find(op => op.id === lk.field_id);
+        if (!srcField) continue;
+        // Same-recipient scope still applies in two-way.
+        const targetOwner = trig.assigned_to || trig.recipient_id;
+        const sourceOwner = srcField.assigned_to || srcField.recipient_id;
+        if (sourceOwner && targetOwner && sourceOwner !== targetOwner) break;
+        const sourceKey = valueKeyFor(srcField);
+        updates[otherDoc.document_id] = {
+          ...(updates[otherDoc.document_id] || {}),
+          [sourceKey]: newValue,
+        };
+        // Forward-fanout from this source so sibling targets stay synced.
+        const forward = fanoutLinkedFieldValue(otherDoc.document_id, sourceKey, newValue);
+        for (const [docId, vals] of Object.entries(forward)) {
+          if (docId === targetDocId) continue;  // don't overwrite the trigger doc
+          updates[docId] = { ...(updates[docId] || {}), ...vals };
+        }
+        break;  // each trigger pairs to exactly one source doc
+      }
+    }
+    return updates;
+  }, [pkg, templateFieldsMap, valueKeyFor, fanoutLinkedFieldValue]);
+
+  const handleDocFieldsChange = useCallback((docId, values) => {
+    setDocFieldValues(prev => {
+      const next = {
+        ...prev,
+        [docId]: { ...(prev[docId] || {}), ...values },
+      };
+      // Forward fanout: source → linked targets across the package.
+      for (const [key, value] of Object.entries(values)) {
+        const linkedUpdates = fanoutLinkedFieldValue(docId, key, value);
+        for (const [otherDocId, otherVals] of Object.entries(linkedUpdates)) {
+          next[otherDocId] = { ...(next[otherDocId] || {}), ...otherVals };
+        }
+        // Phase 2 — Reverse fanout for two-way targets.
+        const reverseUpdates = reverseFanoutLinkedFieldValue(docId, key, value);
+        for (const [otherDocId, otherVals] of Object.entries(reverseUpdates)) {
+          next[otherDocId] = { ...(next[otherDocId] || {}), ...otherVals };
+        }
+      }
+      return next;
+    });
+  }, [fanoutLinkedFieldValue, reverseFanoutLinkedFieldValue]);
 
   // Signature modal management
   // Session signature cache — keyed per signer to prevent cross-user leakage.
@@ -308,26 +712,27 @@ const PackagePublicView = () => {
     : null;
   const { getSignature: getSessionSig, setSignature: setSessionSig, clearAll: clearSessionSig } = useSessionSignature(_sigSessionKey);
 
-  const openSignatureModalDirect = useCallback((docId, fieldId, isInitials = false) => {
+  const openSignatureModalDirect = useCallback((docId, fieldId, isInitials = false, field = null) => {
     setCurrentSignDocId(docId);
     setCurrentSignFieldId(fieldId);
     setIsInitialsField(isInitials);
+    setCurrentSignFieldStyle(field?.style || null);
     setSignatureModalOpen(true);
   }, []);
 
-  const openSignatureModal = useCallback((docId, fieldId, isInitials = false) => {
+  const openSignatureModal = useCallback((docId, fieldId, isInitials = false, field = null) => {
     // If the field already has a value or no cached signature exists, open the full modal.
     const existing = (docFieldValues[docId] || {})[fieldId];
     if (existing) {
-      openSignatureModalDirect(docId, fieldId, isInitials);
+      openSignatureModalDirect(docId, fieldId, isInitials, field);
       return;
     }
     const cached = getSessionSig(isInitials ? 'initials' : 'signature');
     if (cached) {
-      setReusePrompt({ open: true, docId, fieldId, isInitials });
+      setReusePrompt({ open: true, docId, fieldId, isInitials, fieldStyle: field?.style });
       return;
     }
-    openSignatureModalDirect(docId, fieldId, isInitials);
+    openSignatureModalDirect(docId, fieldId, isInitials, field);
   }, [docFieldValues, getSessionSig, openSignatureModalDirect]);
 
   const handleReuseAccept = useCallback(() => {
@@ -343,9 +748,10 @@ const PackagePublicView = () => {
   }, [reusePrompt, getSessionSig]);
 
   const handleReuseDrawNew = useCallback(() => {
-    const { docId, fieldId, isInitials } = reusePrompt;
+    const { docId, fieldId, isInitials, fieldStyle } = reusePrompt;
     setReusePrompt({ open: false, docId: null, fieldId: null, isInitials: false });
-    openSignatureModalDirect(docId, fieldId, isInitials);
+    // Re-pack field style into a synthetic object for openSignatureModalDirect
+    openSignatureModalDirect(docId, fieldId, isInitials, { style: fieldStyle });
   }, [reusePrompt, openSignatureModalDirect]);
 
   const handleSignatureSave = useCallback((fieldId, sigData, applyToFieldIds) => {
@@ -368,33 +774,151 @@ const PackagePublicView = () => {
   }, [currentSignDocId, isInitialsField, setSessionSig]);
 
   // Check if all required signing fields are completed
+  // Phase 81.53 — Properly handles radio (groupName key + group-required
+  // semantics) and checkbox (boolean true) so the Finish button enables
+  // when the user truly is done. Skips non-interactive types and fields
+  // not assigned to the current recipient.
+  // Phase 81.59 — Hidden fields are computed in a useMemo below; this
+  // memo MUST come after `hiddenFieldsByDoc` to avoid temporal-dead-zone
+  // ReferenceError. We define hiddenFieldsByDoc inline here so ordering
+  // is guaranteed.
+  const hiddenFieldsByDoc = useMemo(() => {
+    const out = {};
+    const documents = pkg?.documents || [];
+    for (const doc of documents) {
+      const fields = templateFieldsMap[doc.template_id] || [];
+      const values = docFieldValues[doc.document_id] || {};
+      out[doc.document_id] = computeHiddenFieldIds(fields, values);
+    }
+    return out;
+  }, [pkg, templateFieldsMap, docFieldValues]);
+
+  // Per-doc completion map — used by auto-advance to detect the moment a doc
+  // transitions from incomplete → complete so we can move to the next one.
+  const perDocComplete = useMemo(() => {
+    const out = {};
+    for (const doc of (pkg?.documents || [])) {
+      const fields = getFieldsForDoc(doc);
+      const values = docFieldValues[doc.document_id] || {};
+      const dynamicHidden = hiddenFieldsByDoc[doc.document_id] || new Set();
+      const seenGroups = new Set();
+      const slots = [];
+      for (const f of fields) {
+        const t = (f.type || f.field_type || '').toLowerCase();
+        if (['label', 'merge'].includes(t)) continue;
+        if (f.field_hidden || f.field_disabled || f.readOnly) continue;
+        if (f.__isAssigned === false) continue;
+        if (dynamicHidden.has(f.id)) continue;
+        if (t === 'radio') {
+          const g = f.groupName || f.group_name;
+          if (g) { if (seenGroups.has(g)) continue; seenGroups.add(g); }
+        }
+        slots.push(f);
+      }
+      const isFilled = (f) => {
+        const t = (f.type || f.field_type || '').toLowerCase();
+        if (t === 'radio') { const g = f.groupName || f.group_name || f.id; const v = values[g]; return v !== undefined && v !== null && String(v) !== ''; }
+        if (t === 'checkbox') return values[f.id] === true || values[f.id] === 'true';
+        if (t === 'date') { if ((f.dateMode || 'auto') === 'auto') return true; const v = values[f.id]; return v !== undefined && v !== null && String(v).trim() !== ''; }
+        const v = values[f.id]; return v !== undefined && v !== null && String(v).trim() !== '';
+      };
+      out[doc.document_id] = slots.length > 0 && slots.every(isFilled);
+    }
+    return out;
+  }, [pkg, docFieldValues, hiddenFieldsByDoc, getFieldsForDoc]);
+
+  // Auto-advance to next pending doc when the active doc becomes complete
+  useEffect(() => {
+    if (!pkg || activeDocIndex === null) return;
+    const ar = pkg.active_recipient;
+    if (String(ar?.role_type || ar?.role || '').toUpperCase() !== 'SIGN') return;
+    const documents = pkg.documents || [];
+    const activeDoc = documents[activeDocIndex];
+    if (!activeDoc) return;
+    const docId = activeDoc.document_id;
+    const isComplete = perDocComplete[docId] ?? false;
+    const snap = _docCompletionRef.current;
+    if (!(docId in snap)) { snap[docId] = isComplete; return; }
+    if (snap[docId] === isComplete) return;
+    snap[docId] = isComplete;
+    if (!isComplete) return;
+    let nextIdx = null;
+    for (let i = activeDocIndex + 1; i < documents.length; i++) {
+      const d = documents[i];
+      if (!d.has_signed_version && !perDocComplete[d.document_id]) { nextIdx = i; break; }
+    }
+    if (nextIdx === null) return;
+    clearTimeout(_autoAdvanceTimerRef.current);
+    _autoAdvanceTimerRef.current = setTimeout(() => {
+      setActiveDocIndex(nextIdx);
+      const nextDocId = documents[nextIdx].document_id;
+      setAutoStartTokens(prev => ({ ...prev, [nextDocId]: (prev[nextDocId] || 0) + 1 }));
+    }, 700);
+  }, [perDocComplete, activeDocIndex, pkg]);
+
   const allRequiredFieldsComplete = useMemo(() => {
     if (!pkg || pkg.active_recipient?.role_type !== 'SIGN') return true;
     const documents = pkg.documents || [];
-    const interactiveTypes = new Set(['signature', 'initials', 'date', 'text', 'checkbox', 'radio', 'dropdown']);
+    const NON_INTERACTIVE = new Set(['label', 'merge']);
+
+    const isRequired = (f, all) => {
+      if (f.required === false || f.required === 'false') return false;
+      const t = (f.type || f.field_type || '').toLowerCase();
+      if (t === 'radio') {
+        const group = f.groupName || f.group_name;
+        if (!group) return Boolean(f.required);
+        return (all || []).some(o =>
+          (o.type || o.field_type) === 'radio' &&
+          (o.groupName || o.group_name) === group &&
+          (o.required === true || o.required === 'true')
+        );
+      }
+      if (f.required === true || f.required === 'true') return true;
+      return ['signature', 'initials'].includes(t);
+    };
+
+    const isFilled = (f, vals) => {
+      const t = (f.type || f.field_type || '').toLowerCase();
+      if (t === 'radio') {
+        const group = f.groupName || f.group_name || f.id;
+        const v = vals[group];
+        return v !== undefined && v !== null && String(v) !== '';
+      }
+      if (t === 'checkbox') {
+        const v = vals[f.id];
+        return v === true || v === 'true';
+      }
+      if (t === 'date') {
+        if ((f.dateMode || 'auto') === 'auto') return true;
+        const v = vals[f.id];
+        return v !== undefined && v !== null && String(v).trim() !== '';
+      }
+      const v = vals[f.id];
+      return v !== undefined && v !== null && String(v).trim() !== '';
+    };
 
     for (const doc of documents) {
       const templateId = doc.template_id;
       const fields = templateFieldsMap[templateId] || [];
       const docValues = docFieldValues[doc.document_id] || {};
+      // Phase 81.57 — Conditional-hidden fields reported by this doc's
+      // viewer are skipped here too. Without this, a "Required" text
+      // input that's hidden by a Radio condition would block Finish.
+      const dynamicHidden = hiddenFieldsByDoc[doc.document_id] || new Set();
 
       for (const field of fields) {
-        // Skip fields not assigned to the current recipient — they're either
-        // hidden or shown read-only and should not block completion.
         if (field.__isAssigned === false) continue;
-        // Validate ALL required interactive fields
-        if (interactiveTypes.has(field.type) && field.required !== false) {
-          const val = docValues[field.id];
-          if (field.type === 'checkbox') {
-            if (val !== true && val !== 'true') return false;
-          } else {
-            if (val === undefined || val === null || String(val).trim() === '') return false;
-          }
-        }
+        const t = (field.type || field.field_type || '').toLowerCase();
+        if (NON_INTERACTIVE.has(t)) continue;
+        if (field.field_hidden || field.field_disabled) continue;
+        if (field.readOnly) continue;
+        if (dynamicHidden.has(field.id)) continue;
+        if (!isRequired(field, fields)) continue;
+        if (!isFilled(field, docValues)) return false;
       }
     }
     return true;
-  }, [pkg, templateFieldsMap, docFieldValues]);
+  }, [pkg, templateFieldsMap, docFieldValues, hiddenFieldsByDoc]);
 
   const hasAnyFields = useMemo(() => {
     // True if the current recipient has ANY assigned (interactive) field across documents.
@@ -695,9 +1219,9 @@ const PackagePublicView = () => {
           <p className="text-sm text-gray-500 mb-1">
             {isRejected ? `You have rejected "${package_name}". The package has been voided.`
               : isViewOnly ? `You have reviewed "${package_name}".`
-              : isApprover ? `You have approved "${package_name}".`
-              : isSigner ? `You have signed "${package_name}".`
-              : `You have completed your action on "${package_name}".`}
+                : isApprover ? `You have approved "${package_name}".`
+                  : isSigner ? `You have signed "${package_name}".`
+                    : `You have completed your action on "${package_name}".`}
           </p>
           <p className="text-xs text-gray-400">Action: {action}</p>
 
@@ -745,18 +1269,67 @@ const PackagePublicView = () => {
     : null;
   const pkgShouldShowConsent = !!pkgConsentKey && !pkgConsentAccepted && !isPackageVoided;
 
+  // SMS Disclaimer gate: shown as full screen overlay when sms_mode=true
+  // and recipient hasn't acknowledged yet. Blocks all package content.
+  if (smsRequired && smsDeclined && !isPackageVoided) {
+    return (
+      <SmsDeclineScreen onReconsider={() => setSmsDeclined(false)} />
+    );
+  }
+  if (smsRequired && !smsAcknowledged && !isPackageVoided) {
+    return (
+      <SmsDisclaimerModal
+        token={token}
+        packageId={packageId}
+        scope="package"
+        documentType="package"
+        smsMode={smsModeEnabled}
+        phoneMasked={smsPhoneMasked}
+        documentName={package_name}
+        recipientId={pkg?.active_recipient?.id}
+        recipientName={pkg?.active_recipient?.name}
+        recipientEmail={pkg?.active_recipient?.email}
+        companyName={pkg?.tenant_name}
+        onContinue={() => {
+          // Phase 81.83 — persist per-recipient acceptance so refresh / new
+          // tab / browser restart on this device don't re-prompt.
+          const ar = pkg?.active_recipient;
+          const ackKey = buildSmsAckKey({
+            scope: 'pkg',
+            id: packageId,
+            token,
+            extra: ar?.email || ar?.id,
+          });
+          persistSmsAck(ackKey);
+          setSmsAcknowledged(true);
+        }}
+        onDecline={() => {
+          setSmsDeclined(true);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-50" data-testid="package-public-view">
       <ConsentScreen
-        open={pkgShouldShowConsent}
+        open={pkgShouldShowConsent && (!smsRequired || smsAcknowledged)}
         sessionKey={pkgConsentKey}
         documentName={package_name}
         recipientName={pkg?.active_recipient?.name}
+        recipientEmail={pkg?.active_recipient?.email}
+        token={token}
+        packageId={packageId}
+        companyName={pkg?.tenant_name}
         onContinue={() => setPkgConsentAccepted(true)}
+        submitting={submitting}
       />
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 px-3 sm:px-4 py-3 sm:py-5">
-        <div className="max-w-3xl mx-auto">
+      {/* Phase 81.61 — Sticky top action bar so Package name + Finish button
+          are always visible while scrolling long PDFs. Responsive spacing
+          preserved, no layout shift. */}
+      <div className="sticky top-0 z-40 bg-white border-b border-gray-200 px-3 sm:px-6 lg:px-8 py-3 sm:py-5 shadow-sm">
+        <div className="max-w-[1600px] mx-auto">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 sm:gap-3 mb-2">
             <div className="flex items-center gap-3 min-w-0 order-2 sm:order-1">
               <div className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-xl bg-indigo-100 shrink-0">
@@ -769,24 +1342,53 @@ const PackagePublicView = () => {
                 </p>
               </div>
             </div>
-            {/* Phase 74: Sender info chip — read-only header indicator */}
-            {pkg?.sender && (pkg.sender.name || pkg.sender.email) && (
-              <div
-                className="inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 bg-slate-50 border border-slate-200 rounded-full text-[11px] sm:text-xs text-slate-700 max-w-full sm:max-w-[280px] shrink-0 order-1 sm:order-2 self-start"
-                data-testid="package-sender-chip"
-                title={`From: ${pkg.sender.name}${pkg.sender.email ? ` <${pkg.sender.email}>` : ''}`}
-              >
-                <span className="font-medium text-slate-500 uppercase tracking-wide shrink-0">From</span>
-                <span className="truncate font-semibold text-slate-800 min-w-0" data-testid="sender-name">
-                  {pkg.sender.name || pkg.sender.email}
-                </span>
-                {pkg.sender.email && pkg.sender.name && (
-                  <span className="truncate text-slate-500 hidden sm:inline min-w-0" data-testid="sender-email">
-                    ({pkg.sender.email})
+            <div className="flex items-center gap-2 flex-wrap order-1 sm:order-2 self-start">
+              {/* Phase 74: Sender info chip — read-only header indicator */}
+              {pkg?.sender && (pkg.sender.name || pkg.sender.email) && (
+                <div
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 bg-slate-50 border border-slate-200 rounded-full text-[11px] sm:text-xs text-slate-700 max-w-full sm:max-w-[280px] shrink-0"
+                  data-testid="package-sender-chip"
+                  title={`From: ${pkg.sender.name}${pkg.sender.email ? ` <${pkg.sender.email}>` : ''}`}
+                >
+                  <span className="font-medium text-slate-500 uppercase tracking-wide shrink-0">From</span>
+                  <span className="truncate font-semibold text-slate-800 min-w-0" data-testid="sender-name">
+                    {pkg.sender.name || pkg.sender.email}
                   </span>
-                )}
-              </div>
-            )}
+                  {pkg.sender.email && pkg.sender.name && (
+                    <span className="truncate text-slate-500 hidden sm:inline min-w-0" data-testid="sender-email">
+                      ({pkg.sender.email})
+                    </span>
+                  )}
+                </div>
+              )}
+              {/* Phase 81.15 — header "Finish" button. Same click handler,
+                  same disabled rules, same submitting state as the bottom
+                  button. Visible only to actionable signers with field
+                  signing in play; mirrors the existing render guard so we
+                  don't break view-only / approver / completed flows. */}
+              {isSigner && !recipientCompleted && useFieldSigning && (
+                <button
+                  onClick={async () => {
+                    // Phase 81.20 — Finish submits instantly. Required-field
+                    // gating still applies via `canComplete` + the disabled
+                    // attribute below, so this matches the spec: "one click
+                    // finish, no popup, keep validation checks".
+                    if (!canComplete || submitting) return;
+                    await handleSignWithFields();
+                  }}
+                  disabled={!canComplete || submitting}
+                  className={`inline-flex items-center gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all shrink-0 ${canComplete && !submitting
+                      ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                      : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                    }`}
+                  data-testid="finish-signing-btn-header"
+                  title={canComplete ? 'Submit your signed package' : 'Complete all required fields to enable Finish'}
+                >
+                  {submitting ? <Loader2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 animate-spin" /> : <FileText className="h-3.5 w-3.5 sm:h-4 sm:w-4" />}
+                  {submitting ? 'Processing...' : 'Finish'}
+                </button>
+              )}
+            </div>
           </div>
           <div className="mt-2 sm:mt-3 p-2.5 sm:p-3 bg-gray-50 rounded-lg">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
@@ -816,14 +1418,14 @@ const PackagePublicView = () => {
       </div>
 
       {/* Documents */}
-      <div className="max-w-3xl mx-auto px-3 sm:px-4 py-4 sm:py-6">
+      <div className="max-w-[1600px] mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6">
         {/* Signer field hint */}
-        {isSigner && hasAnyFields && !loadingFields && (
+        {/* {isSigner && hasAnyFields && !loadingFields && (
           <div className="flex items-center gap-2 text-xs text-indigo-700 bg-indigo-50 px-4 py-3 rounded-xl mb-4 border border-indigo-100" data-testid="signing-instruction">
             <FileText className="h-4 w-4 shrink-0" />
             <span>Open each document below to fill in and sign the required fields. All signature and required fields must be completed before you can submit.</span>
           </div>
-        )}
+        )} */}
 
         {/* Approver: signing pending warning */}
         {isApprover && !allSigningComplete && !recipientCompleted && (
@@ -843,125 +1445,195 @@ const PackagePublicView = () => {
           </div>
         )}
 
-        <h3 className="text-sm font-semibold text-gray-700 mb-3">
-          {isViewOnly ? 'Documents to Review' : isApprover ? 'Documents for Approval' : 'Documents'}
+        <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center justify-between">
+          <span>{isViewOnly ? 'Documents to Review' : isApprover ? 'Documents for Approval' : 'Documents'}</span>
+          {/* Phase 81.60 — Mobile sidebar toggle */}
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(true)}
+            className="lg:hidden inline-flex items-center gap-1 text-xs font-medium text-indigo-600 bg-indigo-50 border border-indigo-200 rounded px-2 py-1 hover:bg-indigo-100"
+            data-testid="mobile-sidebar-toggle"
+          >
+            <Menu className="h-3.5 w-3.5" />
+            {documents.length} {documents.length === 1 ? 'doc' : 'docs'}
+          </button>
         </h3>
 
-        <div className="space-y-3 mb-6">
-          {documents.map((doc, i) => {
-            const fields = getFieldsForDoc(doc);
-            const isActive = activeDocIndex === i;
-            const docValues = docFieldValues[doc.document_id] || {};
-            // Only fields interactive for the current recipient drive the progress UI.
-            // Hidden (unassigned + unfilled) and read-only (unassigned + filled) fields
-            // are excluded from the completion counter.
-            const activeFields = fields.filter(f => !f.field_hidden && !f.readOnly && f.__isAssigned !== false);
-            const completedCount = activeFields.filter(f => {
-              const v = docValues[f.id];
-              return v !== undefined && v !== null && String(v).trim() !== '';
-            }).length;
-            const hasFields = activeFields.length > 0;
+        {/* Phase 81.60 — Three-panel layout: sidebar | main viewer.
+            Sidebar shown on lg+ screens; drawer on mobile. Only the ACTIVE
+            doc renders in main to reduce clutter and let the PDF take the
+            full available width. */}
+        <div className="grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)] gap-4 mb-6">
+          {/* Sidebar — desktop sticky */}
+          <div className="hidden lg:block">
+            <div className="sticky top-24 max-h-[calc(100vh-7rem)]">
+              <PackageDocSidebar
+                documents={documents}
+                activeDocIndex={activeDocIndex}
+                onSelect={(idx) => setActiveDocIndex(idx)}
+                getDocStats={(doc, idx) => {
+                  const fields = getFieldsForDoc(doc);
+                  const values = docFieldValues[doc.document_id] || {};
+                  const dynamicHidden = hiddenFieldsByDoc[doc.document_id] || new Set();
+                  const isFilled = (f) => {
+                    const t = (f.type || f.field_type || '').toLowerCase();
+                    if (t === 'radio') {
+                      const g = f.groupName || f.group_name || f.id;
+                      const v = values[g];
+                      return v !== undefined && v !== null && String(v) !== '';
+                    }
+                    if (t === 'checkbox') return values[f.id] === true || values[f.id] === 'true';
+                    if (t === 'date') {
+                      if ((f.dateMode || 'auto') === 'auto') return true;
+                      const v = values[f.id];
+                      return v !== undefined && v !== null && String(v).trim() !== '';
+                    }
+                    const v = values[f.id];
+                    return v !== undefined && v !== null && String(v).trim() !== '';
+                  };
+                  const activeRaw = fields.filter((f) => {
+                    const t = (f.type || f.field_type || '').toLowerCase();
+                    if (['label', 'merge'].includes(t)) return false;
+                    if (f.field_hidden || f.field_disabled) return false;
+                    if (f.readOnly) return false;
+                    if (f.__isAssigned === false) return false;
+                    if (dynamicHidden.has(f.id)) return false;
+                    return true;
+                  });
+                  const seenGroups = new Set();
+                  const slots = [];
+                  for (const f of activeRaw) {
+                    const t = (f.type || f.field_type || '').toLowerCase();
+                    if (t === 'radio') {
+                      const g = f.groupName || f.group_name;
+                      if (g) {
+                        if (seenGroups.has(g)) continue;
+                        seenGroups.add(g);
+                      }
+                    }
+                    slots.push(f);
+                  }
+                  const filled = slots.filter(isFilled).length;
+                  const isComplete = slots.length > 0 && filled === slots.length;
+                  const isStarted = filled > 0 && !isComplete;
+                  let statusLabel = 'Pending';
+                  let statusTone = 'pending';
+                  if (doc.has_signed_version) {
+                    statusLabel = 'Completed';
+                    statusTone = 'complete';
+                  } else if (isComplete) {
+                    statusLabel = 'Ready';
+                    statusTone = 'complete';
+                  } else if (isStarted) {
+                    statusLabel = 'In Progress';
+                    statusTone = 'progress';
+                  }
+                  return { filled, total: slots.length, isComplete: isComplete || !!doc.has_signed_version, statusLabel, statusTone };
+                }}
+              />
+            </div>
+          </div>
 
-            return (
-              <div key={doc.document_id || i} className="bg-white rounded-xl border border-gray-200 overflow-hidden" data-testid={`public-doc-${i}`}>
-                <button
-                  onClick={() => setActiveDocIndex(isActive ? null : i)}
-                  className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50 transition-colors"
-                  data-testid={`doc-toggle-${i}`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`flex h-8 w-8 items-center justify-center rounded-lg font-bold text-sm ${
-                      isSigner && hasFields && completedCount === activeFields.length
-                        ? 'bg-emerald-50 text-emerald-600'
-                        : 'bg-indigo-50 text-indigo-600'
-                    }`}>
-                      {isSigner && hasFields && completedCount === activeFields.length
-                        ? <CheckCircle2 className="h-4 w-4" />
-                        : doc.order}
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium text-gray-800">{doc.document_name || 'Document'}</p>
-                      <div className="flex items-center gap-2">
-                        <p className="text-xs text-gray-400">{doc.status}</p>
-                        {isSigner && hasFields && (
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-                            completedCount === activeFields.length
-                              ? 'bg-emerald-50 text-emerald-600'
-                              : 'bg-amber-50 text-amber-600'
-                          }`} data-testid={`doc-field-status-${i}`}>
-                            {completedCount}/{activeFields.length} fields
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {isSigner && hasFields && <span className="text-xs text-indigo-500">Fill & Sign</span>}
-                    <ChevronRight className={`h-4 w-4 text-gray-400 transition-transform ${isActive ? 'rotate-90' : ''}`} />
-                  </div>
-                </button>
-
-                {isActive && (
-                  <div className="border-t border-gray-100">
-                    {/* Approver: signing not complete → block document access */}
-                    {isApprover && !allSigningComplete ? (
-                      <div className="flex flex-col items-center justify-center py-12 text-center px-6" data-testid={`doc-signing-pending-${i}`}>
-                        <Clock className="h-10 w-10 text-amber-400 mb-3" />
-                        <p className="text-sm font-medium text-gray-700">Signing is pending by the signer</p>
-                        <p className="text-xs text-gray-400 mt-1">This document will be available for review once the signer completes signing.</p>
-                      </div>
-                    ) : doc.document_id ? (
-                      <div>
-                        {/* Use InteractiveDocumentViewer for signers with fields */}
-                        {isSigner && fields.length > 0 ? (
-                          <div style={{ height: '70vh', minHeight: '550px' }} data-testid={`doc-interactive-viewer-${i}`}>
-                            <InteractiveDocumentViewer
-                              pdfUrl={`${API_URL}/api/docflow/documents/${doc.document_id}/view/unsigned`}
-                              fields={fields}
-                              onFieldsChange={(values) => handleDocFieldsChange(doc.document_id, values)}
-                              readOnly={false}
-                              showSignatureModal={(fieldId, isInit) => openSignatureModal(doc.document_id, fieldId, isInit)}
-                              externalFieldValues={docValues}
-                            />
-                          </div>
-                        ) : (
-                          /* Non-signer view: use signed version if available */
-                          <div className="px-4 pb-4">
-                            <div className="mt-3 space-y-3">
-                              <div className="bg-gray-100 rounded-lg overflow-hidden" style={{ height: '400px' }}>
-                                <iframe
-                                  src={doc.has_signed_version
-                                    ? `${API_URL}/api/docflow/documents/${doc.document_id}/view/signed`
-                                    : `${API_URL}/api/docflow/documents/${doc.document_id}/view/unsigned`}
-                                  className="w-full h-full border-0"
-                                  title={doc.document_name}
-                                  data-testid={`doc-iframe-${i}`}
-                                />
-                              </div>
-                              {isApprover && doc.has_signed_version && (
-                                <div className="flex items-center gap-2 text-xs text-emerald-600 bg-emerald-50 px-3 py-2 rounded-lg" data-testid={`doc-signed-hint-${i}`}>
-                                  <CheckCircle2 className="h-3.5 w-3.5" />
-                                  You are viewing the signed version of this document
-                                </div>
-                              )}
-                              {isSigner && (
-                                <div className="flex items-center gap-2 text-xs text-gray-500 bg-gray-50 px-3 py-2 rounded-lg" data-testid={`doc-review-hint-${i}`}>
-                                  <Eye className="h-3.5 w-3.5 text-indigo-500" />
-                                  Review this document before completing your signature below
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-gray-400 p-4">Document not yet generated.</p>
-                    )}
-                  </div>
-                )}
+          {/* Mobile drawer */}
+          {sidebarOpen && (
+            <div className="lg:hidden fixed inset-0 z-50 flex" data-testid="mobile-sidebar-drawer">
+              <div className="fixed inset-0 bg-black/40" onClick={() => setSidebarOpen(false)} />
+              <div className="relative w-72 max-w-[80vw] bg-white shadow-xl z-10 flex flex-col">
+                <PackageDocSidebar
+                  documents={documents}
+                  activeDocIndex={activeDocIndex}
+                  onSelect={(idx) => { setActiveDocIndex(idx); setSidebarOpen(false); }}
+                  onClose={() => setSidebarOpen(false)}
+                  getDocStats={(doc) => {
+                    // lightweight stats to avoid duplication; use hiddenFieldsByDoc
+                    const fields = getFieldsForDoc(doc);
+                    const values = docFieldValues[doc.document_id] || {};
+                    const dynamicHidden = hiddenFieldsByDoc[doc.document_id] || new Set();
+                    let total = 0, filled = 0;
+                    const seenGroups = new Set();
+                    for (const f of fields) {
+                      const t = (f.type || f.field_type || '').toLowerCase();
+                      if (['label', 'merge'].includes(t)) continue;
+                      if (f.field_hidden || f.field_disabled || f.readOnly) continue;
+                      if (f.__isAssigned === false) continue;
+                      if (dynamicHidden.has(f.id)) continue;
+                      if (t === 'radio') {
+                        const g = f.groupName || f.group_name;
+                        if (g) { if (seenGroups.has(g)) continue; seenGroups.add(g); }
+                      }
+                      total += 1;
+                      const hasVal = (() => {
+                        if (t === 'radio') {
+                          const g = f.groupName || f.group_name || f.id;
+                          return values[g] !== undefined && String(values[g] || '') !== '';
+                        }
+                        if (t === 'checkbox') return values[f.id] === true || values[f.id] === 'true';
+                        const v = values[f.id];
+                        return v !== undefined && v !== null && String(v).trim() !== '';
+                      })();
+                      if (hasVal) filled += 1;
+                    }
+                    const isComplete = total > 0 && filled === total;
+                    return {
+                      filled,
+                      total,
+                      isComplete: isComplete || !!doc.has_signed_version,
+                      statusLabel: doc.has_signed_version ? 'Completed' : isComplete ? 'Ready' : filled > 0 ? 'In Progress' : 'Pending',
+                      statusTone: doc.has_signed_version ? 'complete' : isComplete ? 'complete' : filled > 0 ? 'progress' : 'pending',
+                    };
+                  }}
+                />
               </div>
-            );
-          })}
+            </div>
+          )}
+
+          {/* Main content — render ALL docs but only display the active one.
+              We keep every section mounted so any local state (scroll, viewer
+              page) persists when the user switches between docs. */}
+          <div className="space-y-3 min-w-0">
+            {documents.map((doc, i) => {
+              const fields = getFieldsForDoc(doc);
+              const isActive = activeDocIndex === i;
+              const docValues = docFieldValues[doc.document_id] || {};
+              const recipientIds = [
+                pkg?.active_recipient?.id,
+                pkg?.active_recipient?.template_recipient_id,
+                pkg?.active_recipient?.recipient_id,
+                pkg?.active_recipient?.email,
+              ].filter(Boolean);
+              const assignedFieldIds = Array.isArray(pkg?.active_recipient?.assigned_components?.[doc.template_id])
+                ? pkg.active_recipient.assigned_components[doc.template_id]
+                : (Array.isArray(pkg?.active_recipient?.assigned_field_ids)
+                  ? pkg.active_recipient.assigned_field_ids
+                  : null);
+              return (
+                <div
+                  key={doc.document_id || i}
+                  style={{ display: isActive ? 'block' : 'none' }}
+                  data-testid={`package-doc-wrapper-${i}`}
+                >
+                  <PackageDocSection
+                    doc={doc}
+                    index={i}
+                    fields={fields}
+                    fieldValues={docValues}
+                    recipientIds={recipientIds}
+                    assignedFieldIds={assignedFieldIds}
+                    isActive={isActive}
+                    isSigner={isSigner}
+                    isApprover={isApprover}
+                    allSigningComplete={allSigningComplete}
+                    apiUrl={API_URL}
+                    hasSignedVersion={!!doc.has_signed_version}
+                    autoStartToken={autoStartTokens[doc.document_id] || 0}
+                    onToggle={() => { /* Phase 81.60: collapse disabled — sidebar controls active doc */ }}
+                    onFieldsChange={(values) => handleDocFieldsChange(doc.document_id, values)}
+                    showSignatureModal={(fieldId, isInit) => openSignatureModal(doc.document_id, fieldId, isInit)}
+                  />
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         {/* VIEW_ONLY: Mark Reviewed (confirmation via dialog) */}
@@ -974,75 +1646,17 @@ const PackagePublicView = () => {
             <button
               onClick={() => setConfirmDialog({ open: true, action: 'review' })}
               disabled={submitting}
-              className={`w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all ${
-                !submitting ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-              }`}
+              className={`w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all ${!submitting ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                }`}
               data-testid="mark-reviewed-btn"
             >
-              <CheckCircle2 className="h-4 w-4" /> Mark as Reviewed
+              {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />} {submitting ? 'Processing...' : 'Mark as Reviewed'}
             </button>
           </div>
         )}
 
         {/* SIGN: Field validation + Complete Signing */}
-        {isSigner && !recipientCompleted && (
-          <div className="bg-white rounded-xl border border-gray-200 p-5" data-testid="sign-action-section">
-            <h3 className="text-sm font-semibold text-gray-800 mb-2">Complete Your Signature</h3>
-            <p className="text-xs text-gray-500 mb-4">
-              {useFieldSigning
-                ? `Fill in all required fields across ${documents.length > 1 ? 'all documents' : 'the document'} above, then confirm your signature below.`
-                : `Review ${documents.length > 1 ? 'all documents' : 'the document'} above, then confirm your signature below.`
-              }
-            </p>
 
-            {/* Field completion status */}
-            {useFieldSigning && (
-              <div className="mb-4 space-y-2" data-testid="field-completion-status">
-                {documents.map((doc, i) => {
-                  const fields = getFieldsForDoc(doc);
-                  const activeFields = fields;
-                  if (activeFields.length === 0) return null;
-                  const docValues = docFieldValues[doc.document_id] || {};
-                  const done = activeFields.filter(f => {
-                    const v = docValues[f.id];
-                    return v !== undefined && v !== null && String(v).trim() !== '';
-                  }).length;
-                  const allDone = done === activeFields.length;
-                  return (
-                    <div key={doc.document_id} className={`flex items-center justify-between px-3 py-2 rounded-lg text-xs ${
-                      allDone ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'
-                    }`} data-testid={`field-status-doc-${i}`}>
-                      <span className="flex items-center gap-2">
-                        {allDone ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertCircle className="h-3.5 w-3.5" />}
-                        {doc.document_name}
-                      </span>
-                      <span className="font-medium">{done}/{activeFields.length}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Validation warning */}
-            {useFieldSigning && !allRequiredFieldsComplete && (
-              <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-4" data-testid="incomplete-fields-warning">
-                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                <span>Please fill in all required signature and signing fields in the documents above before completing.</span>
-              </div>
-            )}
-
-            <button
-              onClick={() => setConfirmDialog({ open: true, action: 'sign' })}
-              disabled={!canComplete || submitting}
-              className={`w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all ${
-                canComplete && !submitting ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-              }`}
-              data-testid="complete-signing-btn"
-            >
-              <FileText className="h-4 w-4" /> Complete Signing
-            </button>
-          </div>
-        )}
 
         {/* APPROVE_REJECT */}
         {isApprover && !recipientCompleted && (
@@ -1061,23 +1675,21 @@ const PackagePublicView = () => {
                   <button
                     onClick={() => setShowRejectDialog(true)}
                     disabled={submitting}
-                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold border transition-all ${
-                      !submitting ? 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100' : 'border-gray-200 text-gray-400 cursor-not-allowed'
-                    }`}
+                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold border transition-all ${!submitting ? 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100' : 'border-gray-200 text-gray-400 cursor-not-allowed'
+                      }`}
                     data-testid="reject-btn"
                   >
-                    <ThumbsDown className="h-4 w-4" /> Reject
+                    {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ThumbsDown className="h-4 w-4" />} {submitting ? 'Rejecting...' : 'Reject'}
                   </button>
                   <button
                     onClick={() => setConfirmDialog({ open: true, action: 'approve' })}
                     disabled={submitting}
-                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold transition-all ${
-                      !submitting ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                    }`}
+                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold transition-all ${!submitting ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                      }`}
                     data-testid="approve-btn"
                   >
-                    <ThumbsUp className="h-4 w-4" />
-                    Approve
+                    {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ThumbsUp className="h-4 w-4" />}
+                    {submitting ? 'Approving...' : 'Approve'}
                   </button>
                 </div>
               </>
@@ -1105,6 +1717,7 @@ const PackagePublicView = () => {
         fieldId={currentSignFieldId}
         isInitials={isInitialsField}
         signerName={pkg?.active_recipient?.name || ''}
+        fieldStyle={currentSignFieldStyle}
         assignedSignatureFieldIds={(() => {
           if (!currentSignDocId || !pkg) return [];
           const fieldType = isInitialsField ? 'initials' : 'signature';
@@ -1148,31 +1761,29 @@ const PackagePublicView = () => {
         open={confirmDialog.open}
         submitting={submitting}
         title={
-          confirmDialog.action === 'sign'    ? 'Confirm signing' :
-          confirmDialog.action === 'approve' ? 'Confirm approval' :
-          confirmDialog.action === 'review'  ? 'Confirm review' :
-                                               'Are you sure?'
+          confirmDialog.action === 'sign' ? 'Confirm signing' :
+            confirmDialog.action === 'approve' ? 'Confirm approval' :
+              confirmDialog.action === 'review' ? 'Confirm review' :
+                'Are you sure?'
         }
         message={
           confirmDialog.action === 'sign'
             ? (useFieldSigning
-                ? 'You have completed all required fields. Are you sure you want to submit your signature?'
-                : `Are you sure you want to sign ${documents.length > 1 ? 'all documents in this package' : 'this document'}?`)
+              ? 'You have completed all required fields. Are you sure you want to submit your signature?'
+              : `Are you sure you want to sign ${documents.length > 1 ? 'all documents in this package' : 'this document'}?`)
             : confirmDialog.action === 'approve'
               ? `Are you sure you want to approve ${documents.length > 1 ? 'this package' : 'this document'}? This action cannot be undone.`
               : `Are you sure you have reviewed ${documents.length > 1 ? 'all documents in' : 'the document in'} this package and want to submit your review?`
         }
         confirmLabel={
-          confirmDialog.action === 'sign'    ? 'Confirm & Sign' :
-          confirmDialog.action === 'approve' ? 'Confirm & Approve' :
-                                               'Confirm & Submit'
+          confirmDialog.action === 'sign' ? 'Confirm & Sign' :
+            confirmDialog.action === 'approve' ? 'Confirm & Approve' :
+              'Confirm & Submit'
         }
         confirmTone={confirmDialog.action === 'approve' ? 'emerald' : 'indigo'}
         onCancel={() => setConfirmDialog({ open: false, action: null })}
         onConfirm={async () => {
           const action = confirmDialog.action;
-          // Close immediately so the spinner on the target button takes over.
-          setConfirmDialog({ open: false, action: null });
           if (action === 'sign') {
             if (useFieldSigning) await handleSignWithFields();
             else await handleAction('mark-signed', 'sign');
@@ -1181,6 +1792,7 @@ const PackagePublicView = () => {
           } else if (action === 'review') {
             await handleAction('mark-reviewed', 'mark as reviewed');
           }
+          setConfirmDialog({ open: false, action: null });
         }}
       />
 
@@ -1196,7 +1808,10 @@ const PackagePublicView = () => {
             <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} placeholder="Enter your reason for rejection..." className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 mb-4" rows={3} data-testid="reject-reason-input" />
             <div className="flex justify-end gap-3">
               <button onClick={() => { setShowRejectDialog(false); setRejectReason(''); }} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800" data-testid="cancel-reject-btn">Cancel</button>
-              <button onClick={() => handleAction('reject', 'reject')} disabled={submitting || !rejectReason.trim()} className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50" data-testid="confirm-reject-btn">{submitting ? 'Rejecting...' : 'Reject & Void'}</button>
+              <button onClick={() => handleAction('reject', 'reject')} disabled={submitting || !rejectReason.trim()} className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center gap-2" data-testid="confirm-reject-btn">
+                {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                {submitting ? 'Rejecting...' : 'Reject & Void'}
+              </button>
             </div>
           </div>
         </div>
@@ -1214,7 +1829,10 @@ const PackagePublicView = () => {
             <textarea value={voidReason} onChange={(e) => setVoidReason(e.target.value)} placeholder="Enter the reason for voiding..." className="w-full border border-gray-300 rounded-lg p-3 text-sm focus:outline-none focus:ring-2 focus:ring-red-500 mb-4" rows={3} data-testid="void-reason-input" />
             <div className="flex justify-end gap-3">
               <button onClick={() => { setShowVoidDialog(false); setVoidReason(''); }} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800" data-testid="cancel-void-btn">Cancel</button>
-              <button onClick={handleVoidPublic} disabled={voiding || !voidReason.trim()} className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50" data-testid="confirm-void-btn">{voiding ? 'Voiding...' : 'Void Package'}</button>
+              <button onClick={handleVoidPublic} disabled={voiding || !voidReason.trim()} className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded-lg hover:bg-red-700 disabled:opacity-50 flex items-center gap-2" data-testid="confirm-void-btn">
+                {voiding && <Loader2 className="h-4 w-4 animate-spin" />}
+                {voiding ? 'Voiding...' : 'Void Package'}
+              </button>
             </div>
           </div>
         </div>

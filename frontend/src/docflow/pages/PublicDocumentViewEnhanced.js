@@ -7,9 +7,13 @@ import InteractiveDocumentViewer, { formatLocalMMDDYYYY, formatDate, DATE_FORMAT
 import SignatureModal from '../components/SignatureModal';
 import SignatureReusePrompt from '../components/SignatureReusePrompt';
 import ConsentScreen, { hasAcceptedConsent } from '../components/ConsentScreen';
+import SmsDisclaimerModal from '../components/SmsDisclaimerModal';
+import SmsDeclineScreen from '../components/SmsDeclineScreen';
+import { buildSmsAckKey, hasAcceptedSms, persistSmsAck } from '../utils/smsAck';
 import ConfirmSubmitDialog from '../components/ConfirmSubmitDialog';
 import useSessionSignature from '../hooks/useSessionSignature';
 import useGuidedFillIn from '../hooks/useGuidedFillIn';
+import { emailError as validateEmail } from '../utils/emailValidator';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL || '';
 
@@ -27,6 +31,17 @@ const PublicDocumentViewEnhanced = () => {
   // blocking modal and disable every action. State toggled by the background
   // poll below and the initial load.
   const [accessRevoked, setAccessRevoked] = useState(false);
+  // Phase 81.67 — full document/package void: when set, render a clean "Voided" banner.
+  const [voidedInfo, setVoidedInfo] = useState(null);
+  // Phase 81 — SMS disclaimer acknowledgment (not OTP verification).
+  const [smsRequired, setSmsRequired] = useState(false);
+  // smsMode: whether actual SMS sending is enabled (independent of popup).
+  const [smsModeEnabled, setSmsModeEnabled] = useState(false);
+  const [smsAcknowledged, setSmsAcknowledged] = useState(false);
+  // Phase 81.83 — Decline shows a clean exit screen; not persisted, so re-opening
+  // the link prompts again.
+  const [smsDeclined, setSmsDeclined] = useState(false);
+  const [smsPhoneMasked, setSmsPhoneMasked] = useState('');
   const [template, setTemplate] = useState({ field_placements: [], recipients: [] });
   const [loading, setLoading] = useState(true);
   const [signing, setSigning] = useState(false);
@@ -34,6 +49,7 @@ const PublicDocumentViewEnhanced = () => {
   const [fieldValues, setFieldValues] = useState({});
   const [signatureModalOpen, setSignatureModalOpen] = useState(false);
   const [currentFieldId, setCurrentFieldId] = useState(null);
+  const [currentFieldStyle, setCurrentFieldStyle] = useState(null);
   const [isInitialsField, setIsInitialsField] = useState(false);
   // Reuse prompt state (shows when a cached signature exists for this session)
   const [reusePrompt, setReusePrompt] = useState({ open: false, fieldId: null, isInitials: false });
@@ -48,6 +64,9 @@ const PublicDocumentViewEnhanced = () => {
 
   // User identity + verification
   const [formData, setFormData] = useState({ signer_name: '', signer_email: '' });
+  // Phase 81.28 — frontend-only email validation state.
+  const [emailErr, setEmailErr] = useState('');
+  const [emailTouched, setEmailTouched] = useState(false);
   const [isVerified, setIsVerified] = useState(false);
   const [verificationStep, setVerificationStep] = useState(1); // 1: Details, 2: OTP
   const [otpCode, setOtpCode] = useState('');
@@ -55,7 +74,11 @@ const PublicDocumentViewEnhanced = () => {
   const [instantiating, setInstantiating] = useState(false);
 
   const signingTypes = new Set(['signature', 'initials', 'date']);
-  const interactiveTypes = new Set(['signature', 'initials', 'date', 'text', 'checkbox', 'radio', 'dropdown']);
+  // Phase 81.11 — `merge` is interactive (especially with fallbackToInput).
+  // Including it here ensures merge fields owned by future recipients are
+  // marked field_hidden (not just readOnly) so they're completely hidden
+  // from the current signer's view.
+  const interactiveTypes = new Set(['signature', 'initials', 'date', 'text', 'checkbox', 'radio', 'dropdown', 'merge']);
   const templateRecipients = template?.recipients || [];
 
   // Session signature cache — keyed by document token + signer email so
@@ -65,10 +88,10 @@ const PublicDocumentViewEnhanced = () => {
 
   // Consent screen state — required BEFORE the document view for all roles.
   const [consentAccepted, setConsentAccepted] = useState(false);
-  useEffect(() => {
-    // Hydrate acceptance state when the session key becomes known
-    if (sessionKey) setConsentAccepted(hasAcceptedConsent(sessionKey));
-  }, [sessionKey]);
+  // useEffect(() => {
+  //   // Hydrate acceptance state when the session key becomes known
+  //   if (sessionKey) setConsentAccepted(hasAcceptedConsent(sessionKey));
+  // }, [sessionKey]);
 
   // Guided fill-in: track conditional-logic hidden fields (emitted by viewer)
   const [hiddenFieldIds, setHiddenFieldIds] = useState(new Set());
@@ -106,6 +129,13 @@ const PublicDocumentViewEnhanced = () => {
     assignedFieldIds: _assignedFieldIds,
   });
 
+  // Phase 81.79 — Controlled scroll on explicit user actions only.
+  const [scrollToken, setScrollToken] = useState(0);
+  const bumpScroll = useCallback(() => setScrollToken((t) => t + 1), []);
+  const handleStartGuided = useCallback(() => { startGuided(); bumpScroll(); }, [startGuided, bumpScroll]);
+  const handleNextGuided = useCallback(() => { goToNextField(); bumpScroll(); }, [goToNextField, bumpScroll]);
+  const handlePrevGuided = useCallback(() => { goToPrevField(); bumpScroll(); }, [goToPrevField, bumpScroll]);
+
   // ── Load initial document or generator info ──
   useEffect(() => {
     loadInitial();
@@ -120,9 +150,28 @@ const PublicDocumentViewEnhanced = () => {
     const check = async () => {
       try {
         const resp = await fetch(`${API_URL}/api/docflow/documents/public/${activeToken}`);
+        if (cancelled) return;
+        // Phase 81.67 (security fix) — mid-session void detection: if the
+        // sender voids the document while the recipient has it open, the
+        // next poll returns 410 with code='document_voided' and we flip
+        // the page to the voided banner immediately.
+        if (resp.status === 410) {
+          try {
+            const errBody = await resp.json();
+            const detail = errBody?.detail;
+            if (detail && typeof detail === 'object' && detail.code === 'document_voided') {
+              setVoidedInfo({
+                entity: 'document',
+                name: detail.document_name || '',
+                reason: detail.void_reason || '',
+                voidedAt: detail.voided_at || null,
+              });
+              return;
+            }
+          } catch (_) { /* fall through */ }
+        }
         if (!resp.ok) return;
         const data = await resp.json();
-        if (cancelled) return;
         if (data?.recipient_voided || data?.active_recipient?.voided) {
           setAccessRevoked(true);
         }
@@ -137,6 +186,21 @@ const PublicDocumentViewEnhanced = () => {
       setLoading(true);
       const response = await fetch(`${API_URL}/api/docflow/documents/public/${token}`);
       if (!response.ok) {
+        // Phase 81.67 — detect entity-voided 410 with structured detail.
+        if (response.status === 410) {
+          let detail = null;
+          try { detail = (await response.json())?.detail; } catch (_) { /* empty */ }
+          if (detail && typeof detail === 'object' && detail.code === 'document_voided') {
+            setVoidedInfo({
+              entity: 'document',
+              name: detail.document_name || '',
+              reason: detail.void_reason || '',
+              voidedAt: detail.voided_at || null,
+            });
+            setLoading(false);
+            return;
+          }
+        }
         throw new Error('Document not found or expired');
       }
       const data = await response.json();
@@ -155,6 +219,39 @@ const PublicDocumentViewEnhanced = () => {
       // Phase 80: if already voided, flip the revoked state immediately.
       if (data?.recipient_voided || data?.active_recipient?.voided) {
         setAccessRevoked(true);
+      }
+      // Phase 81: Surface SMS disclaimer requirement to the modal gate.
+      // Phase 81.4 — only show disclaimer when the active recipient still has
+      // a pending action (signer or approver). For viewers, completed signers,
+      // already-approved approvers, voided/declined/expired recipients, or
+      // when the document itself is in a terminal state, keep the popup
+      // suppressed so they reopen straight into the read-only document.
+      const ar = data?.active_recipient || {};
+      const recRole = String(ar.role_type || ar.role || 'SIGN').toUpperCase();
+      const recStatus = String(ar.status || '').toLowerCase();
+      const docStatus = String(data?.status || data?.document_status || '').toLowerCase();
+      const terminalRecipient = ['signed', 'completed', 'approved', 'rejected', 'declined', 'voided', 'expired', 'skipped'].includes(recStatus);
+      const terminalDoc = ['completed', 'signed', 'voided', 'expired', 'declined', 'cancelled'].includes(docStatus);
+      const isActionableRole = recRole === 'SIGN' || recRole === 'APPROVE_REJECT' || recRole === 'APPROVER' || recRole === 'SIGNER';
+      const recipientIsActionable = isActionableRole && !terminalRecipient && !terminalDoc && !data?.recipient_voided && !ar.voided;
+
+      // sms_mode controls SMS sending; sms_required (driven by sms_consent) controls popup.
+      setSmsModeEnabled(!!data?.sms_mode);
+
+      if (data?.sms_required && recipientIsActionable) {
+        setSmsRequired(true);
+        // Phase 81.83 — honour persisted acceptance per (doc, token, recipient).
+        const ackKey = buildSmsAckKey({
+          scope: 'doc',
+          id: data?.id || data?.document_id,
+          token,
+          extra: ar?.email || ar?.id,
+        });
+        setSmsAcknowledged(hasAcceptedSms(ackKey));
+        setSmsPhoneMasked(data?.recipient_phone_masked || '');
+      } else {
+        setSmsRequired(false);
+        setSmsAcknowledged(true); // Skip to signing flow if SMS not required / not actionable
       }
       populateDocState(data);
     } catch (error) {
@@ -231,10 +328,17 @@ const PublicDocumentViewEnhanced = () => {
 
   // ── Generator flow: Instantiate a new child document ──
   const handleInstantiate = async () => {
-    if (!formData.signer_name || !formData.signer_email) {
-      toast.error('Please enter your name and email');
+    // Phase 81.28 — frontend-only email validation guard. Mirrors backend
+    // requirements without changing the API contract.
+    const err = validateEmail(formData.signer_email, { required: true });
+    if (!formData.signer_name?.trim() || err) {
+      setEmailTouched(true);
+      setEmailErr(err);
+      if (!formData.signer_name?.trim() && !err) toast.error('Please enter your name');
+      else if (err) toast.error(err);
       return;
     }
+    setEmailErr('');
 
     try {
       setInstantiating(true);
@@ -249,8 +353,20 @@ const PublicDocumentViewEnhanced = () => {
       });
 
       if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.detail || 'Failed to create document instance');
+        const err = await response.json().catch(() => ({}));
+        // Phase 81.67 (security fix) — handle voided generator: surface the
+        // full-page banner instead of a useless [object Object] toast.
+        if (response.status === 410 && err?.detail && typeof err.detail === 'object' && err.detail.code === 'document_voided') {
+          setVoidedInfo({
+            entity: 'document',
+            name: err.detail.document_name || '',
+            reason: err.detail.void_reason || '',
+            voidedAt: err.detail.voided_at || null,
+          });
+          return;
+        }
+        const msg = typeof err?.detail === 'string' ? err.detail : (err?.detail?.message || 'Failed to create document instance');
+        throw new Error(msg);
       }
 
       const result = await response.json();
@@ -343,25 +459,26 @@ const PublicDocumentViewEnhanced = () => {
   };
 
   // ── Signature handling ──
-  const openSignatureModalDirect = (fieldId, isInitials = false) => {
+  const openSignatureModalDirect = (fieldId, isInitials = false, field = null) => {
     setCurrentFieldId(fieldId);
     setIsInitialsField(isInitials);
+    setCurrentFieldStyle(field?.style || null);
     setSignatureModalOpen(true);
   };
 
-  const showSignatureModal = (fieldId, isInitials = false) => {
+  const showSignatureModal = (fieldId, isInitials = false, field = null) => {
     // If the field is already signed, just reopen the full modal (legacy behavior).
     if (fieldValues[fieldId]) {
-      openSignatureModalDirect(fieldId, isInitials);
+      openSignatureModalDirect(fieldId, isInitials, field);
       return;
     }
     // If a cached signature exists for this type → show reuse prompt first.
     const cached = getSignature(isInitials ? 'initials' : 'signature');
     if (cached) {
-      setReusePrompt({ open: true, fieldId, isInitials });
+      setReusePrompt({ open: true, fieldId, isInitials, fieldStyle: field?.style });
       return;
     }
-    openSignatureModalDirect(fieldId, isInitials);
+    openSignatureModalDirect(fieldId, isInitials, field);
   };
 
   const handleReuseAccept = () => {
@@ -374,9 +491,9 @@ const PublicDocumentViewEnhanced = () => {
   };
 
   const handleReuseDrawNew = () => {
-    const { fieldId, isInitials } = reusePrompt;
+    const { fieldId, isInitials, fieldStyle } = reusePrompt;
     setReusePrompt({ open: false, fieldId: null, isInitials: false });
-    openSignatureModalDirect(fieldId, isInitials);
+    openSignatureModalDirect(fieldId, isInitials, { style: fieldStyle });
   };
 
   const handleSignatureSave = (fieldId, signatureData, applyToFieldIds) => {
@@ -425,29 +542,55 @@ const PublicDocumentViewEnhanced = () => {
     if (!formData.signer_name) return false;
     const activeRcpt = docData?.active_recipient || {};
     if (activeRcpt.email && !formData.signer_email) return false;
-    
+
     const assignedIds = activeRcpt?.assigned_field_ids || [];
     const hasAssignments = assignedIds.length > 0;
+    const placements = template?.field_placements || [];
 
-    const requiredFields = (template?.field_placements || []).filter(f => {
-      if (!interactiveTypes.has(f.type)) return false;
-      if (!f.required) return false;
-      
+    const isOwnedByActive = (f) => {
       const fieldAssignedTo = f.assigned_to || f.recipient_id;
       if (fieldAssignedTo) {
         return fieldAssignedTo === activeRcpt?.template_recipient_id || fieldAssignedTo === activeRcpt?.id;
       }
-      if (hasAssignments) {
-        return assignedIds.includes(f.id);
-      }
+      if (hasAssignments) return assignedIds.includes(f.id);
       return true;
-    });
+    };
 
-    return requiredFields.every(field => {
+    // Phase 81.63 — Collect RADIO groups that have at least one required,
+    // assigned, visible placement. A group is "satisfied" when ANY of its
+    // placements' group-key stores a non-empty value.
+    const requiredRadioGroups = new Map(); // key -> Set<groupName>
+    const requiredNonRadioFields = [];
+    for (const f of placements) {
+      if (!interactiveTypes.has(f.type)) continue;
+      if (!f.required) continue;
+      if (hiddenFieldIds && hiddenFieldIds.has(f.id)) continue;
+      if (!isOwnedByActive(f)) continue;
+      if (f.type === 'radio') {
+        const group = f.groupName || f.group_name || f.id;
+        requiredRadioGroups.set(group, true);
+      } else {
+        requiredNonRadioFields.push(f);
+      }
+    }
+
+    // Non-radio: storage key is the placement id.
+    for (const field of requiredNonRadioFields) {
       const v = fieldValues[field.id];
-      if (field.type === 'checkbox') return v === true || v === 'true';
-      return v !== undefined && v !== null && String(v).trim() !== '';
-    });
+      if (field.type === 'checkbox') {
+        if (!(v === true || v === 'true')) return false;
+      } else {
+        if (v === undefined || v === null || String(v).trim() === '') return false;
+      }
+    }
+
+    // Radio: storage key is groupName; any non-empty value satisfies.
+    for (const group of requiredRadioGroups.keys()) {
+      const v = fieldValues[group];
+      if (v === undefined || v === null || String(v).trim() === '') return false;
+    }
+
+    return true;
   };
 
   const handleSign = async () => {
@@ -553,12 +696,13 @@ const PublicDocumentViewEnhanced = () => {
           const drawValue = field.type === 'date'
             ? (fieldValue || formatDate(new Date(), dateFmt))
             : fieldValue;
-          // Match the frontend signing-page clamp (resolveResponsiveFontSize)
-          // so text never outgrows the author's rectangle in the final PDF.
+          // Mirror resolveResponsiveFontSize from the viewer: same 0.85 height
+          // multiplier and 2.5 width divisor, no hard cap, so the PDF matches
+          // the live signing preview at any authored font size.
           const baseFs = (parseInt(field.style?.fontSize || '10') || 10) * scale;
-          const hCap = Math.max(6, (ptHeight - 4) * 0.70);
-          const wCap = Math.max(6, ptWidth / 3);
-          const fSize = Math.max(6, Math.min(baseFs, hCap, wCap, 24));
+          const hCap = Math.max(6, (ptHeight - 2 * scale) * 0.85);
+          const wCap = Math.max(6, ptWidth / 2.5);
+          const fSize = Math.max(6, Math.min(baseFs, hCap, wCap));
           const pad = 5 * scale;
           const textW = measureTextWidth(drawValue, fSize);
           let xOff;
@@ -627,11 +771,14 @@ const PublicDocumentViewEnhanced = () => {
           const mField = field.merge_field || field.mergeField || '';
           const fullKey = `${mergeObj}.${mField}`;
           const mergeValue = fieldValue || fieldValues[fullKey] || fieldValues[mField] || field.defaultValue || '';
-          if (mergeValue) {
+          // Skip raw merge patterns ({{...}}) — they are UI placeholders, not real data.
+          // Also skip when showLabelInPreview is false and no real value was resolved.
+          const isMergePattern = /^\{\{.*\}\}$/.test(mergeValue);
+          if (mergeValue && !isMergePattern) {
             const baseFs = (parseInt(field.style?.fontSize || '10') || 10) * scale;
-            const hCap = Math.max(6, (ptHeight - 4) * 0.70);
-            const wCap = Math.max(6, ptWidth / 3);
-            const fSize = Math.max(6, Math.min(baseFs, hCap, wCap, 24));
+            const hCap = Math.max(6, (ptHeight - 2 * scale) * 0.85);
+            const wCap = Math.max(6, ptWidth / 2.5);
+            const fSize = Math.max(6, Math.min(baseFs, hCap, wCap));
             const textW = measureTextWidth(mergeValue, fSize);
             const pad = 2 * scale;
             let xOff;
@@ -642,9 +789,9 @@ const PublicDocumentViewEnhanced = () => {
           }
         } else if (field.type === 'label' && field.text) {
           const baseFs = (parseInt(field.style?.fontSize || '12') || 12) * scale;
-          const hCap = Math.max(6, (ptHeight - 4) * 0.70);
-          const wCap = Math.max(6, ptWidth / 3);
-          const labelSize = Math.max(6, Math.min(baseFs, hCap, wCap, 24));
+          const hCap = Math.max(6, (ptHeight - 2 * scale) * 0.85);
+          const wCap = Math.max(6, ptWidth / 2.5);
+          const labelSize = Math.max(6, Math.min(baseFs, hCap, wCap));
           const pad = 2 * scale;
           const textW = measureTextWidth(field.text, labelSize);
           let xOff;
@@ -790,15 +937,30 @@ const PublicDocumentViewEnhanced = () => {
                   <input
                     type="email"
                     value={formData.signer_email}
-                    onChange={(e) => setFormData({ ...formData, signer_email: e.target.value })}
-                    className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setFormData({ ...formData, signer_email: v });
+                      // Live-clear the error as the user fixes it.
+                      if (emailTouched) setEmailErr(validateEmail(v, { required: true }));
+                    }}
+                    onBlur={() => {
+                      setEmailTouched(true);
+                      setEmailErr(validateEmail(formData.signer_email, { required: true }));
+                    }}
+                    autoComplete="email"
+                    inputMode="email"
+                    aria-invalid={!!(emailErr && emailTouched)}
+                    className={`w-full px-4 py-2.5 border rounded-lg outline-none transition-all ${emailErr && emailTouched ? 'border-rose-400 focus:ring-2 focus:ring-rose-400 bg-rose-50/40' : 'border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent'}`}
                     placeholder="you@example.com"
                     data-testid="signer-email-input"
                   />
+                  {emailErr && emailTouched && (
+                    <p className="text-[11px] text-rose-600 mt-1" data-testid="signer-email-error">{emailErr}</p>
+                  )}
                 </div>
                 <button
                   onClick={handleInstantiate}
-                  disabled={instantiating || !formData.signer_name || !formData.signer_email}
+                  disabled={instantiating || !formData.signer_name || !formData.signer_email || !!validateEmail(formData.signer_email, { required: true })}
                   className="w-full bg-indigo-600 text-white font-semibold py-3 rounded-lg hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                   data-testid="access-document-btn"
                 >
@@ -849,6 +1011,46 @@ const PublicDocumentViewEnhanced = () => {
     );
   }
 
+  // ── Phase 81.67 — Document/Package voided full-screen banner ──
+  if (voidedInfo) {
+    return (
+      <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-slate-50 to-rose-50 p-6" data-testid="document-voided-view">
+        <div className="bg-white rounded-2xl shadow-xl max-w-md w-full p-8 text-center border border-rose-100">
+          <div className="h-16 w-16 rounded-full bg-rose-100 flex items-center justify-center mx-auto mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 text-rose-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M18.364 5.636l-12.728 12.728M5.636 5.636l12.728 12.728" />
+            </svg>
+          </div>
+          <h2 className="text-xl font-bold text-gray-900 mb-2">
+            This {voidedInfo.entity} has been voided
+          </h2>
+          {voidedInfo.name && (
+            <p className="text-sm text-gray-600 mb-3">
+              <span className="font-semibold">{voidedInfo.name}</span>
+            </p>
+          )}
+          <p className="text-sm text-gray-600">
+            The sender has cancelled this signing request. You no longer have access to view or sign this {voidedInfo.entity}.
+          </p>
+          {voidedInfo.reason && (
+            <div className="mt-4 p-3 bg-rose-50 border border-rose-200 rounded-lg text-left">
+              <div className="text-xs font-semibold text-rose-800 mb-1">Reason for cancellation:</div>
+              <div className="text-sm text-rose-700">{voidedInfo.reason}</div>
+            </div>
+          )}
+          {voidedInfo.voidedAt && (
+            <div className="mt-3 text-xs text-gray-400">
+              Cancelled on {new Date(voidedInfo.voidedAt).toLocaleString()}
+            </div>
+          )}
+          <p className="text-xs text-gray-500 mt-6">
+            If you believe this was a mistake, please contact the sender directly.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   // ── Document not found ──
   if (!docData) {
     return (
@@ -863,8 +1065,46 @@ const PublicDocumentViewEnhanced = () => {
   }
 
   // ── Document View ──
+  // SMS Disclaimer gate: shown as full screen overlay when sms_mode=true
+  // and recipient hasn't acknowledged yet. Blocks all document content.
+  if (!accessRevoked && smsRequired && smsDeclined && activeToken) {
+    return <SmsDeclineScreen onReconsider={() => setSmsDeclined(false)} />;
+  }
+  if (!accessRevoked && smsRequired && !smsAcknowledged && activeToken) {
+    return (
+      <SmsDisclaimerModal
+        token={activeToken}
+        scope="document"
+        documentType="document"
+        smsMode={smsModeEnabled}
+        phoneMasked={smsPhoneMasked}
+        documentName={docData?.template_name}
+        documentId={docData?.id}
+        recipientId={docData?.active_recipient?.id}
+        recipientName={docData?.active_recipient?.name || formData?.signer_name}
+        recipientEmail={docData?.active_recipient?.email}
+        companyName={docData?.tenant_name}
+        onContinue={() => {
+          // Phase 81.83 — persist per-recipient acceptance.
+          const ar = docData?.active_recipient || {};
+          const ackKey = buildSmsAckKey({
+            scope: 'doc',
+            id: docData?.id,
+            token: activeToken,
+            extra: ar?.email || ar?.id,
+          });
+          persistSmsAck(ackKey);
+          setSmsAcknowledged(true);
+        }}
+        onDecline={() => {
+          setSmsDeclined(true);
+        }}
+      />
+    );
+  }
+
   // Consent gate: shown once per signer session (only when verified)
-  const shouldShowConsent = isVerified && sessionKey && !consentAccepted &&
+  const shouldShowConsent = sessionKey && !consentAccepted &&
     docData?.status !== 'completed' && docData?.status !== 'signed';
 
   return (
@@ -902,13 +1142,18 @@ const PublicDocumentViewEnhanced = () => {
       )}
       {/* E-Sign Disclosure / Review and Continue */}
       <ConsentScreen
-        open={shouldShowConsent && !accessRevoked}
+        open={shouldShowConsent && !accessRevoked }
         sessionKey={sessionKey}
         documentName={docData?.template_name}
+        documentId={docData?.id}
         recipientName={formData?.signer_name}
+        recipientEmail={docData?.active_recipient?.email}
+        token={activeToken}
+        companyName={docData?.tenant_name}
         onContinue={() => setConsentAccepted(true)}
+        submitting={signing}
       />
-      <div className={`max-w-7xl mx-auto px-3 sm:px-4 ${accessRevoked ? 'pointer-events-none select-none opacity-60' : ''}`}>
+      <div className={`max-w-[1600px] mx-auto px-3 sm:px-4 lg:px-6 ${accessRevoked ? 'pointer-events-none select-none opacity-60' : ''}`}>
         {/* Header */}
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4 sm:p-6 mb-4 sm:mb-6">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4">
@@ -1074,7 +1319,7 @@ const PublicDocumentViewEnhanced = () => {
                 <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0 w-full sm:w-auto justify-end flex-wrap">
                   {showPrev && (
                     <button
-                      onClick={goToPrevField}
+                      onClick={handlePrevGuided}
                       className="inline-flex items-center gap-1 sm:gap-1.5 px-2.5 sm:px-3 py-2 text-xs sm:text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors shadow-sm min-h-[40px]"
                       data-testid="guided-prev-btn"
                     >
@@ -1084,7 +1329,7 @@ const PublicDocumentViewEnhanced = () => {
                   )}
                   {showStart && (
                     <button
-                      onClick={startGuided}
+                      onClick={handleStartGuided}
                       className="inline-flex items-center gap-1 sm:gap-1.5 px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm min-h-[40px]"
                       data-testid="guided-start-btn"
                     >
@@ -1094,7 +1339,7 @@ const PublicDocumentViewEnhanced = () => {
                   )}
                   {showNext && (
                     <button
-                      onClick={goToNextField}
+                      onClick={handleNextGuided}
                       className="inline-flex items-center gap-1 sm:gap-1.5 px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm min-h-[40px]"
                       data-testid="guided-next-btn"
                     >
@@ -1120,7 +1365,7 @@ const PublicDocumentViewEnhanced = () => {
                         : undefined
                     }
                   >
-                    <CheckCircle className="h-4 w-4" />
+                    {signing ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle className="h-4 w-4" />}
                     <span>{signing ? 'Signing...' : 'Finish'}</span>
                   </button>
                 </div>
@@ -1201,19 +1446,51 @@ const PublicDocumentViewEnhanced = () => {
                                   <input
                                     type="email"
                                     value={formData.signer_email}
-                                    onChange={(e) => !emailPreFilled && setFormData({ ...formData, signer_email: e.target.value })}
+                                    onChange={(e) => {
+                                      if (emailPreFilled) return;
+                                      const v = e.target.value;
+                                      setFormData({ ...formData, signer_email: v });
+                                      if (emailTouched) setEmailErr(validateEmail(v, { required: true }));
+                                    }}
+                                    onBlur={() => {
+                                      if (emailPreFilled) return;
+                                      setEmailTouched(true);
+                                      setEmailErr(validateEmail(formData.signer_email, { required: true }));
+                                    }}
                                     disabled={emailPreFilled}
-                                    className={`w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all ${emailPreFilled ? 'bg-gray-100 text-gray-600 cursor-not-allowed' : ''}`}
+                                    autoComplete="email"
+                                    inputMode="email"
+                                    aria-invalid={!!(emailErr && emailTouched)}
+                                    className={`w-full px-4 py-2.5 border rounded-lg outline-none transition-all ${
+                                      emailPreFilled
+                                        ? 'bg-gray-100 text-gray-600 cursor-not-allowed border-gray-300'
+                                        : (emailErr && emailTouched)
+                                          ? 'border-rose-400 focus:ring-2 focus:ring-rose-400 bg-rose-50/40'
+                                          : 'border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-transparent'
+                                    }`}
                                     placeholder="you@example.com"
                                     data-testid="signer-email-input"
                                   />
+                                  {!emailPreFilled && emailErr && emailTouched && (
+                                    <p className="text-[11px] text-rose-600 mt-1" data-testid="signer-email-error">{emailErr}</p>
+                                  )}
                                 </div>
                               </>
                             );
                           })()}
                           <button
-                            onClick={handleSendOtp}
-                            disabled={verifying || !formData.signer_name || !formData.signer_email}
+                            onClick={() => {
+                              // Phase 81.28 — pre-validate before triggering OTP send.
+                              const err = validateEmail(formData.signer_email, { required: true });
+                              if (err) {
+                                setEmailTouched(true);
+                                setEmailErr(err);
+                                toast.error(err);
+                                return;
+                              }
+                              handleSendOtp();
+                            }}
+                            disabled={verifying || !formData.signer_name || !formData.signer_email || !!validateEmail(formData.signer_email, { required: true })}
                             className="w-full bg-indigo-600 text-white font-semibold py-3 rounded-lg hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
                             data-testid="send-otp-btn"
                           >
@@ -1369,21 +1646,83 @@ const PublicDocumentViewEnhanced = () => {
                       const hasAssignments = assignedIds.length > 0;
                       const fieldAssignedTo = f.assigned_to || f.recipient_id;
                       let isAssigned = true;
+                      let hadExplicitOwnership = false;
                       if (fieldAssignedTo) {
                         // Field has explicit assignment — check it matches current recipient
-                        isAssigned = fieldAssignedTo === activeRcpt?.template_recipient_id || fieldAssignedTo === activeRcpt?.id;
+                        hadExplicitOwnership = true;
+                        isAssigned = fieldAssignedTo === activeRcpt?.template_recipient_id
+                                  || fieldAssignedTo === activeRcpt?.id;
                       } else if (hasAssignments && interactiveTypes.has(f.type)) {
+                        // Document-level explicit assignment list (per recipient)
+                        hadExplicitOwnership = true;
                         isAssigned = assignedIds.includes(f.id);
                       }
-                      
+
                       if (isAssigned) {
-                        return { ...f, field_disabled: false, field_hint: 'Complete this field' };
+                        // Phase 81.47/81.48 — author-time readOnly fields
+                        // stay visible to their owner as printed text
+                        // (not editable).
+                        const authorReadOnly = f.readOnly === true;
+                        return authorReadOnly
+                          ? { ...f, readOnly: true }
+                          : { ...f, field_disabled: false, field_hint: 'Complete this field' };
                       }
-                      
-                      // Unassigned field: hide interactive fields completely from other recipients
-                      // during active signing flow, so they don't see each other's fields.
+
+                      // Phase 81.48 — REVERT Phase 81.47's hide-from-non-owners
+                      // rule. Author-time Read-Only fields are ALWAYS visible
+                      // to every recipient as non-editable printed text. This
+                      // matches the user's spec: "Read Only Fields Must Always
+                      // Be Visible." Owner-ship affects editability elsewhere,
+                      // not visibility of readOnly fields.
+                      if (f.readOnly === true) {
+                        return { ...f, readOnly: true };
+                      }
+
+                      // Phase 81.18 — Merge fields (plain OR converted-to-input)
+                      // are ALWAYS visible to every recipient — they represent
+                      // contract data that all signers should see (CRM merge
+                      // values are read-only by definition; converted merges
+                      // are filled by the assigned signer but the entered
+                      // value still appears for the others). Render as
+                      // read-only when this signer doesn't own it.
+                      if ((f.type || f.field_type) === 'merge') {
+                        return { ...f, readOnly: true };
+                      }
+
+                      // Phase 81.30 — Unassigned interactive field. If a prior
+                      // signer (or the system) has filled a value, surface it
+                      // READ-ONLY so this recipient can see what's already
+                      // been done. Otherwise hide completely (DocuSign-style:
+                      // signers should never see another signer's empty
+                      // placeholder). Honours the radio-group value model.
                       if (interactiveTypes.has(f.type)) {
-                        return { ...f, field_hidden: true };
+                        if (hadExplicitOwnership) {
+                          let hasValue = false;
+                          const t = f.type || f.field_type;
+                          if (t === 'radio') {
+                            const group = f.groupName || f.group_name;
+                            const groupVal = group ? fieldValues[group] : undefined;
+                            const optionValue = f.optionValue || f.option_value || f.id;
+                            hasValue = groupVal !== undefined && groupVal !== '' && groupVal === optionValue;
+                            if (!hasValue && Array.isArray(f.radioOptions) && f.radioOptions.length > 0) {
+                              const v = fieldValues[f.id];
+                              hasValue = v !== undefined && v !== null && v !== '';
+                            }
+                          } else if (t === 'checkbox') {
+                            hasValue = fieldValues[f.id] === true || fieldValues[f.id] === 'true';
+                          } else {
+                            const v = fieldValues[f.id];
+                            hasValue = v !== undefined && v !== null && v !== '';
+                          }
+                          return hasValue
+                            ? { ...f, readOnly: true }
+                            : { ...f, field_hidden: true };
+                        }
+                        // Truly orphaned (no recipient has any assignment AND
+                        // the field has no assigned_to) → keep visible to the
+                        // active signer so the doc isn't blocked by a missing
+                        // sender configuration. Phase 81.1's original case.
+                        return { ...f, field_disabled: false, field_hint: 'Complete this field' };
                       }
 
                       return { ...f, readOnly: true };
@@ -1395,6 +1734,8 @@ const PublicDocumentViewEnhanced = () => {
                     activeFieldId={activeFieldId}
                     onHiddenFieldsChange={setHiddenFieldIds}
                     onFieldClick={syncGuidedFromClick}
+                    onEnterNext={handleNextGuided}
+                    scrollToken={scrollToken}
                   />
                 );
               })()}
@@ -1412,6 +1753,7 @@ const PublicDocumentViewEnhanced = () => {
         fieldId={currentFieldId}
         isInitials={isInitialsField}
         signerName={formData?.signer_name || ''}
+        fieldStyle={currentFieldStyle}
         assignedSignatureFieldIds={(() => {
           // Phase 66: Correct owner-only filter.
           // Source of truth for "what's mine" is `active_recipient.assigned_field_ids`
@@ -1537,11 +1879,9 @@ const PublicDocumentViewEnhanced = () => {
         confirmTone="indigo"
         onCancel={() => setShowFinishConfirm(false)}
         onConfirm={async () => {
-          // Satisfy legacy gate used by a couple of older render paths,
-          // then close the dialog and run the actual sign flow.
           setSignerConfirmed(true);
-          setShowFinishConfirm(false);
           await handleSign();
+          setShowFinishConfirm(false);
         }}
       />
     </div>

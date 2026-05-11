@@ -130,6 +130,29 @@ class RoutingEngine:
         # Dual-write: sync the same atomic update to docflow_package_runs
         await self.db.docflow_package_runs.update_one(atomic_filter, atomic_update)
 
+        # Phase 81.24/81.27 — Stop reminders for this recipient if they had
+        # one configured. Done as a separate, conditional write (filters on
+        # `reminder_state` not being null) so packages whose recipients were
+        # created before reminders existed don't trip a "Cannot create field
+        # 'status' in element {reminder_state: null}" pymongo error.
+        try:
+            await self.db.docflow_package_runs.update_one(
+                {
+                    "id": package_id,
+                    "recipients": {"$elemMatch": {"id": recipient_id, "reminder_state": {"$type": "object"}}},
+                },
+                {"$set": {"recipients.$.reminder_state.status": "completed"}},
+            )
+            await self.db.docflow_packages.update_one(
+                {
+                    "id": package_id,
+                    "recipients": {"$elemMatch": {"id": recipient_id, "reminder_state": {"$type": "object"}}},
+                },
+                {"$set": {"recipients.$.reminder_state.status": "completed"}},
+            )
+        except Exception as e:
+            logger.warning(f"[RoutingEngine] reminder cancel failed pkg={package_id} rcpt={recipient_id}: {e}")
+
         if self.audit_service:
             await self.audit_service.log_event(
                 tenant_id=result.get("tenant_id", ""),
@@ -206,6 +229,20 @@ class RoutingEngine:
 
         # Dual-write to runs collection
         await self.db.docflow_package_runs.update_one(reject_filter, reject_update)
+
+        # Phase 81.24/81.27 — stop reminders on rejection (conditional write
+        # so legacy recipients with reminder_state=null don't break us).
+        try:
+            await self.db.docflow_package_runs.update_one(
+                {"id": package_id, "recipients": {"$elemMatch": {"id": recipient_id, "reminder_state": {"$type": "object"}}}},
+                {"$set": {"recipients.$.reminder_state.status": "stopped"}},
+            )
+            await self.db.docflow_packages.update_one(
+                {"id": package_id, "recipients": {"$elemMatch": {"id": recipient_id, "reminder_state": {"$type": "object"}}}},
+                {"$set": {"recipients.$.reminder_state.status": "stopped"}},
+            )
+        except Exception as e:
+            logger.warning(f"[RoutingEngine] reminder cancel-on-reject failed pkg={package_id} rcpt={recipient_id}: {e}")
 
         policy = result.get("routing_config", {}).get("on_reject", "void")
 
@@ -305,9 +342,18 @@ class RoutingEngine:
             except Exception as e:
                 logger.warning(f"Webhook fire_package_event failed: {e}")
 
-        # Send notifications to wave recipients
-        for r in wave:
-            await self._notify_recipient(package, r)
+        # Send notifications to wave recipients.
+        # Phase 81.7 — respect delivery_mode: skip emails entirely when the
+        # run was sent with public_link / public_recipients (signers receive
+        # signing links via API response, not email).
+        delivery_mode = (package.get("delivery_mode") or "email").lower()
+        if delivery_mode in ("public_link", "public_recipients"):
+            logger.info(
+                f"[RoutingEngine] delivery_mode={delivery_mode} — skipping recipient emails for package {package.get('id')}"
+            )
+        else:
+            for r in wave:
+                await self._notify_recipient(package, r)
 
     async def _check_wave_completion(self, package: dict):
         """After a recipient completes, check if the entire current wave is done."""
@@ -383,6 +429,16 @@ class RoutingEngine:
                     frontend_url = FRONTEND_URL or ""
                 except Exception:
                     pass
+            # Phase 81.7 — gate completion + RECEIVE_COPY emails by delivery_mode
+            # so public mode never triggers any recipient email.
+            delivery_mode = (result.get("delivery_mode") or "email").lower()
+            if delivery_mode in ("public_link", "public_recipients"):
+                logger.info(
+                    f"[RoutingEngine] delivery_mode={delivery_mode} — skipping completion emails for package {package_id}"
+                )
+                logger.info(f"[RoutingEngine] Package {package_id} completed")
+                return
+
             for r in result.get("recipients", []):
                 if r.get("email") and r.get("role_type") != "RECEIVE_COPY":
                     view_url = f"{frontend_url}/docflow/package/{result.get('id', '')}/view/{r.get('public_token', '')}" if r.get("public_token") else ""
@@ -447,6 +503,15 @@ class RoutingEngine:
         await self.db.docflow_package_runs.update_one(
             {"id": package_id}, {"$set": void_data}
         )
+
+        # Phase 81.42 — Stop ALL pending-signature email reminders for every
+        # recipient in this run when the package is voided. Already-sent
+        # reminders stay in history; future ones are blocked.
+        try:
+            from .reminder_service import cancel_run_reminders
+            await cancel_run_reminders(self.db, package_id, reason="stopped")
+        except Exception as _rem_err:
+            logger.warning(f"[RoutingEngine] Failed to cancel reminders on void {package_id}: {_rem_err}")
 
         if self.audit_service:
             await self.audit_service.log_event(

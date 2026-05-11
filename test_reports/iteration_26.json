@@ -1,0 +1,87 @@
+{
+  "summary": "Phase 81.29 Reminder Scheduler Testing completed. All 17 tests passed. Verified: (1) Scheduler tick() correctly scans docflow_documents for due template-flow reminders, (2) Scheduler writes reminder_state back to docflow_documents (not docflow_package_runs) for template-flow documents, (3) Scheduler still works for docflow_package_runs (no regression), (4) generate_document persists reminder_config and reminder_state to each recipient, (5) Soft-cancel logic when recipient status becomes 'completed', (6) cancel_recipient_reminders and cancel_run_reminders helpers target both collections, (7) POST /api/v1/documents/generate-links with reminder_enabled=true persists reminder configuration. Fixed 1 bug: Recipient model was missing reminder_config and reminder_state fields.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_reminder_scheduler.py",
+    "/app/test_reports/pytest/reminder_scheduler_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "VERIFIED: ReminderScheduler.tick() scans BOTH docflow_package_runs AND docflow_documents collections",
+    "VERIFIED: _process_run() writes reminder_state updates back to correct collection based on 'source' parameter",
+    "VERIFIED: cancel_recipient_reminders() targets both collections (docflow_package_runs, docflow_documents)",
+    "VERIFIED: cancel_run_reminders() targets both collections (docflow_package_runs, docflow_documents)",
+    "VERIFIED: normalize_reminder_config() handles public-API style fields (reminder_enabled, reminder_frequency, etc.)",
+    "VERIFIED: initial_reminder_state() correctly computes first reminder time based on interval",
+    "VERIFIED: _add_interval() handles all time units (seconds, minutes, hours, days, weeks, months, years)",
+    "VERIFIED: Soft-cancel logic marks reminder_state.status='completed' when recipient status is terminal",
+    "VERIFIED: _send_reminder() routes URLs correctly for package vs document recipients",
+    "VERIFIED: document_service_enhanced.generate_document() persists reminder_config and reminder_state on recipients",
+    "VERIFIED: generate_links_routes._build_reminder_config_from_recipient() translates flat API fields to config dict",
+    "VERIFIED: POST /api/v1/documents/generate-links with reminder_enabled=true persists config correctly",
+    "FIXED: Recipient model was missing reminder_config and reminder_state fields - added to document_model.py"
+  ],
+  "updated_files": [
+    "/app/backend/modules/docflow/models/document_model.py",
+    "/app/backend/tests/test_reminder_scheduler.py"
+  ],
+  "success_rate": {
+    "backend": "100% (17/17 tests passed)",
+    "frontend": "N/A - backend only testing requested"
+  },
+  "test_credentials": "admin@democorp.com / DemoPass123!",
+  "seed_data_creation": "Created test template 'Reminder Test Template' with PDF for testing reminder functionality",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 81.29 reminder scheduler fix is fully verified. The scheduler now scans BOTH docflow_package_runs AND docflow_documents collections for due reminders. The Recipient model in document_model.py was updated to include reminder_config and reminder_state fields. Email delivery may fail in test env due to SMTP configuration - this is expected; verify the reminder_state updates and sent_count increments instead. The scheduler tick interval is 60s; for testing, call tick() directly via ReminderScheduler.get_instance(db).tick().",
+  "bugs_fixed": [
+    {
+      "file": "/app/backend/modules/docflow/models/document_model.py",
+      "issue": "Recipient model was missing reminder_config and reminder_state fields",
+      "fix": "Added reminder_config: Optional[Dict[str, Any]] = None and reminder_state: Optional[Dict[str, Any]] = None to Recipient class",
+      "lines": "76-79"
+    }
+  ],
+  "phase_81_29_verification": {
+    "scheduler_scans_both_collections": {
+      "status": "VERIFIED",
+      "tests": ["test_06_scheduler_tick_scans_docflow_documents"]
+    },
+    "collection_aware_writeback": {
+      "status": "VERIFIED",
+      "tests": ["test_07_process_run_writes_to_correct_collection"]
+    },
+    "cancel_helpers_target_both": {
+      "status": "VERIFIED",
+      "tests": ["test_08_cancel_recipient_reminders_targets_both_collections", "test_09_cancel_run_reminders_targets_both_collections"]
+    },
+    "reminder_config_persistence": {
+      "status": "VERIFIED",
+      "tests": ["test_01_generate_links_with_reminder_enabled_persists_config", "test_02_verify_reminder_config_persisted_in_docflow_documents"]
+    },
+    "soft_cancel_logic": {
+      "status": "VERIFIED",
+      "tests": ["test_10_soft_cancel_when_recipient_completed"]
+    },
+    "url_routing": {
+      "status": "VERIFIED",
+      "tests": ["test_11_send_reminder_url_routing"]
+    },
+    "public_api_style_fields": {
+      "status": "VERIFIED",
+      "tests": ["test_03_normalize_reminder_config_public_api_style", "test_14_generate_links_with_daily_reminder_preset", "test_15_generate_links_with_weekly_reminder_preset"]
+    },
+    "validation": {
+      "status": "VERIFIED",
+      "tests": ["test_16_reminder_config_validation_invalid_unit", "test_17_reminder_config_validation_zero_value"]
+    }
+  }
+}

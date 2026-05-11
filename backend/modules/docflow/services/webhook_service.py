@@ -189,6 +189,124 @@ class WebhookService:
         except Exception as e:
             logger.error(f"Failed to log webhook: {e}")
 
+    # ──────────────────────────────────────────────────────────────────────
+    # Phase 81.3 — merge-field alias enrichment
+    # Adds dynamic `<merge_object>.<merge_field>` keys (e.g., `account.name`)
+    # alongside the existing `merge_<id>` keys inside webhook `field_data` so
+    # downstream receivers can map values to CRM fields without decoding UUIDs.
+    # ──────────────────────────────────────────────────────────────────────
+    @staticmethod
+    def _merge_alias_key(placement: dict) -> Optional[str]:
+        """Resolve the friendly merge alias for a placement.
+
+        Preference order (matches sender-side templates):
+          1. `<merge_object>.<merge_field>` if both are set.
+          2. `merge_field` alone (already dotted in many integrations).
+          3. `merge_token` (legacy template format).
+          4. `mergePattern` stripped of `{{` `}}` braces.
+          5. `name` (final fallback).
+        """
+        if not placement:
+            return None
+        m_obj = placement.get("merge_object") or placement.get("mergeObject") or ""
+        m_fld = placement.get("merge_field") or placement.get("mergeField") or ""
+        if m_obj and m_fld:
+            return f"{m_obj}.{m_fld}".strip()
+        if m_fld and "." in str(m_fld):
+            return str(m_fld).strip()
+        if m_fld:
+            return str(m_fld).strip()
+        token = placement.get("merge_token") or placement.get("mergeToken")
+        if token:
+            return str(token).strip()
+        pattern = placement.get("mergePattern") or placement.get("merge_pattern")
+        if pattern:
+            return str(pattern).strip("{}").strip()
+        name = placement.get("name")
+        if name:
+            return str(name).strip()
+        return None
+
+    @classmethod
+    def _enrich_field_data_with_merge_aliases(
+        cls,
+        base_field_data: Dict[str, Any],
+        placements: List[Dict[str, Any]],
+        resolved_merge_values: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Return a copy of `base_field_data` augmented with dotted CRM aliases
+        like `account.name: "Jack"` for every merge field placement.
+
+        Existing `merge_<id>` keys are preserved unchanged. We only ADD new
+        keys; if an alias key already exists in `base_field_data` (rare —
+        e.g., the signer happened to enter a literal field id matching a
+        merge alias), we don't overwrite it.
+
+        Value resolution per placement (first non-empty wins):
+          1. Signer entry → `base_field_data[placement.id]`
+          2. Placement default → `placement.value` or `placement.default_value`
+          3. Pre-resolved merge map → `resolved_merge_values[<alias>]`
+        """
+        enriched = dict(base_field_data or {})
+        resolved = resolved_merge_values or {}
+
+        for p in placements or []:
+            ftype = (p.get("type") or p.get("field_type") or "").lower()
+            is_merge = (
+                ftype == "merge"
+                or bool(p.get("merge_field"))
+                or bool(p.get("merge_token"))
+                or bool(p.get("mergePattern"))
+            )
+            if not is_merge:
+                continue
+            alias = cls._merge_alias_key(p)
+            if not alias:
+                continue
+            pid = p.get("id")
+            val = enriched.get(pid) if pid else None
+            if val in (None, ""):
+                val = p.get("value") or p.get("default_value")
+            if val in (None, ""):
+                val = resolved.get(alias) or resolved.get(str(alias))
+            if val in (None, ""):
+                continue
+            # Don't overwrite an explicit base entry under the same key.
+            enriched.setdefault(str(alias), val)
+
+        return enriched
+
+    async def _enrich_document_field_data(
+        self,
+        document_id: str,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Async helper: load the document + (fall back to template) placements
+        and return its enriched `field_data` ready for webhook payload."""
+        try:
+            doc_filter = {"id": document_id}
+            if tenant_id:
+                doc_filter["tenant_id"] = tenant_id
+            document = await self.db.docflow_documents.find_one(doc_filter, {"_id": 0})
+            if not document:
+                return {}
+            placements = document.get("field_placements") or []
+            if not placements and document.get("template_id"):
+                tpl = await self.db.docflow_templates.find_one(
+                    {"id": document["template_id"]}, {"_id": 0, "field_placements": 1}
+                )
+                if tpl:
+                    placements = tpl.get("field_placements") or []
+            return self._enrich_field_data_with_merge_aliases(
+                base_field_data=document.get("field_data") or {},
+                placements=placements,
+                resolved_merge_values=document.get("merge_fields") or {},
+            )
+        except Exception as e:
+            logger.warning(f"_enrich_document_field_data failed for {document_id}: {e}")
+            return {}
+
     async def fire_document_event(
         self,
         document_id: str,
@@ -223,6 +341,72 @@ class WebhookService:
                 "crm_object_id": document.get("crm_object_id"),
                 **(extra_data or {})
             }
+
+            # Phase 81: include field values + merge field values so downstream
+            # systems (Salesforce, etc.) receive the data the signer entered.
+            # `field_data` holds typed text/date/checkbox values keyed by field id.
+            # `merge_fields` holds the resolved/overridden merge field values
+            # (including values where an originally-empty merge field was
+            # converted to a fillable text field and submitted by the signer).
+            #
+            # Phase 81.3 — also inject `<merge_object>.<merge_field>` aliases
+            # (e.g., `account.name`) directly INSIDE `field_data` so receivers
+            # can map values to CRM fields without decoding merge UUIDs.
+            try:
+                placements = document.get("field_placements") or []
+                # Fall back to template definition when the document doesn't
+                # carry placements (legacy / package-cloned docs).
+                if not placements:
+                    try:
+                        tpl = await self.db.docflow_templates.find_one(
+                            {"id": template_id, "tenant_id": tenant_id},
+                            {"_id": 0, "field_placements": 1},
+                        )
+                        if tpl:
+                            placements = tpl.get("field_placements") or []
+                    except Exception:
+                        placements = []
+
+                enriched_field_data = self._enrich_field_data_with_merge_aliases(
+                    base_field_data=document.get("field_data") or {},
+                    placements=placements,
+                    resolved_merge_values=document.get("merge_fields") or {},
+                )
+
+                merge_fields_resolved = document.get("merge_fields") or {}
+
+                # If merge_fields_resolved is empty, derive it from field_data
+                # by collecting fields whose definition flags them as merge fields.
+                if not merge_fields_resolved:
+                    field_data_raw = document.get("field_data") or {}
+                    derived = {}
+                    for p in placements:
+                        field_type = (p.get("type") or p.get("field_type") or "").lower()
+                        is_merge = (
+                            field_type == "merge"
+                            or bool(p.get("merge_field"))
+                            or bool(p.get("merge_token"))
+                        )
+                        if not is_merge:
+                            continue
+                        key = self._merge_alias_key(p)
+                        if not key:
+                            continue
+                        # Prefer signer-entered value (converted-text path),
+                        # fall back to the field's pre-resolved default.
+                        val = field_data_raw.get(p.get("id"))
+                        if val in (None, ""):
+                            val = p.get("value") or p.get("default_value") or ""
+                        derived[str(key)] = val
+                    if derived:
+                        merge_fields_resolved = derived
+
+                if enriched_field_data:
+                    payload["field_data"] = enriched_field_data
+                if merge_fields_resolved:
+                    payload["merge_fields"] = merge_fields_resolved
+            except Exception as enrich_err:
+                logger.warning(f"Webhook payload enrichment failed: {enrich_err}")
 
             # Enrich signed/completed events with signed document details
             if event_type in ("signed", "completed", "signed_copy"):
@@ -355,6 +539,16 @@ class WebhookService:
                 payload["signed_documents"] = signed_docs or []
                 payload["recipient_details"] = {"name": recipient_name, "email": recipient_email}
 
+                # Phase 81.3 — enrich `field_data` with merge-field aliases
+                # (e.g., `account.name`) for every document in the package so
+                # CRM receivers can map directly without decoding UUIDs.
+                try:
+                    payload["field_data"] = await self._build_package_field_data(
+                        package, primary_document_id=doc_id, tenant_id=tenant_id,
+                    )
+                except Exception as fd_err:
+                    logger.warning(f"Package signed field_data enrichment failed: {fd_err}")
+
             elif mapped_event == "opened":
                 payload["document_id"] = extra.get("document_id", first_doc_id)
                 payload["recipient_email"] = recipient_email
@@ -388,6 +582,16 @@ class WebhookService:
                     signed_docs = await self._get_signed_documents(package)
                 payload["signed_documents"] = signed_docs or []
                 payload["generated_at"] = now_iso
+
+                # Phase 81.3 — same merge-alias enrichment as `signed`.
+                try:
+                    payload["field_data"] = await self._build_package_field_data(
+                        package,
+                        primary_document_id=extra.get("document_id", first_doc_id),
+                        tenant_id=tenant_id,
+                    )
+                except Exception as fd_err:
+                    logger.warning(f"Package signed_copy field_data enrichment failed: {fd_err}")
 
             # ── Log to activity ──
             await self.db.docflow_activity_logs.insert_one({
@@ -441,6 +645,67 @@ class WebhookService:
 
         except Exception as e:
             logger.error(f"Error firing package event: {e}")
+
+    async def _build_package_field_data(
+        self,
+        package: dict,
+        primary_document_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Aggregate enriched `field_data` (merge aliases + raw signer entries)
+        across every child document in the package.
+
+        Result keys:
+          - `<merge_object>.<merge_field>` aliases — e.g., `account.name`
+          - Raw `merge_<id>`, `signature_<id>`, `text_<id>` etc. (kept unchanged)
+          - `record_id`, `object_type` if available on the primary document for
+            quick CRM correlation.
+
+        When two child documents define the same alias, the FIRST one wins —
+        consistent with `dict.setdefault` semantics used by the per-doc helper.
+        """
+        aggregated: Dict[str, Any] = {}
+
+        # Resolve primary document for record_id / object_type prefix.
+        primary_doc = None
+        if primary_document_id:
+            try:
+                primary_doc = await self.db.docflow_documents.find_one(
+                    {"id": primary_document_id}, {"_id": 0}
+                )
+            except Exception:
+                primary_doc = None
+
+        if primary_doc:
+            rec_id = (
+                primary_doc.get("crm_object_id")
+                or primary_doc.get("record_id")
+                or ""
+            )
+            obj_type = (
+                primary_doc.get("crm_object_type")
+                or primary_doc.get("object_type")
+                or ""
+            )
+            if rec_id:
+                aggregated["record_id"] = rec_id
+            if obj_type:
+                aggregated["object_type"] = obj_type
+            sf_org = primary_doc.get("salesforce_org_id") or ""
+            if sf_org:
+                aggregated["salesforce_org_id"] = sf_org
+
+        # Enrich + merge each child document's field_data into the aggregate.
+        for entry in package.get("documents", []) or []:
+            doc_id = entry.get("document_id")
+            if not doc_id:
+                continue
+            enriched = await self._enrich_document_field_data(doc_id, tenant_id=tenant_id)
+            for k, v in enriched.items():
+                aggregated.setdefault(k, v)
+
+        return aggregated
 
     async def _get_signed_documents(self, package: dict) -> list:
         """Fetch signed document details for a package."""

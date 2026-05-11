@@ -4,7 +4,7 @@ Tests the new visibility/read-only logic for unassigned fields in package + stan
 
 Key behaviors tested:
 1. Unassigned + no value → hidden
-2. Unassigned + has value → read-only
+2. Unassigned + has value → hidden
 3. Assigned → interactive
 4. Backward compat: no assigned_components → all fields visible
 """

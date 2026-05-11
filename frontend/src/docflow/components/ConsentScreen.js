@@ -6,8 +6,11 @@ import {
   Download,
   X,
   Printer,
+  Loader2,
 } from "lucide-react";
 import { jsPDF } from "jspdf";
+import { docflowService } from "../services/docflowService";
+import { renderContent } from "../utils/contentVariables";
 
 const STORAGE_PREFIX = "docflow.consent.v1";
 
@@ -27,59 +30,75 @@ export const setAcceptedConsent = (sessionKey) => {
   } catch {}
 };
 
-const DISCLOSURE_SECTIONS = [
+// Phase 81.80 — Hardcoded fallbacks. Used only if the public content config
+// endpoint fails (network down, etc.) so the consent UI never blanks out.
+const FALLBACK_DISCLOSURE_SECTIONS = [
   {
     title: "ELECTRONIC RECORD AND SIGNATURE DISCLOSURE",
-    content: "From time to time, BatonCare (we, us or Company) may be required by law to provide to you certain written notices or disclosures. Described below are the terms and conditions for providing to you such notices and disclosures electronically through the DocuSign system. Please read the information below carefully and thoroughly, and if you can access this information electronically to your satisfaction and agree to this Electronic Record and Signature Disclosure (ERSD), please confirm your agreement by selecting the check-box next to ‘I agree to use electronic records and signatures’ before clicking ‘CONTINUE’ within the DocuSign system."
+    content: "Please confirm your agreement by selecting the check-box next to ‘I agree to use electronic records and signatures’ before clicking ‘CONTINUE’."
   },
-  {
-    title: "Getting Paper Copies",
-    content: "At any time, you may request from us a paper copy of any record provided or made available electronically to you by us. You will have the ability to download and print documents we send to you through the DocuSign system during and immediately after the signing session and, if you elect to create a DocuSign account, you may access the documents for a limited period of time (usually 30 days) after such documents are first sent to you. After such time, if you wish for us to send you paper copies of any such documents from our office to you, you will be charged a $0.00 per-page fee. You may request delivery of such paper copies from us by following the procedure described below."
-  },
-  {
-    title: "Withdrawing Your Consent",
-    content: "If you decide to receive notices and disclosures from us electronically, you may at any time change your mind and tell us that thereafter you want to receive required notices and disclosures only in paper format. How you must inform us of your decision to receive future notices and disclosure in paper format and withdraw your consent to receive notices and disclosures electronically is described below."
-  },
-  {
-    title: "Consequences of Changing Your Mind",
-    content: "If you elect to receive required notices and disclosures only in paper format, it will slow the speed at which we can complete certain steps in transactions with you and delivering services to you because we will need first to send the required notices or disclosures to you in paper format, and then wait until we receive back from you your acknowledgment of your receipt of such paper notices or disclosures. Further, you will no longer be able to use the DocuSign system to receive required notices and consents electronically from us or to sign electronically documents from us."
-  },
-  {
-    title: "All notices and disclosures will be sent to you electronically",
-    content: "Unless you tell us otherwise in accordance with the procedures described herein, we will provide electronically to you through the DocuSign system all required notices, disclosures, authorizations, acknowledgements, and other documents that are required to be provided or made available to you during the course of our relationship with you. To reduce the chance of you inadvertently not receiving any notice or disclosure, we prefer to provide all of the required notices and disclosures to you by the same method and to the same address that you have given us. Thus, you can receive all the disclosures and notices electronically or in paper format through the paper mail delivery system. If you do not agree with this process, please let us know as described below. Please also see the paragraph immediately above that describes the consequences of your electing not to receive delivery of the notices and disclosures electronically from us."
-  },
-  {
-    title: "How to Contact BatonCare",
-    content: "You may contact us to let us know of your changes as to how we may contact you electronically, to request paper copies of certain information from us, and to withdraw your prior consent to receive notices and disclosures electronically as follows: To contact us by email send messages to: support@batoncare.com"
-  },
-  {
-    title: "To advise BatonCare of your new email address",
-    content: "To let us know of a change in your email address where we should send notices and disclosures electronically to you, you must send an email message to us at support@batoncare.com and in the body of such request you must state: your previous email address, your new email address. We do not require any other information from you to change your email address. If you created a DocuSign account, you may update it with your new email address through your account preferences."
-  },
-  {
-    title: "To request paper copies from BatonCare",
-    content: "To request delivery from us of paper copies of the notices and disclosures previously provided by us to you electronically, you must send us an email to support@batoncare.com and in the body of such request you must state your email address, full name, mailing address, and telephone number. We will bill you for any fees at that time, if any."
-  },
-  {
-    title: "To withdraw your consent with BatonCare",
-    content: "To inform us that you no longer wish to receive future notices and disclosures in electronic format you may: decline to sign a document from within your signing session, and on the subsequent page, select the check-box indicating you wish to withdraw your consent, or you may; send us an email to support@batoncare.com and in the body of such request you must state your email, full name, mailing address, and telephone number. We do not need any other information from you to withdraw consent. The consequences of your withdrawing consent for online documents will be that transactions may take a longer time to process."
-  },
-  {
-    title: "Required hardware and software",
-    content: "The minimum system requirements for using the DocuSign system may change over time. The current system requirements are found here: https://support.docusign.com/guides/signer-guide-signing-system-requirements."
-  },
-  {
-    title: "Acknowledging your access and consent to receive and sign documents electronically",
-    content: "To confirm to us that you can access this information electronically, which will be similar to other electronic notices and disclosures that we will provide to you, please confirm that you have read this ERSD, and (i) that you are able to print on paper or electronically save this ERSD for your future reference and access; or (ii) that you are able to email this ERSD to an email address where you will be able to print on paper or save it for your future reference and access. Further, if you consent to receiving notices and disclosures exclusively in electronic format as described herein, then select the check-box next to ‘I agree to use electronic records and signatures’ before clicking ‘CONTINUE’ within the DocuSign system. By selecting the check-box next to ‘I agree to use electronic records and signatures’, you confirm that: You can access and read this Electronic Record and Signature Disclosure. You can print on paper this Electronic Record and Signature Disclosure, or save or send this Electronic Record and Disclosure to a location where you can print it, for future reference and access. Until or unless you notify BatonCare as described above, you consent to receive exclusively through electronic means all notices, disclosures, authorizations, acknowledgements, and other documents that are required to be provided or made available to you by BatonCare during the course of your relationship with BatonCare."
-  }
 ];
 
-const ConsentScreen = ({ open, sessionKey, onContinue }) => {
+const FALLBACK_REVIEW = {
+  title: "Review and Continue",
+  subtitle: "Electronic Record & Signature Consent",
+  body_html: "<p>Please review and agree to the use of electronic records and signatures, then click <strong>\"Continue\"</strong>.</p>",
+  footer_html: "",
+  disclosure_link_text: "Please read the Electronic Record and Signature Disclosure",
+  checkbox_text: "I agree to use electronic records and signatures.",
+  error_text: "Please agree to use electronic records and signatures.",
+  continue_label: "Continue",
+};
+
+const FALLBACK_DISCLOSURE = {
+  title: "Agreement to do business",
+  subtitle: "Electronic Record & Signature Consent",
+  sections: FALLBACK_DISCLOSURE_SECTIONS,
+  footer: "",
+};
+
+const ConsentScreen = ({ open, sessionKey, onContinue, packageId, documentId, token, recipientName, recipientEmail, documentName, companyName, submitting = false }) => {
   const [agreed, setAgreed] = useState(false);
   const [language, setLanguage] = useState("en-US");
   const [showDisclosure, setShowDisclosure] = useState(false);
   const [showError, setShowError] = useState(false);
+  const [continuing, setContinuing] = useState(false);
+  const [fetching, setFetching] = useState(true);
   const checkboxRef = useRef(null);
+
+  // Phase 81.80 — Dynamic content. Fetch tenant-specific overrides; fall back
+  // to defaults if anything goes wrong (network down etc.).
+  const [reviewContent, setReviewContent] = useState(FALLBACK_REVIEW);
+  const [disclosureContent, setDisclosureContent] = useState(FALLBACK_DISCLOSURE);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const ctx = {
+      user_name: recipientName,
+      email: recipientEmail,
+      document_name: documentName,
+      company_name: companyName,
+    };
+    (async () => {
+      setFetching(true);
+      try {
+        const data = await docflowService.getPublicContentConfig({ token, packageId, documentId });
+        if (cancelled) return;
+        const rc = data?.sections?.review_continue?.content || FALLBACK_REVIEW;
+        const cd = data?.sections?.consent_disclosure?.content || FALLBACK_DISCLOSURE;
+        setReviewContent(renderContent(rc, ctx));
+        setDisclosureContent(renderContent(cd, ctx));
+      } catch {
+        // Stick with fallbacks.
+        setReviewContent(renderContent(FALLBACK_REVIEW, ctx));
+        setDisclosureContent(renderContent(FALLBACK_DISCLOSURE, ctx));
+      } finally {
+        if (!cancelled) setFetching(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, packageId, documentId, token, recipientName, recipientEmail, documentName, companyName]);
 
   useEffect(() => {
     if (!open) {
@@ -100,6 +119,8 @@ const ConsentScreen = ({ open, sessionKey, onContinue }) => {
       checkboxRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
       return;
     }
+    if (continuing || submitting) return;
+    setContinuing(true);
     setAcceptedConsent(sessionKey);
     onContinue?.();
   };
@@ -111,7 +132,7 @@ const ConsentScreen = ({ open, sessionKey, onContinue }) => {
 
     const doc = iframe.contentWindow.document;
     
-    let sectionsHtml = DISCLOSURE_SECTIONS.map(s => `
+    let sectionsHtml = (disclosureContent.sections || []).map(s => `
       <section style="margin-bottom: 25px;">
         <h2 style="font-size: 18px; color: #1a1a1a; margin-bottom: 10px; font-family: sans-serif;">${s.title}</h2>
         <p style="font-size: 14px; line-height: 1.6; color: #333; font-family: sans-serif; margin: 0;">${s.content}</p>
@@ -172,7 +193,7 @@ const ConsentScreen = ({ open, sessionKey, onContinue }) => {
     
     let y = 35;
     
-    DISCLOSURE_SECTIONS.forEach((section, index) => {
+    (disclosureContent.sections || []).forEach((section, index) => {
       // Check for page overflow
       if (y > 270) {
         doc.addPage();
@@ -206,19 +227,17 @@ const ConsentScreen = ({ open, sessionKey, onContinue }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-[9999] bg-[#201046]/95 flex items-center justify-center p-2 sm:p-6 overflow-y-auto backdrop-blur-sm">
+    <div className="fixed inset-0 z-[9999] bg-slate-900/55 backdrop-blur-sm flex items-center justify-center p-2 sm:p-6 overflow-y-auto">
       <div className="w-full max-w-5xl bg-white rounded-2xl shadow-2xl overflow-hidden flex flex-col my-auto min-h-[50vh] max-h-[95vh] sm:max-h-[90vh]">
 
         {/* Header */}
         <div className="border-b border-gray-200 px-5 sm:px-8 py-5 flex items-center justify-between bg-gray-50">
           <div>
             <h2 className="text-xl sm:text-2xl font-semibold text-[#2f2350]">
-              {showDisclosure
-                ? "Agreement to do business "
-                : "Review and Continue"}
+              {showDisclosure ? disclosureContent.title : reviewContent.title}
             </h2>
             <p className="text-sm text-gray-500 mt-1">
-              Electronic Record & Signature Consent
+              {showDisclosure ? disclosureContent.subtitle : reviewContent.subtitle}
             </p>
           </div>
 
@@ -232,65 +251,28 @@ const ConsentScreen = ({ open, sessionKey, onContinue }) => {
 
         {/* Body */}
         <div className="px-5 sm:px-8 py-6 flex-1 overflow-y-auto text-[#34284f] scroll-smooth">
-          {!showDisclosure ? (
+          {fetching ? (
+            <div className="h-full flex flex-col items-center justify-center space-y-4 py-20">
+              <Loader2 className="h-10 w-10 text-indigo-600 animate-spin" />
+              <p className="text-gray-500 font-medium animate-pulse">Loading content...</p>
+            </div>
+          ) : !showDisclosure ? (
             <div className="space-y-6 text-sm sm:text-base leading-8">
-              <p>Dear BatonCare Member,</p>
-              <p>
-                Thank you for choosing BatonCare, where your health is our
-                priority.
-              </p>
-              <p>
-                Please review and agree to the use of electronic records and
-                signatures, then click <strong>"Continue"</strong> to begin the
-                process of reviewing and signing your documents.
-              </p>
-              <p>
-                Signing will not be complete until you have reviewed the
-                agreement and confirmed your signature by clicking{" "}
-                <strong>"Finish"</strong>.
-              </p>
-              <p>
-                Once completed, you will receive instructions to create a
-                username and password to access the BatonCare portal and manage
-                your healthcare needs.
-              </p>
-              <p>
-                Should you have any questions or require assistance, please do
-                not hesitate to contact us at{" "}
-                <strong>support@batoncare.com</strong> or{" "}
-                <strong>(561) 303-0007</strong>.
-              </p>
-              <p>
-                Thank you,
-                <br />
-                <strong>The BatonCare Team</strong>
-              </p>
+              <div
+                className="prose prose-sm sm:prose max-w-none [&_p]:my-3 [&_strong]:font-semibold"
+                dangerouslySetInnerHTML={{ __html: reviewContent.body_html || "" }}
+              />
 
-              <div className="border-t pt-5 text-sm text-gray-600 leading-7">
-                <p>
-                  You are receiving this email because you opted in via our
-                  website or prior communications. To unsubscribe, email
-                  "Unsubscribe" to support@batoncare.com.
-                </p>
-                <p>
-                  This email and any attachments may contain confidential or
-                  legally protected information intended solely for the use of
-                  the individual or entity to whom it is addressed. If you are
-                  not the intended recipient, please notify the sender
-                  immediately and delete this message. Any unauthorized review,
-                  use, disclosure, or distribution is prohibited.
-                </p>
-                <p>
-                  © 2026 BatonCare | 980 North Federal Highway, Suite 110 #1068,
-                  Boca Raton, FL 33432 | support@batoncare.com
-                </p>
-              </div>
+              <div
+                className="border-t pt-5 text-sm text-gray-600 leading-7 prose prose-sm max-w-none [&_p]:my-2"
+                dangerouslySetInnerHTML={{ __html: reviewContent.footer_html || "" }}
+              />
 
               <button
                 onClick={() => setShowDisclosure(true)}
                 className="underline font-medium text-[#2f2350] hover:text-indigo-700 text-left"
               >
-                Please read the Electronic Record and Signature Disclosure
+                {reviewContent.disclosure_link_text}
               </button>
 
               <div ref={checkboxRef} className="space-y-2">
@@ -308,26 +290,31 @@ const ConsentScreen = ({ open, sessionKey, onContinue }) => {
                     className="mt-1 h-5 w-5 accent-[#8bc53f] cursor-pointer"
                   />
                   <span className="text-sm sm:text-base leading-relaxed">
-                    I agree to use electronic records and signatures.
+                    {reviewContent.checkbox_text}
                     <span className="text-red-500 ml-1">*</span>
                   </span>
                 </label>
 
                 {showError && (
                   <p className="text-red-600 text-sm font-medium animate-in fade-in slide-in-from-top-1 px-1">
-                    Please agree to use electronic records and signatures.
+                    {reviewContent.error_text}
                   </p>
                 )}
               </div>
             </div>
           ) : (
             <div className="space-y-7 text-sm sm:text-base leading-8">
-              {DISCLOSURE_SECTIONS.map((section, idx) => (
+              {(disclosureContent.sections || []).map((section, idx) => (
                 <section key={idx}>
                   <h3 className="font-bold text-lg mb-2">{section.title}</h3>
-                  <p>{section.content}</p>
+                  <p className="whitespace-pre-wrap">{section.content}</p>
                 </section>
               ))}
+              {disclosureContent.footer && (
+                <p className="text-xs text-gray-500 mt-6 pt-3 border-t border-gray-100">
+                  {disclosureContent.footer}
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -366,17 +353,18 @@ const ConsentScreen = ({ open, sessionKey, onContinue }) => {
                 </button>
               </div>
             )}
-
+  
             <button
               onClick={handleContinue}
+              disabled={fetching || submitting || continuing}
               className={`w-full sm:w-auto px-8 py-2.5 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 transition-all shadow-sm ${
-                agreed
+                !fetching && !submitting && !continuing
                   ? "bg-[#8bc53f] text-white hover:bg-[#7ab236] active:scale-[0.98]"
-                  : "bg-[#8bc53f]/80 text-white hover:bg-[#8bc53f] active:scale-[0.98]"
+                  : "bg-gray-100 text-gray-400 cursor-not-allowed"
               }`}
             >
-              Continue
-              <ChevronRight size={16} />
+              {(submitting || continuing) ? <Loader2 className="h-4 w-4 animate-spin" /> : <ChevronRight size={16} />}
+              {(submitting || continuing) ? "Processing..." : (reviewContent.continue_label || "Continue")}
             </button>
           </div>
         </div>

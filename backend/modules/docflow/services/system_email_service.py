@@ -604,11 +604,36 @@ class SystemEmailService:
                 "message": f"All required actions for <strong>{document_name}</strong> have been completed. The final signed document is now available.",
                 "color": "#4F46E5",
             },
+            # Phase 81.24 — pending-signature reminder.
+            "reminder": {
+                "subject": f"Reminder: Please sign {document_name}",
+                "heading": "Action Required: Pending Signature",
+                "message": (
+                    f"You have a pending signature on <strong>{document_name}</strong>"
+                    + (f", sent by <strong>{extra.get('sender_name')}</strong>" if extra.get('sender_name') else "")
+                    + ". Please review and sign at your earliest convenience."
+                ),
+                "color": "#F59E0B",
+            },
+            # Phase 81.67 — entity void notification.
+            "voided": {
+                "subject": f"Cancelled: {document_name}",
+                "heading": "Signing Request Cancelled",
+                "message": (
+                    f"The signing request for <strong>{document_name}</strong> has been "
+                    f"cancelled by the sender. You no longer have access to sign or view "
+                    f"this {extra.get('entity_kind') or 'document'}."
+                ),
+                "color": "#6B7280",
+            },
         }
         cfg = type_config.get(notification_type, type_config["completed"])
         reason_html = ""
-        if notification_type == "rejected" and extra.get("reason"):
-            reason_html = f'<div style="margin:16px 0;padding:12px 16px;background:#FEF2F2;border:1px solid #FECACA;border-radius:8px;"><strong>Reason:</strong> {extra["reason"]}</div>'
+        if extra.get("reason") and notification_type in ("rejected", "voided"):
+            label = "Reason" if notification_type == "rejected" else "Reason for cancellation"
+            border = "#FECACA" if notification_type == "rejected" else "#E5E7EB"
+            bg = "#FEF2F2" if notification_type == "rejected" else "#F9FAFB"
+            reason_html = f'<div style="margin:16px 0;padding:12px 16px;background:{bg};border:1px solid {border};border-radius:8px;"><strong>{label}:</strong> {extra["reason"]}</div>'
         actor_html = ""
         if extra.get("actor_name"):
             actor_html = f'<p style="color:#6B7280;font-size:14px;">Action by: <strong>{extra["actor_name"]}</strong></p>'
@@ -619,6 +644,13 @@ class SystemEmailService:
   <a href="{view_url}" style="background:{cfg["color"]};color:white;padding:14px 36px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;font-size:16px;">View Document</a>
 </div>
 <p style="text-align:center;font-size:13px;color:#6B7280;">If the button is not working, <a href="{view_url}" style="color:{cfg["color"]};">click here to view document</a></p>'''
+        elif notification_type == "reminder" and view_url:
+            # Reminder CTA: review & sign — primary amber button, identical
+            # styling to the completion mail so recipients recognize the brand.
+            download_html = f'''<div style="text-align:center;margin:24px 0;">
+  <a href="{view_url}" style="background:{cfg["color"]};color:white;padding:14px 36px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;font-size:16px;">Review &amp; Sign</a>
+</div>
+<p style="text-align:center;font-size:13px;color:#6B7280;">If the button is not working, <a href="{view_url}" style="color:{cfg["color"]};">click here to open the document</a></p>'''
         elif view_url:
             download_html = f'<div style="text-align:center;margin:24px 0;"><a href="{view_url}" style="background:{cfg["color"]};color:white;padding:12px 32px;border-radius:8px;text-decoration:none;font-weight:600;display:inline-block;">View Document</a></div>'
 

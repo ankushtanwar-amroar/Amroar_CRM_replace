@@ -62,7 +62,9 @@ class EnhancedDocumentService:
                                salesforce_context: Optional[Dict[str, Any]] = None,
                                send_email: bool = True,
                                require_auth: bool = True,
-                               delivery_mode: Optional[str] = None) -> dict:
+                               delivery_mode: Optional[str] = None,
+                               sms_mode: bool = False,
+                               sms_consent: bool = False) -> dict:
         """Generate document from template and CRM data with PDF creation"""
         
         # Get template
@@ -187,6 +189,12 @@ class EnhancedDocumentService:
                 "template_recipient_id": template_recipient_id,
                 "name": name,
                 "email": email,
+                # Phase 81 — phone for SMS verification (required when sms_mode=true,
+                # validated by the API caller; stored on every recipient regardless
+                # so resending or reassigning later is straightforward).
+                "phone": (inp.get("phone") or inp.get("phone_number") or "").strip() or None,
+                "sms_verified": False,
+                "sms_verified_at": None,
                 "status": "pending", # Initial status, will be activated below
                 "routing_order": int(routing_order),
                 "is_required": bool(is_required),
@@ -200,7 +208,47 @@ class EnhancedDocumentService:
                 "email_template_id": inp.get("email_template_id"),
                 "role": inp.get("role", "signer"),
                 "role_type": self._normalize_role_type(inp.get("role", "signer")),
+                # Phase 81.29 — pending-signature reminder config + state.
+                # Filled below after recipient_instances is finalised so we
+                # can normalize without circular imports.
+                "reminder_config": None,
+                "reminder_state": None,
             })
+
+        # Phase 81.29 — Inject reminder configuration onto each recipient.
+        # The scheduler scans BOTH `docflow_package_runs` AND `docflow_documents`
+        # for due reminders, so the template/document flow needs the same
+        # `reminder_config` + `reminder_state` shape package recipients have.
+        # Note: recipient_instances was built 1:1 from recipient_inputs (no
+        # filtering), so we pair them directly to avoid index mismatches.
+        try:
+            from .reminder_service import normalize_reminder_config, initial_reminder_state
+            for inst, inp in zip(recipient_instances, recipient_inputs):
+                rcfg_raw = inp.get("reminder_config")
+                if not rcfg_raw and inp.get("reminder_enabled"):
+                    rcfg_raw = {
+                        "reminder_enabled": True,
+                        "reminder_frequency": inp.get("reminder_frequency"),
+                        "reminder_custom_value": inp.get("reminder_custom_value"),
+                        "reminder_custom_unit": inp.get("reminder_custom_unit"),
+                        "max_reminders": inp.get("max_reminders"),
+                    }
+                rcfg = None
+                rstate = None
+                if rcfg_raw:
+                    try:
+                        rcfg = normalize_reminder_config(rcfg_raw)
+                        if rcfg:
+                            rstate = initial_reminder_state(rcfg)
+                    except Exception as inner_e:
+                        logger.warning(f"[generate_document] Failed to normalize reminder config: {inner_e}")
+                        rcfg = None
+                        rstate = None
+                inst["reminder_config"] = rcfg
+                inst["reminder_state"] = rstate
+        except Exception as _e:
+            # Non-fatal: reminders are an enhancement, do not block the send.
+            logger.warning(f"[generate_document] Reminder config processing failed: {_e}")
 
         # Prevent overlapping field assignments
         assigned_field_registry = {}
@@ -409,7 +457,11 @@ class EnhancedDocumentService:
             "created_by": user_id,
             "created_at": now,
             "updated_at": now,
-            "salesforce_context": salesforce_context
+            "salesforce_context": salesforce_context,
+            # Phase 81 — propagate SMS flags at document level.
+            # sms_mode controls SMS sending; sms_consent controls popup visibility.
+            "sms_mode": bool(sms_mode),
+            "sms_consent": bool(sms_consent),
         }
         
         await self.collection.insert_one(document)
@@ -720,13 +772,17 @@ class EnhancedDocumentService:
                 [r for r in recipients if r.get("is_required", True)],
                 key=lambda r: int(r.get("routing_order", 1) or 1)
             )
+            # Phase 81.56 — TERMINAL_DONE includes reviewer / approver
+            # completion statuses so a Sign-after-Reviewer step doesn't
+            # falsely look at the reviewer as "the next pending action".
+            TERMINAL_DONE = ("signed", "completed", "approved", "reviewed", "declined")
             next_required_first = next(
-                (r for r in required_sorted if r.get("status") not in ["signed", "completed", "declined"]),
+                (r for r in required_sorted if r.get("status") not in TERMINAL_DONE),
                 None
             )
 
             # Enforce routing rules strictly
-            if active_recipient.get("status") in ["signed", "completed", "declined"]:
+            if active_recipient.get("status") in TERMINAL_DONE:
                 return False
             if routing_mode == "sequential" and next_required_first:
                 if active_recipient.get("id") != next_required_first.get("id"):
@@ -767,6 +823,19 @@ class EnhancedDocumentService:
             try:
                 placements_by_id = {p.get("id"): p for p in field_placements if p.get("id")}
                 active_tpl_rid = active_recipient.get("template_recipient_id")
+                # Phase 81.30 — Per-recipient `assigned_field_ids` (set at send
+                # time) is the authoritative ownership signal for runtime
+                # signers. We use it both to ALLOW the active signer's writes
+                # for fields without template-level `assigned_to`, and to
+                # REJECT cross-recipient writes when another recipient owns
+                # the field via `assigned_field_ids`.
+                active_assigned_set = set(active_recipient.get("assigned_field_ids") or [])
+                ownership_by_field_id = {}  # field_id → tpl_rid (or None when none)
+                for r in recipients:
+                    tpl_rid = r.get("template_recipient_id")
+                    for fid in (r.get("assigned_field_ids") or []):
+                        if fid and tpl_rid:
+                            ownership_by_field_id.setdefault(fid, tpl_rid)
                 signed_recipient_tpl_ids = {
                     r.get("template_recipient_id")
                     for r in recipients
@@ -781,14 +850,17 @@ class EnhancedDocumentService:
                         cleaned[fid] = val
                         continue
                     assigned_to = p.get("assigned_to") or p.get("recipient_id")
-                    if not assigned_to:
+                    # Layer ownership signals: template-level → runtime list.
+                    runtime_owner = ownership_by_field_id.get(fid)
+                    effective_owner = assigned_to or runtime_owner
+                    if not effective_owner:
                         # Unassigned field — trust cumulative write.
                         cleaned[fid] = val
                         continue
-                    if assigned_to == active_tpl_rid:
+                    if effective_owner == active_tpl_rid or fid in active_assigned_set:
                         # Owned by this recipient — accept.
                         cleaned[fid] = val
-                    elif assigned_to in signed_recipient_tpl_ids and fid in existing_fd:
+                    elif effective_owner in signed_recipient_tpl_ids and fid in existing_fd:
                         # Already signed by the rightful owner — keep existing
                         # value; ignore any attempted overwrite.
                         cleaned[fid] = existing_fd[fid]
@@ -797,7 +869,7 @@ class EnhancedDocumentService:
                         # silently (log) to prevent cross-signing.
                         logger.warning(
                             f"Rejected cross-recipient field write: field={fid} "
-                            f"assigned_to={assigned_to} active={active_tpl_rid}"
+                            f"owner={effective_owner} active={active_tpl_rid}"
                         )
                 field_data = cleaned
             except Exception as _e:
@@ -872,7 +944,7 @@ class EnhancedDocumentService:
                         field_values=merged_field_data,
                         signatures=all_sigs,
                         verification_id=template_verification_id,
-                        verification_label="Template Verification ID",
+                        verification_label="DocFlow Verification ID",
                     )
                     if rendered_pdf and len(rendered_pdf) > 0:
                         signed_pdf = rendered_pdf
@@ -982,6 +1054,38 @@ class EnhancedDocumentService:
                 new_status = "completed" if all_required_done else "partially_signed"
                 completed_at = signed_at_iso if all_required_done else None
 
+            # Phase 81.7 — Merge field "convert to text fallback" persistence.
+            # When the sender configured a merge field with `fallbackToInput=true`
+            # (or it was simply empty when the doc was generated) and the signer
+            # types a value, persist that value under BOTH:
+            #   - field_data[merge_id]           → PDF render path
+            #   - merge_field_values[<alias>]    → webhook + downstream CRM
+            # This guarantees the entered value reaches the final signed PDF
+            # AND the webhook payload, regardless of which lookup is used.
+            updated_merge_values = dict(document.get("merge_field_values") or {})
+            try:
+                placements_for_merge = overlay_field_placements or field_placements or []
+                for _p in placements_for_merge:
+                    if (_p.get("type") or "").lower() != "merge":
+                        continue
+                    _pid = _p.get("id")
+                    if not _pid:
+                        continue
+                    _typed = merged_field_data.get(_pid)
+                    if _typed in (None, ""):
+                        continue
+                    _m_obj = _p.get("merge_object") or _p.get("mergeObject") or ""
+                    _m_fld = _p.get("merge_field") or _p.get("mergeField") or ""
+                    _alias = (
+                        f"{_m_obj}.{_m_fld}".strip(".")
+                        if (_m_obj and _m_fld)
+                        else (_m_fld or _p.get("merge_token") or _p.get("mergePattern") or "").strip("{}").strip()
+                    )
+                    if _alias:
+                        updated_merge_values[_alias] = _typed
+            except Exception as _mv_err:
+                logger.warning(f"Merge-value persistence soft-failed: {_mv_err}")
+
             # Update document fields in one go
             await self.collection.update_one(
                 {"id": document_id, "tenant_id": tenant_id},
@@ -991,6 +1095,7 @@ class EnhancedDocumentService:
                         "signed_s3_key": signed_s3_key,
                         "signed_file_url": signed_file_url,
                         "field_data": merged_field_data,
+                        "merge_field_values": updated_merge_values,
                         "signed_at": signed_at_iso,
                         "updated_at": signed_at_iso,
                         "completed_at": completed_at
@@ -1473,23 +1578,32 @@ class EnhancedDocumentService:
                     pass
 
             # Determine routing mode and signing eligibility
+            # Phase 81.56 — TERMINAL_DONE must include reviewer/approver
+            # completion statuses ("reviewed", "approved") so the
+            # sequential "first pending action" lookup correctly skips
+            # them when checking whether the current recipient is the
+            # active step. Without "reviewed"/"approved" in this set,
+            # a Sign-after-Reviewer (or Sign-after-Approver) flow falsely
+            # reported can_sign=False because the Reviewer was still
+            # treated as the "first pending action".
             routing_mode = document.get("routing_mode") or "sequential"
             required = [
                 r for r in recipients
                 if r.get("is_required", True)
             ]
             required_sorted = sorted(required, key=lambda r: int(r.get("routing_order", 1) or 1))
-            active_first = next((r for r in required_sorted if r.get("status") not in ["signed", "completed", "declined"]), None)
+            TERMINAL_DONE = ("signed", "completed", "approved", "reviewed", "declined")
+            active_first = next((r for r in required_sorted if r.get("status") not in TERMINAL_DONE), None)
 
             can_sign = True
-            if active_recipient.get("status") in ["signed", "completed", "declined"]:
+            if active_recipient.get("status") in TERMINAL_DONE:
                 can_sign = False
             elif routing_mode == "sequential":
                 if not active_first or active_recipient.get("id") != active_first.get("id"):
                     can_sign = False
 
             is_completed = all(
-                r.get("status") in ["signed", "completed"] for r in required_sorted
+                r.get("status") in ("signed", "completed", "approved", "reviewed") for r in required_sorted
             ) if required_sorted else False
 
             # Return a copy without Mongo _id (if present)

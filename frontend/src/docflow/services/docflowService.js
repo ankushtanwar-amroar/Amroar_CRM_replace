@@ -67,6 +67,33 @@ export const docflowService = {
     return api.delete(`/docflow/templates/${templateId}`);
   },
 
+  // Phase 81.54 — Incoming interlinks: list every other template whose
+  // field_placements declare a linked_to.field_id pointing at the given
+  // field on this template. Used by the Visual Builder to surface an
+  // "Linked from" panel even when the link is owned by Template B.
+  async getIncomingLinks(fieldId, excludeTemplateId = null) {
+    const params = { field_id: fieldId };
+    if (excludeTemplateId) params.exclude_template_id = excludeTemplateId;
+    return api.get('/docflow/templates-incoming-links', { params });
+  },
+
+  // Phase 81.55 — Bulk variant: returns a field-id-keyed map of incoming
+  // links for every field on the given template in one round-trip. Used
+  // by the Visual Builder canvas to colorize/count link badges per field.
+  async getAllIncomingLinks(templateId) {
+    return api.get(`/docflow/templates/${templateId}/all-incoming-links`);
+  },
+
+  // Phase 81.54 — Surgically patch a single field's linked_to config on a
+  // template the author may not own end-to-end. Pass {linked_to: null} to
+  // remove the link. Pass a partial object to merge.
+  async updateFieldLinkedTo(templateId, fieldId, linkedTo) {
+    return api.patch(
+      `/docflow/templates/${templateId}/fields/${fieldId}/linked-to`,
+      { linked_to: linkedTo },
+    );
+  },
+
   // ===== Version Control =====
 
   async getTemplateVersions(templateId) {
@@ -96,6 +123,15 @@ export const docflowService = {
     formData.append('description', description);
     formData.append('template_type', templateType);
     return api.post('/docflow/templates/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+  },
+
+  // Phase 81.76 — Replace the source PDF/DOC/DOCX of an EXISTING template.
+  async replaceTemplateFile(templateId, file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post(`/docflow/templates/${templateId}/replace-file`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     });
   },
@@ -210,8 +246,11 @@ export const docflowService = {
     return api.post('/docflow/documents/generate', data);
   },
 
-  async getDocuments(params = {}) {
-    return api.get('/docflow/documents', { params });
+  async getDocuments(params = {}, config = {}) {
+    // Phase 81.14 — accept an optional axios config (e.g. AbortController
+    // signal) so callers can cancel rapid successive requests when the
+    // user changes page-size / filter quickly.
+    return api.get('/docflow/documents', { params, ...config });
   },
 
   async getDocumentDetail(documentId) {
@@ -233,6 +272,78 @@ export const docflowService = {
   async unvoidRecipient(documentId, recipientId) {
     // Phase 80 — restore a voided recipient + send fresh signing email.
     return api.post(`/docflow/documents/${documentId}/recipients/${recipientId}/unvoid`);
+  },
+
+  // Phase 81.67 — Full document void (cascades to all active recipients).
+  async voidDocument(documentId, reason) {
+    return api.post(`/docflow/documents/${documentId}/void`, { reason: reason || null });
+  },
+
+  // Phase 81.42 — Package RUN recipient actions (resend / void / unvoid).
+  async resendRunRecipientEmail(runId, recipientId) {
+    return api.post(`/docflow/packages/runs/${runId}/recipients/${recipientId}/resend`);
+  },
+
+  async voidRunRecipient(runId, recipientId) {
+    return api.post(`/docflow/packages/runs/${runId}/recipients/${recipientId}/void`);
+  },
+
+  async unvoidRunRecipient(runId, recipientId) {
+    return api.post(`/docflow/packages/runs/${runId}/recipients/${recipientId}/unvoid`);
+  },
+
+
+  // Phase 81 — SMS verification (public, recipient-scoped via token).
+  async smsSendOtp(token) {
+    const resp = await fetch(`${API_URL}/api/docflow/documents/public/${token}/sms/send-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to send code');
+    }
+    return resp.json();
+  },
+
+  async smsVerifyOtp(token, code) {
+    const resp = await fetch(`${API_URL}/api/docflow/documents/public/${token}/sms/verify-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || 'Verification failed');
+    }
+    return resp.json();
+  },
+
+  // Phase 81 — Package SMS verification (token in URL identifies the recipient
+  // on the package run). Mirrors the document-flow pair above.
+  async packageSmsSendOtp(token) {
+    const resp = await fetch(`${API_URL}/api/docflow/packages/public/${token}/sms/send-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to send code');
+    }
+    return resp.json();
+  },
+
+  async packageSmsVerifyOtp(token, code) {
+    const resp = await fetch(`${API_URL}/api/docflow/packages/public/${token}/sms/verify-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || 'Verification failed');
+    }
+    return resp.json();
   },
 
   async downloadDocument(documentId, version = 'signed') {
@@ -370,6 +481,114 @@ export const docflowService = {
 
   async getPackageSubmissions(packageId) {
     return api.get(`/docflow/packages/${packageId}/submissions`);
+  },
+
+  // ===== SMS Templates APIs (Phase 81.81) =====
+
+  async listSmsTemplates() {
+    return api.get('/docflow/sms-templates');
+  },
+
+  async getSmsTemplate(templateId) {
+    return api.get(`/docflow/sms-templates/${templateId}`);
+  },
+
+  async getDefaultSmsTemplate() {
+    return api.get('/docflow/sms-templates/default');
+  },
+
+  async getSmsTemplateVariables() {
+    return api.get('/docflow/sms-templates/variables');
+  },
+
+  async createSmsTemplate(payload) {
+    return api.post('/docflow/sms-templates', payload);
+  },
+
+  async updateSmsTemplate(templateId, payload) {
+    return api.put(`/docflow/sms-templates/${templateId}`, payload);
+  },
+
+  async deleteSmsTemplate(templateId) {
+    return api.delete(`/docflow/sms-templates/${templateId}`);
+  },
+
+  async setDefaultSmsTemplate(templateId) {
+    return api.post(`/docflow/sms-templates/${templateId}/set-default`);
+  },
+
+  async previewSmsTemplate(content) {
+    return api.post('/docflow/sms-templates/preview', { content });
+  },
+
+  // ===== Content Configuration APIs (Phase 81.80) =====
+
+  async getContentConfig() {
+    return api.get('/docflow/content-config');
+  },
+
+  async getContentSection(sectionType) {
+    return api.get(`/docflow/content-config/${sectionType}`);
+  },
+
+  async updateContentSection(sectionType, content) {
+    return api.put(`/docflow/content-config/${sectionType}`, { content });
+  },
+
+  async resetContentSection(sectionType) {
+    return api.post(`/docflow/content-config/${sectionType}/reset`);
+  },
+
+  async getContentDefaults() {
+    return api.get('/docflow/content-config/_defaults/all');
+  },
+
+  // Public — no auth required. Resolves tenant from token / package_id / document_id.
+  async getPublicContentConfig({ token, packageId, documentId } = {}) {
+    const params = new URLSearchParams();
+    if (token) params.set('token', token);
+    if (packageId) params.set('package_id', packageId);
+    if (documentId) params.set('document_id', documentId);
+    const qs = params.toString();
+    const url = `${API_URL}/api/docflow/public/content-config${qs ? `?${qs}` : ''}`;
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to load content config');
+    }
+    return resp.json();
+  },
+
+  // ===== Submission Download APIs (Phase 81.77) =====
+
+  async listSubmissionDocuments(packageId, runId, submissionId) {
+    return api.get(`/docflow/packages/${packageId}/runs/${runId}/submissions/${submissionId}/documents`);
+  },
+
+  async downloadSubmissionDocument(packageId, runId, submissionId, docId) {
+    const token = localStorage.getItem('token');
+    const resp = await fetch(
+      `${API_URL}/api/docflow/packages/${packageId}/runs/${runId}/submissions/${submissionId}/documents/${docId}/download`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to download document');
+    }
+    return resp.blob();
+  },
+
+  async downloadSubmissionCombined(packageId, runId, submissionId) {
+    const token = localStorage.getItem('token');
+    const resp = await fetch(
+      `${API_URL}/api/docflow/packages/${packageId}/runs/${runId}/submissions/${submissionId}/download/combined`,
+      { headers: { 'Authorization': `Bearer ${token}` } }
+    );
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to download combined PDF');
+    }
+    return resp.blob();
   },
 
   // ===== Package Output APIs =====

@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useEffect } from 'react';
+import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 
 /**
  * useGuidedFillIn — DocuSign-style guided fill-in navigation.
@@ -120,6 +120,9 @@ export default function useGuidedFillIn({
 }) {
   const [activeFieldId, setActiveFieldId] = useState(null);
   const [started, setStarted] = useState(false);
+  // Tracks the previous activeFieldId to detect when the user clicks an
+  // already-filled date field (vs. when a date value is actually committed).
+  const prevActiveFieldIdRef = useRef(null);
 
   const recipientIdSet = useMemo(() => {
     return new Set((recipientIds || []).filter(Boolean).map(x => String(x)));
@@ -231,19 +234,63 @@ export default function useGuidedFillIn({
   // Auto-advance: after a field is filled, move to the next UNFILLED navigable
   // field so the signer flows through everything (DocuSign-style), not just the
   // required ones. Falls back to next navigable if all are filled.
+  //
+  // Phase 81.11 — DO NOT auto-advance for text-input fields (text + merge with
+  // text/email/tel fallback). Typing fires onChange on every keystroke; the
+  // first character would mark the field "filled" and steal focus mid-word.
+  // For these fields, advancement happens ONLY on explicit Tab / Next click.
+  // Auto-advance still applies to one-shot fills: signature, initials,
+  // checkbox, radio, date (manual date picker = single click commit).
+  //
+  // Date editing fix: when the user clicks an already-filled manual date field
+  // to edit it, activeFieldId changes but fieldValues hasn't changed yet.
+  // By comparing to prevActiveFieldIdRef, we detect this "just activated" case
+  // and skip auto-advance so the calendar can open. The next time the effect
+  // runs (when fieldValues changes after the user picks a date), activeFieldId
+  // matches the ref and auto-advance proceeds normally.
   useEffect(() => {
-    if (!activeFieldId) return;
+    if (!activeFieldId) {
+      prevActiveFieldIdRef.current = null;
+      return;
+    }
 
     const activeField = navigableFields.find(f => f.id === activeFieldId);
     if (!activeField) {
       // Active no longer navigable (e.g., hidden by conditional) → first unfilled pending
+      prevActiveFieldIdRef.current = null;
       setActiveFieldId(pendingFieldIds[0] || navigableFieldIds[0] || null);
       return;
     }
+
+    // Skip auto-advance for text-input style fields (typing) and date fields.
+    // Date fields (manual mode and merge+date fallback) must not auto-advance on
+    // value change because the browser fires onChange before the user finishes
+    // typing all 4 year digits, causing premature focus jumps and wrong years like
+    // 1905. Advancement happens via onBlur or explicit Tab/Enter/Next instead.
+    const activeType = getFieldType(activeField);
+    const isManualDate = activeType === 'date' && (activeField.dateMode || 'auto') === 'manual';
+    const isMergeDateFallback =
+      activeType === 'merge' &&
+      activeField.fallbackToInput === true &&
+      (activeField.fallbackInputType || 'text') === 'date';
+    const isTextInput =
+      activeType === 'text' ||
+      isManualDate ||
+      isMergeDateFallback ||
+      (activeType === 'merge' &&
+        activeField.fallbackToInput === true &&
+        (activeField.fallbackInputType || 'text') !== 'checkbox');
+    if (isTextInput) {
+      prevActiveFieldIdRef.current = activeFieldId;
+      return;
+    }
+
     // Compute unfilled across all navigable (required + optional)
     const navUnfilled = navigableFields.filter(f => !isFilled(f, fieldValues)).map(f => f.id);
-    const wasFilled = !navUnfilled.includes(activeFieldId);
-    if (wasFilled) {
+    const nowFilled = !navUnfilled.includes(activeFieldId);
+
+    if (nowFilled) {
+      prevActiveFieldIdRef.current = activeFieldId;
       const currentIdx = navigableFieldIds.indexOf(activeFieldId);
       // Next UNFILLED after current position; else first unfilled; else next navigable; else stay
       const nextId = navigableFieldIds
@@ -253,6 +300,8 @@ export default function useGuidedFillIn({
         || navigableFieldIds[currentIdx + 1]
         || null;
       setActiveFieldId(nextId);
+    } else {
+      prevActiveFieldIdRef.current = activeFieldId;
     }
   }, [fieldValues, navigableFields, navigableFieldIds, pendingFieldIds, activeFieldId]);
 
