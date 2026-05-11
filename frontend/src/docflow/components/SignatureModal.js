@@ -131,8 +131,8 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, 
     const font = SIGNATURE_FONTS[fontIndex];
 
     // Configured (authored) font size from Visual Builder — px units.
-    // Fallback defaults match the placeholder/preview text size so signed
-    // output visually matches the unsigned preview.
+    // Fallback defaults match the placeholder text so signed output
+    // visually matches the unsigned preview.
     const authoredFontSize = (() => {
       if (fieldStyle?.fontSize) {
         const n = Number(fieldStyle.fontSize.toString().replace('px', ''));
@@ -141,38 +141,53 @@ const SignatureModal = ({ isOpen, onClose, onSave, fieldId, isInitials = false, 
       return isInitials ? 16 : 18;
     })();
 
-    // Sharpness multiplier — the canvas is rasterised at 3× pixel
-    // density so the final PDF stays crisp on print.
+    // Sharpness multiplier — canvas is rasterised at 3× pixel density
+    // so the final PDF stays crisp on print.
     const DPI = 3;
-
-    // ── TIGHT canvas around the glyphs ──
-    // The canvas is sized to the TEXT bounding box (not the field box).
-    // The signer UI and backend PDF then render this image at exactly
-    // `authoredFontSize` CSS/PDF pixels tall (width = auto). This makes
-    // the rendered signature visibly different for different configured
-    // font sizes — e.g. a 24px signature is twice as tall as a 12px one,
-    // regardless of how the user sized the field box in Visual Builder.
     const glyphH = authoredFontSize * DPI;
-    const padX = Math.max(6 * DPI, glyphH * 0.25); // horizontal breathing room
-    const padY = Math.max(4 * DPI, glyphH * 0.25); // descender / ascender space
 
-    // First-pass measurement to compute canvas width.
+    // ── TIGHT canvas: text fills the canvas height edge-to-edge ──
+    // The signer UI and backend PDF render this image at exactly
+    // `authoredFontSize` CSS / PDF pixels tall. To make the rendered
+    // glyphs appear at exactly `authoredFontSize` (matching the
+    // placeholder text), the text MUST fill the canvas height —
+    // otherwise the inner glyphs scale down with the surrounding
+    // padding.  Use the font's actual bounding box metrics for an
+    // accurate fit, with a small fallback when metrics aren't
+    // available.
     const measureCanvas = document.createElement('canvas');
     const mctx = measureCanvas.getContext('2d');
     mctx.font = `${font.weight} ${glyphH}px ${font.family}`;
-    const measuredW = Math.max(glyphH * 0.6, mctx.measureText(text).width);
+    const m = mctx.measureText(text);
+
+    // Real ink height when metrics are available; else assume tight
+    // glyph height matches the font size.
+    const ascent = Number.isFinite(m.actualBoundingBoxAscent)
+      ? Math.max(0, m.actualBoundingBoxAscent) : glyphH * 0.78;
+    const descent = Number.isFinite(m.actualBoundingBoxDescent)
+      ? Math.max(0, m.actualBoundingBoxDescent) : glyphH * 0.22;
+    const inkHeight = Math.max(glyphH * 0.8, ascent + descent);
+    const measuredW = Math.max(glyphH * 0.6, m.width);
+
+    // Tiny side padding so glyphs don't touch the image edges, but
+    // VERTICAL padding is zero — the canvas height equals the text
+    // bounding box. This is what guarantees the rendered signature
+    // matches the configured font size in CSS / PDF pixels.
+    const padX = Math.max(2 * DPI, glyphH * 0.12);
 
     const canvas = document.createElement('canvas');
     canvas.width = Math.round(measuredW + padX * 2);
-    canvas.height = Math.round(glyphH + padY * 2);
+    canvas.height = Math.round(inkHeight);
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     ctx.font = `${font.weight} ${glyphH}px ${font.family}`;
     ctx.fillStyle = (fieldStyle?.color) || '#1a1a2e';
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+    ctx.textBaseline = 'alphabetic';
+    // Position baseline so ascenders fit at the top and descenders
+    // just barely fit at the bottom of the canvas.
+    ctx.fillText(text, canvas.width / 2, ascent);
 
     return canvas.toDataURL('image/png');
   };
