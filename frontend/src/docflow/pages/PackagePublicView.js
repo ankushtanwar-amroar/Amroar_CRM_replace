@@ -39,6 +39,7 @@ const PackagePublicView = () => {
   const [submitting, setSubmitting] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [completedAction, setCompletedAction] = useState(null);
+  const [completedAllDone, setCompletedAllDone] = useState(null);
   const [activeDocIndex, setActiveDocIndex] = useState(null);
   const [showRejectDialog, setShowRejectDialog] = useState(false);
   const [rejectReason, setRejectReason] = useState('');
@@ -1029,6 +1030,7 @@ const PackagePublicView = () => {
       const data = await res.json();
       setCompleted(true);
       setCompletedAction(data.action);
+      setCompletedAllDone(data.all_recipients_completed ?? true);
       toast.success(data.message || 'Package signed successfully');
       // Session complete — clear cached signature so no other signer on the
       // same device can accidentally reuse it.
@@ -1181,6 +1183,8 @@ const PackagePublicView = () => {
   const action = completedAction || active_recipient?.action_taken;
   const canVoidPublic = pkg.package_status === 'in_progress';
   const allSigningComplete = pkg.all_signing_complete || false;
+  const deliveryMode = pkg.delivery_mode || 'email';
+  const isPublicRecipientsMode = deliveryMode === 'public_recipients';
 
   // ── Voided state ──
   if (voided) {
@@ -1201,6 +1205,32 @@ const PackagePublicView = () => {
   // ── Completed state ──
   if (recipientCompleted) {
     const isRejected = action === 'rejected';
+
+    // For public_recipients mode: determine if all recipients have completed.
+    // completedAllDone comes from the sign-with-fields response (fresh sign).
+    // allSigningComplete comes from the package fetch (page reload case).
+    const packageFullyComplete = isPublicRecipientsMode
+      ? (completedAllDone !== null ? completedAllDone : allSigningComplete)
+      : true;
+
+    // Show "waiting for others" screen when this signer is done but the package isn't
+    if (isSigner && !isRejected && !packageFullyComplete) {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center" data-testid="package-public-waiting">
+          <div className="text-center max-w-md px-6">
+            <div className="flex h-20 w-20 mx-auto items-center justify-center rounded-full bg-amber-50 mb-6">
+              <Clock className="h-10 w-10 text-amber-500" />
+            </div>
+            <h2 className="text-2xl font-bold text-gray-800 mb-2">Your Signing is Complete</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              You have signed &ldquo;{package_name}&rdquo;. Waiting for the remaining recipients to complete their signing.
+            </p>
+            <p className="text-xs text-gray-400">Signed documents will be available once all parties have signed.</p>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center" data-testid="package-public-completed">
         <div className="text-center max-w-md px-6">
@@ -1219,8 +1249,8 @@ const PackagePublicView = () => {
           </p>
           <p className="text-xs text-gray-400">Action: {action}</p>
 
-          {/* Download signed documents */}
-          {isSigner && pkg.documents && pkg.documents.length > 0 && (
+          {/* Download signed documents — only shown when package is fully complete */}
+          {isSigner && packageFullyComplete && pkg.documents && pkg.documents.length > 0 && (
             <div className="mt-6 space-y-2">
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wider">Signed Documents</p>
               {pkg.documents.map((doc, i) => (

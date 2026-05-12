@@ -614,6 +614,7 @@ async def get_package_public(
         "total_documents": len(documents),
         "documents": documents,
         "all_signing_complete": all_signing_complete,
+        "delivery_mode": package.get("delivery_mode", "email"),
         "sender": sender_info,
         "sms_required": sms_required,
         "sms_mode": bool(package.get("sms_mode", False)),
@@ -1597,6 +1598,7 @@ async def sign_with_fields(
     # Check if this is public_recipients mode — independent signing, no routing
     delivery_mode = package.get("delivery_mode", "email")
     actor = signer_email or signer_name or "anonymous"
+    all_done = True  # default: routing engine handles progression for non-public_recipients
 
     if delivery_mode == "public_recipients":
         # ── Independent signing: skip routing engine wave logic ──
@@ -1705,8 +1707,8 @@ async def sign_with_fields(
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update recipient status")
 
-    # Send signed document confirmation email to signer
-    if signer_email and signed_doc_urls:
+    # Send signed document confirmation email to signer (skipped for public_recipients — no email workflow)
+    if delivery_mode != "public_recipients" and signer_email and signed_doc_urls:
         try:
             from ..services.system_email_service import SystemEmailService
             email_svc = SystemEmailService()
@@ -1736,6 +1738,7 @@ async def sign_with_fields(
         "status": "signed" if delivery_mode == "public_recipients" else "processing",
         "documents_signed": signed_doc_count,
         "signed_documents": signed_doc_urls,
+        "all_recipients_completed": all_done,
     }
 @router.post("/{token}/mark-reviewed")
 async def mark_reviewed(
