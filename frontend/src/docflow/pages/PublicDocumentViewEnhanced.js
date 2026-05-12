@@ -1732,9 +1732,10 @@ const PublicDocumentViewEnhanced = () => {
                             const v = fieldValues[f.id];
                             hasValue = v !== undefined && v !== null && v !== '';
                           }
-                          return hasValue
-                            ? { ...f, readOnly: true }
-                            : { ...f, field_hidden: true };
+                          // Only surface a completed prior-signer value — empty
+                          // placeholders for future recipients must not render at all.
+                          if (hasValue) return { ...f, readOnly: true };
+                          return null;
                         }
                         // Truly orphaned (no recipient has any assignment AND
                         // the field has no assigned_to) → keep visible to the
@@ -1743,8 +1744,9 @@ const PublicDocumentViewEnhanced = () => {
                         return { ...f, field_disabled: false, field_hint: 'Complete this field' };
                       }
 
-                      return { ...f, readOnly: true };
-                    })}
+                      // Any remaining unassigned field type — hide completely.
+                      return null;
+                    }).filter(Boolean)}
                     onFieldsChange={handleFieldsChange}
                     readOnly={!docData?.can_sign}
                     showSignatureModal={showSignatureModal}

@@ -424,21 +424,39 @@ const PackagePublicLinkView = () => {
 
   const handleDocFieldsChange = useCallback((docId, values) => {
     setDocFieldValues(prev => {
-      const next = {
-        ...prev,
-        [docId]: { ...(prev[docId] || {}), ...values },
-      };
-      // Forward fanout: source → linked targets across the package.
-      for (const [key, value] of Object.entries(values)) {
-        const linkedUpdates = fanoutLinkedFieldValue(docId, key, value);
-        for (const [otherDocId, otherVals] of Object.entries(linkedUpdates)) {
-          next[otherDocId] = { ...(next[otherDocId] || {}), ...otherVals };
+      const next = { ...prev };
+      next[docId] = { ...(next[docId] || {}), ...values };
+
+      // BFS over the full interlink graph so chains of any depth propagate.
+      // Without BFS, only a single hop fires (Doc1→Doc2 only; Doc2→Doc3 is
+      // missed). visited prevents infinite loops in circular / two-way graphs.
+      const queue = Object.entries(values).map(([key, value]) => ({ srcDocId: docId, key, value }));
+      const visited = new Set(queue.map(({ srcDocId, key }) => `${srcDocId}::${key}`));
+
+      while (queue.length > 0) {
+        const { srcDocId, key, value } = queue.shift();
+
+        // Forward: any doc whose placement has linked_to pointing at srcDocId's field.
+        const fwd = fanoutLinkedFieldValue(srcDocId, key, value);
+        for (const [tgtDocId, tgtVals] of Object.entries(fwd)) {
+          next[tgtDocId] = { ...(next[tgtDocId] || {}), ...tgtVals };
+          for (const [k, v] of Object.entries(tgtVals)) {
+            const vk = `${tgtDocId}::${k}`;
+            if (!visited.has(vk)) { visited.add(vk); queue.push({ srcDocId: tgtDocId, key: k, value: v }); }
+          }
         }
-        const reverseUpdates = reverseFanoutLinkedFieldValue(docId, key, value);
-        for (const [otherDocId, otherVals] of Object.entries(reverseUpdates)) {
-          next[otherDocId] = { ...(next[otherDocId] || {}), ...otherVals };
+
+        // Reverse: srcDocId's field may itself be a two-way target; write back to source.
+        const rev = reverseFanoutLinkedFieldValue(srcDocId, key, value);
+        for (const [tgtDocId, tgtVals] of Object.entries(rev)) {
+          next[tgtDocId] = { ...(next[tgtDocId] || {}), ...tgtVals };
+          for (const [k, v] of Object.entries(tgtVals)) {
+            const vk = `${tgtDocId}::${k}`;
+            if (!visited.has(vk)) { visited.add(vk); queue.push({ srcDocId: tgtDocId, key: k, value: v }); }
+          }
         }
       }
+
       return next;
     });
   }, [fanoutLinkedFieldValue, reverseFanoutLinkedFieldValue]);

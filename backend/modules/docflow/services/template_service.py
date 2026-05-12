@@ -272,7 +272,85 @@ class TemplateService:
 
         await self.collection.insert_one(new_template)
         logger.info(f"Created v{new_version} (id={new_id}) from v{source.get('version',1)} in group {group_id}")
+
+        # Rewire interlinks: any template whose field_placements have a
+        # linked_to.template_id pointing at the old version must be updated
+        # to point at the new version so links survive version bumps.
+        try:
+            patched = await self._rewire_interlink_template_refs(
+                old_template_id=source["id"],
+                new_template_id=new_id,
+                group_id=group_id,
+                tenant_id=tenant_id,
+            )
+            if patched:
+                logger.info(f"[Interlink] Rewired linked_to.template_id in {patched} template(s) after version bump")
+        except Exception as _ie:
+            logger.warning(f"[Interlink] Non-fatal: failed to rewire interlink refs after version bump: {_ie}")
+
         return new_template
+
+    async def _rewire_interlink_template_refs(
+        self,
+        old_template_id: str,
+        new_template_id: str,
+        group_id: str,
+        tenant_id: str,
+    ) -> int:
+        """
+        After promoting a new template version, update every field placement
+        in this tenant whose linked_to.template_id still points at the old
+        version ID. Rewrites to new_template_id and backfills
+        linked_to.template_group_id for stable future resolution.
+
+        Returns the count of templates that were patched.
+        """
+        patched = 0
+        cursor = self.collection.find(
+            {
+                "tenant_id": tenant_id,
+                "field_placements": {
+                    "$elemMatch": {
+                        "linked_to.template_id": old_template_id,
+                        "linked_to.enabled": True,
+                    }
+                },
+            },
+            {"_id": 0, "id": 1, "field_placements": 1},
+        )
+        async for tpl in cursor:
+            updated_placements = []
+            changed = False
+            for fp in tpl.get("field_placements", []):
+                lt = fp.get("linked_to") or {}
+                if lt.get("enabled") and lt.get("template_id") == old_template_id:
+                    fp = {
+                        **fp,
+                        "linked_to": {
+                            **lt,
+                            "template_id": new_template_id,
+                            "template_group_id": group_id,
+                        },
+                    }
+                    changed = True
+                updated_placements.append(fp)
+
+            if changed:
+                await self.collection.update_one(
+                    {"id": tpl["id"]},
+                    {
+                        "$set": {
+                            "field_placements": updated_placements,
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
+                patched += 1
+                logger.info(
+                    f"[Interlink] Rewired linked_to refs in tpl={tpl['id'][:8]}: "
+                    f"{old_template_id[:8]} → {new_template_id[:8]}"
+                )
+        return patched
 
     async def delete_template(self, template_id: str, tenant_id: str) -> bool:
         """

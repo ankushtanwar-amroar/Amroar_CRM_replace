@@ -572,11 +572,15 @@ const PackagePublicView = () => {
           const v = values[f.id];
           hasValue = v !== undefined && v !== null && v !== '';
         }
-        return { ...f, readOnly: true };
+        // Only expose a completed value from a prior signer — empty placeholders
+        // belonging to future recipients must not be rendered at all.
+        if (hasValue) return { ...f, readOnly: true };
+        return null;
       }
 
-      return { ...f, readOnly: true };
-    });
+      // Any remaining unassigned field type — hide completely.
+      return null;
+    }).filter(Boolean);
   }, [templateFieldsMap, docFieldValues]);
 
   // Handle field value changes for a specific document
@@ -687,22 +691,39 @@ const PackagePublicView = () => {
 
   const handleDocFieldsChange = useCallback((docId, values) => {
     setDocFieldValues(prev => {
-      const next = {
-        ...prev,
-        [docId]: { ...(prev[docId] || {}), ...values },
-      };
-      // Forward fanout: source → linked targets across the package.
-      for (const [key, value] of Object.entries(values)) {
-        const linkedUpdates = fanoutLinkedFieldValue(docId, key, value);
-        for (const [otherDocId, otherVals] of Object.entries(linkedUpdates)) {
-          next[otherDocId] = { ...(next[otherDocId] || {}), ...otherVals };
+      const next = { ...prev };
+      next[docId] = { ...(next[docId] || {}), ...values };
+
+      // BFS over the full interlink graph so chains of any depth propagate.
+      // Without BFS, only a single hop fires (Doc1→Doc2 only; Doc2→Doc3 is
+      // missed). visited prevents infinite loops in circular / two-way graphs.
+      const queue = Object.entries(values).map(([key, value]) => ({ srcDocId: docId, key, value }));
+      const visited = new Set(queue.map(({ srcDocId, key }) => `${srcDocId}::${key}`));
+
+      while (queue.length > 0) {
+        const { srcDocId, key, value } = queue.shift();
+
+        // Forward: any doc whose placement has linked_to pointing at srcDocId's field.
+        const fwd = fanoutLinkedFieldValue(srcDocId, key, value);
+        for (const [tgtDocId, tgtVals] of Object.entries(fwd)) {
+          next[tgtDocId] = { ...(next[tgtDocId] || {}), ...tgtVals };
+          for (const [k, v] of Object.entries(tgtVals)) {
+            const vk = `${tgtDocId}::${k}`;
+            if (!visited.has(vk)) { visited.add(vk); queue.push({ srcDocId: tgtDocId, key: k, value: v }); }
+          }
         }
-        // Phase 2 — Reverse fanout for two-way targets.
-        const reverseUpdates = reverseFanoutLinkedFieldValue(docId, key, value);
-        for (const [otherDocId, otherVals] of Object.entries(reverseUpdates)) {
-          next[otherDocId] = { ...(next[otherDocId] || {}), ...otherVals };
+
+        // Reverse: srcDocId's field may itself be a two-way target; write back to source.
+        const rev = reverseFanoutLinkedFieldValue(srcDocId, key, value);
+        for (const [tgtDocId, tgtVals] of Object.entries(rev)) {
+          next[tgtDocId] = { ...(next[tgtDocId] || {}), ...tgtVals };
+          for (const [k, v] of Object.entries(tgtVals)) {
+            const vk = `${tgtDocId}::${k}`;
+            if (!visited.has(vk)) { visited.add(vk); queue.push({ srcDocId: tgtDocId, key: k, value: v }); }
+          }
         }
       }
+
       return next;
     });
   }, [fanoutLinkedFieldValue, reverseFanoutLinkedFieldValue]);
@@ -1538,21 +1559,23 @@ const PackagePublicView = () => {
                     slots.push(f);
                   }
                   const filled = slots.filter(isFilled).length;
-                  const isComplete = slots.length > 0 && filled === slots.length;
+                  const recipientHasSlots = slots.length > 0;
+                  const isComplete = recipientHasSlots && filled === slots.length;
                   const isStarted = filled > 0 && !isComplete;
+                  // Recipient has no assigned fields in this doc → treated as complete once the
+                  // doc has a signed version (someone else signed it; nothing left for them to do).
+                  const noFieldsComplete = !recipientHasSlots && !!doc.has_signed_version;
+                  const isCompletedForRecipient = isComplete || noFieldsComplete;
                   let statusLabel = 'Pending';
                   let statusTone = 'pending';
-                  if (doc.has_signed_version) {
+                  if (isCompletedForRecipient) {
                     statusLabel = 'Completed';
-                    statusTone = 'complete';
-                  } else if (isComplete) {
-                    statusLabel = 'Ready';
                     statusTone = 'complete';
                   } else if (isStarted) {
                     statusLabel = 'In Progress';
                     statusTone = 'progress';
                   }
-                  return { filled, total: slots.length, isComplete: isComplete || !!doc.has_signed_version, statusLabel, statusTone };
+                  return { filled, total: slots.length, isComplete: isCompletedForRecipient, statusLabel, statusTone };
                 }}
               />
             </div>
@@ -1597,13 +1620,16 @@ const PackagePublicView = () => {
                       })();
                       if (hasVal) filled += 1;
                     }
-                    const isComplete = total > 0 && filled === total;
+                    const recipientHasSlots = total > 0;
+                    const isComplete = recipientHasSlots && filled === total;
+                    const noFieldsComplete = !recipientHasSlots && !!doc.has_signed_version;
+                    const isCompletedForRecipient = isComplete || noFieldsComplete;
                     return {
                       filled,
                       total,
-                      isComplete: isComplete || !!doc.has_signed_version,
-                      statusLabel: doc.has_signed_version ? 'Completed' : isComplete ? 'Ready' : filled > 0 ? 'In Progress' : 'Pending',
-                      statusTone: doc.has_signed_version ? 'complete' : isComplete ? 'complete' : filled > 0 ? 'progress' : 'pending',
+                      isComplete: isCompletedForRecipient,
+                      statusLabel: isCompletedForRecipient ? 'Completed' : filled > 0 ? 'In Progress' : 'Pending',
+                      statusTone: isCompletedForRecipient ? 'complete' : filled > 0 ? 'progress' : 'pending',
                     };
                   }}
                 />
@@ -1654,6 +1680,7 @@ const PackagePublicView = () => {
                     onFieldsChange={(values) => handleDocFieldsChange(doc.document_id, values)}
                     showSignatureModal={(fieldId, isInit, fieldObj) => openSignatureModal(doc.document_id, fieldId, isInit, fieldObj)}
                     signatureModalOpen={signatureModalOpen}
+                    onNextDoc={i < documents.length - 1 ? () => setActiveDocIndex(i + 1) : undefined}
                   />
                 </div>
               );

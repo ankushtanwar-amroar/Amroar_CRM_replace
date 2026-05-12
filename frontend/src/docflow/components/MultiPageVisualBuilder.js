@@ -103,7 +103,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       const resp = await docflowService.getTemplates('', '', 1, 200);
       const list = (resp?.templates || resp?.data || resp || [])
         .filter(t => t.id && t.id !== currentTemplateId)
-        .map(t => ({ id: t.id, name: t.name, version: t.version, status: t.status }));
+        .map(t => ({ id: t.id, name: t.name, version: t.version, status: t.status, template_group_id: t.template_group_id || t.id }));
       setInterlinkTemplates(list);
     } catch (e) {
       console.error('Failed to load interlink templates', e);
@@ -2081,7 +2081,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                               field_id: '',
                               sync_scope: 'same_recipient_only',
                               direction: 'one_way',
-                              read_only_target: true,
+                              read_only_target: false,
                             });
                           } else {
                             updateFieldProperty(selectedField.id, 'linked_to', null);
@@ -2105,9 +2105,11 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           onChange={(e) => {
                             const tplId = e.target.value;
                             loadInterlinkTargetFields(tplId);
+                            const tplMeta = interlinkTemplates.find(t => t.id === tplId);
                             updateFieldProperty(selectedField.id, 'linked_to', {
                               ...(selectedField.linked_to || {}),
                               template_id: tplId,
+                              template_group_id: tplMeta?.template_group_id || tplId,
                               field_id: '',
                             });
                           }}

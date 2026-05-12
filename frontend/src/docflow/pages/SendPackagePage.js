@@ -191,6 +191,9 @@ const SendPackagePage = () => {
 
   // Field assignment
   const [templateFields, setTemplateFields] = useState({});
+  // templateGroupIds: { [template_id]: template_group_id } — used to resolve
+  // stale linked_to.template_id refs that predate a create-version call.
+  const [templateGroupIds, setTemplateGroupIds] = useState({});
   const [fieldAssignments, setFieldAssignments] = useState({});
   const [loadingFields, setLoadingFields] = useState(false);
   // Phase 81.89 — Interlink uses ONLY the explicit `linked_to` config saved
@@ -235,12 +238,18 @@ const SendPackagePage = () => {
         const link = srcField?.linked_to;
         if (!link || !link.enabled || !link.field_id) return;
         const targetTemplateId = link.template_id;
+        const targetGroupId = link.template_group_id;
         const targetFieldId = link.field_id;
         // Find every doc in this package that uses the link's target template.
-        // (A package can include the same template more than once; in
-        // practice it's usually unique. We sync to every match.)
+        // Primary match: exact template_id. Fallback: template_group_id so
+        // links survive create-version calls that update the template UUID.
         docs.forEach((dstDoc, dstDocIdx) => {
-          if (dstDoc.template_id !== targetTemplateId) return;
+          const exactMatch = dstDoc.template_id === targetTemplateId;
+          const groupMatch = !exactMatch
+            && targetGroupId
+            && templateGroupIds[dstDoc.template_id]
+            && templateGroupIds[dstDoc.template_id] === targetGroupId;
+          if (!exactMatch && !groupMatch) return;
           const dstFields = templateFields[dstDoc.template_id] || [];
           if (!dstFields.some(f => f.id === targetFieldId)) return;
           const a = `${srcDocIdx}::${srcField.id}`;
@@ -251,7 +260,7 @@ const SendPackagePage = () => {
       });
     });
     return idx;
-  }, [pkg, templateFields]);
+  }, [pkg, templateFields, templateGroupIds]);
 
   // Resolve the full transitive link cluster for a starting field using BFS.
   // (Handles A↔B and B→C chains so all related fields get the same recipient.)
@@ -325,15 +334,20 @@ const SendPackagePage = () => {
     if (!pkg?.documents?.length) return;
     setLoadingFields(true);
     const newFields = {};
+    const newGroupIds = {};
     for (const doc of pkg.documents) {
       try {
         const data = await docflowService.getFieldPlacements(doc.template_id);
         newFields[doc.template_id] = data?.field_placements || [];
+        if (data?.template_group_id) {
+          newGroupIds[doc.template_id] = data.template_group_id;
+        }
       } catch (e) {
         newFields[doc.template_id] = [];
       }
     }
     setTemplateFields(newFields);
+    setTemplateGroupIds(newGroupIds);
     setLoadingFields(false);
   }, [pkg]);
 

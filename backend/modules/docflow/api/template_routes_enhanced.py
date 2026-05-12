@@ -422,7 +422,8 @@ async def get_template_field_placements(
 
     return {
         "field_placements": placements,
-        "fields": template.get("fields", [])
+        "fields": template.get("fields", []),
+        "template_group_id": template.get("template_group_id") or template_id,
     }
 
 

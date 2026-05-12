@@ -32,6 +32,7 @@ export default function PackageDocSection({
   allSigningComplete,
   apiUrl,
   onToggle,
+  onNextDoc,             // Called when user clicks "Next Document" after completing this doc
   onFieldsChange,
   onHiddenFieldsChange,  // Phase 81.57 — bubble dynamic conditional hidden ids up
   showSignatureModal,
@@ -259,6 +260,16 @@ export default function PackageDocSection({
               Complete
             </span>
           )}
+          {isSigner && allComplete && typeof onNextDoc === 'function' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onNextDoc(); }}
+              className="hidden sm:inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-md hover:bg-indigo-700 transition-colors shadow-sm"
+              data-testid={`pkg-doc-${index}-next-doc-btn`}
+            >
+              Next Document
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          )}
           <button
             onClick={onToggle}
             className="inline-flex items-center gap-1.5 px-1.5 py-1 text-gray-400 hover:text-gray-600 transition-colors"
@@ -275,7 +286,7 @@ export default function PackageDocSection({
       </div>
 
       {/* Mobile-only Start/Next/Previous strip (when actions don't fit in header) */}
-      {isSigner && (showPrev || showStart || showNext) && (
+      {isSigner && (showPrev || showStart || showNext || (allComplete && typeof onNextDoc === 'function')) && (
         <div className="sm:hidden flex items-center justify-end gap-1.5 px-3 pb-3 -mt-1">
           {showPrev && (
             <button
@@ -301,6 +312,16 @@ export default function PackageDocSection({
               className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 rounded-md hover:bg-emerald-700"
             >
               Next
+              <ChevronRight className="h-3.5 w-3.5" />
+            </button>
+          )}
+          {allComplete && typeof onNextDoc === 'function' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onNextDoc(); }}
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 rounded-md hover:bg-indigo-700"
+              data-testid={`pkg-doc-${index}-next-doc-btn-mobile`}
+            >
+              Next Document
               <ChevronRight className="h-3.5 w-3.5" />
             </button>
           )}
