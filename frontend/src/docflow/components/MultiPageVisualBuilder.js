@@ -303,7 +303,9 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   useEffect(() => { pdfPageOffsetsRef.current = pdfPageOffsets; }, [pdfPageOffsets]);
 
   const handlePdfPageLoad = useCallback((pageNum, page) => {
-    const height = page.height;
+    // Floor matches react-pdf's canvas.style.height = Math.floor(viewport.height)px,
+    // so pdfPageOffsets (used for _displayY) stays in sync with actual DOM layout.
+    const height = Math.floor(page.height);
     setPdfPageHeights(prev => {
       if (prev[pageNum] === height) return prev;
       const next = { ...prev, [pageNum]: height };
@@ -640,15 +642,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
         const r = pageNodes[i].getBoundingClientRect();
         if (clientY >= r.top && clientY <= r.bottom) {
           const pageNum = parseInt(pageNodes[i].getAttribute('data-pdf-page'), 10) || (i + 1);
-          // Pages 2+ wrappers have border-t (1px) + pt-4 (16px) above the PDF
-          // content. Subtract this so pageRelativeY is measured from the PDF
-          // content edge — matching pagination mode and the viewer's coordinate
-          // system. Drops in the gap area (clientY < r.top + offset*zoom) clamp
-          // to 0 = top of PDF content on that page.
-          const wrapperOffset = i > 0 ? PDF_WRAPPER_TOP_OFFSET : 0;
+          // Measure from the actual PDF canvas top rather than estimating via
+          // a hardcoded wrapper offset. CSS zoom causes sub-pixel rounding that
+          // accumulates across pages, making the estimate drift by ~0.3px/page
+          // (~4px on page 16). Querying the canvas directly eliminates the error.
+          const canvasEl = pageNodes[i].querySelector('canvas.react-pdf__Page__canvas');
+          const canvasTop = canvasEl
+            ? canvasEl.getBoundingClientRect().top
+            : r.top + (i > 0 ? PDF_WRAPPER_TOP_OFFSET : 0) * zoom;
           return {
             page: pageNum,
-            pageRelativeY: Math.max(0, (clientY - r.top) / zoom - wrapperOffset),
+            pageRelativeY: Math.max(0, (clientY - canvasTop) / zoom),
           };
         }
       }
@@ -660,12 +664,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       const firstR = pageNodes[0].getBoundingClientRect();
       if (clientY < firstR.top) return { page: 1, pageRelativeY: 0 };
       const lastIdx = pageNodes.length - 1;
-      const lastR = pageNodes[lastIdx].getBoundingClientRect();
-      const lastNum = parseInt(pageNodes[lastIdx].getAttribute('data-pdf-page'), 10) || (lastIdx + 1);
-      const lastWrapperOffset = lastIdx > 0 ? PDF_WRAPPER_TOP_OFFSET : 0;
+      const lastPageNode = pageNodes[lastIdx];
+      const lastR = lastPageNode.getBoundingClientRect();
+      const lastNum = parseInt(lastPageNode.getAttribute('data-pdf-page'), 10) || (lastIdx + 1);
+      const lastCanvasEl = lastPageNode.querySelector('canvas.react-pdf__Page__canvas');
+      const lastCanvasTop = lastCanvasEl
+        ? lastCanvasEl.getBoundingClientRect().top
+        : lastR.top + (lastIdx > 0 ? PDF_WRAPPER_TOP_OFFSET : 0) * zoom;
+      const lastCanvasBottom = lastCanvasEl ? lastCanvasEl.getBoundingClientRect().bottom : lastR.bottom;
       return {
         page: lastNum,
-        pageRelativeY: Math.max(0, (lastR.bottom - lastR.top) / zoom - lastWrapperOffset),
+        pageRelativeY: Math.max(0, (lastCanvasBottom - lastCanvasTop) / zoom),
       };
     }
 
@@ -793,11 +802,11 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     if (viewMode === 'continuous' && pdfCanvasRef.current) {
       const pageNode = pdfCanvasRef.current.querySelector(`[data-pdf-page="${field.page}"]`);
       if (pageNode) {
-        const pageRect = pageNode.getBoundingClientRect();
-        // Subtract PDF_WRAPPER_TOP_OFFSET for page 2+ to align with the PDF
-        // content edge, matching resolvePageFromPoint's coordinate system.
-        const wrapperOffset = (field.page || 1) > 1 ? PDF_WRAPPER_TOP_OFFSET : 0;
-        const cursorPageRelY = (e.clientY - pageRect.top) / zoom - wrapperOffset;
+        const canvasEl = pageNode.querySelector('canvas.react-pdf__Page__canvas');
+        const canvasTop = canvasEl
+          ? canvasEl.getBoundingClientRect().top
+          : pageNode.getBoundingClientRect().top + ((field.page || 1) > 1 ? PDF_WRAPPER_TOP_OFFSET : 0) * zoom;
+        const cursorPageRelY = (e.clientY - canvasTop) / zoom;
         offsetY = cursorPageRelY - field.y;
       } else {
         // HTML continuous — use measured page offsets
@@ -872,19 +881,22 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
               return f;
             }
             const pageNode = pdfCanvasRef.current.querySelector(`[data-pdf-page="${resolved.page}"]`);
-            let pageTopClientY;
+            let canvasTopClientY;
             if (pageNode) {
-              pageTopClientY = pageNode.getBoundingClientRect().top;
+              const canvasEl = pageNode.querySelector('canvas.react-pdf__Page__canvas');
+              if (canvasEl) {
+                canvasTopClientY = canvasEl.getBoundingClientRect().top;
+              } else {
+                const wrapperOffset = resolved.page > 1 ? PDF_WRAPPER_TOP_OFFSET : 0;
+                canvasTopClientY = pageNode.getBoundingClientRect().top + wrapperOffset * zoom;
+              }
             } else {
               const canvasRect = pdfCanvasRef.current.getBoundingClientRect();
               const offsets = (pageOffsetsRef.current && pageOffsetsRef.current.length) ? pageOffsetsRef.current : [0];
               const off = offsets[resolved.page - 1] || 0;
-              pageTopClientY = canvasRect.top + off * zoom;
+              canvasTopClientY = canvasRect.top + off * zoom;
             }
-            // Subtract PDF_WRAPPER_TOP_OFFSET for page 2+ so relY is measured
-            // from the PDF content edge, matching resolvePageFromPoint.
-            const dragWrapperOffset = resolved.page > 1 ? PDF_WRAPPER_TOP_OFFSET : 0;
-            const relY = (e.clientY - pageTopClientY) / zoom - dragWrapperOffset - dragOffsetRef.current.y;
+            const relY = (e.clientY - canvasTopClientY) / zoom - dragOffsetRef.current.y;
             return { ...f, x: newX, y: relY, page: resolved.page };
           }
           // Pagination (page) mode: pin to currently viewed page.
