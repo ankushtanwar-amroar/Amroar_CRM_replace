@@ -37,10 +37,19 @@ const TemplateEditor = () => {
   });
   const [aiPrompt, setAiPrompt] = useState('');
   const [generating, setGenerating] = useState(false);
+  const [hasGeneratedAIResponse, setHasGeneratedAIResponse] = useState(false);
+  const [aiGenerationCompleted, setAiGenerationCompleted] = useState(false);
+  const [generatedDocumentContent, setGeneratedDocumentContent] = useState('');
   const [mergeFields, setMergeFields] = useState([]);
   const [activeTab, setActiveTab] = useState('details');
   const [validationResult, setValidationResult] = useState(null);
   const [isValidated, setIsValidated] = useState(false);
+
+  useEffect(() => {
+    setHasGeneratedAIResponse(false);
+    setAiGenerationCompleted(false);
+    setGeneratedDocumentContent('');
+  }, [templateId]);
   // Non-zero value triggers ValidationPanel auto-run; zero = opened manually.
   const [autoRunValidationToken, setAutoRunValidationToken] = useState(0);
   const [uploadedPdfFile, setUploadedPdfFile] = useState(null);
@@ -196,8 +205,8 @@ const TemplateEditor = () => {
   // Only show full tabs in edit mode (after template has been created/uploaded)
   const TABS = isEditMode ? [
     { id: 'details', label: 'Details', icon: FileText },
-    { id: 'visual', label: 'Visual Builder', icon: Edit },
     { id: 'connection', label: 'Connection', icon: Link2 },
+    { id: 'visual', label: 'Visual Builder', icon: Edit },
     { id: 'integration', label: 'Integration', icon: Webhook },
     { id: 'validation', label: 'Validation', icon: CheckCircle },
     { id: 'logs', label: 'Logs', icon: Clock },
@@ -581,17 +590,21 @@ const TemplateEditor = () => {
       setGenerating(true);
       const result = await docflowService.aiGenerateTemplate(aiPrompt, industry, selectedDocType, basePrompt);
       if (result.success) {
+        const generatedHtml = result.html || '';
         const newTemplateData = {
           ...templateData,
           name: result.suggested_name || templateData.name || 'Untitled Template',
           description: result.description || templateData.description,
-          html_content: result.html,
+          html_content: generatedHtml,
           source: 'ai_generated',
           ai_prompt: aiPrompt,
           template_type: selectedDocType?.toLowerCase() || templateData.template_type,
           status: 'draft',
         };
-
+        const hasHtml = generatedHtml.trim().length > 0;
+        setHasGeneratedAIResponse(hasHtml);
+        setAiGenerationCompleted(hasHtml);
+        setGeneratedDocumentContent(hasHtml ? generatedHtml : '');
         // Auto-convert HTML to content blocks
         let blocks = [];
         if (result.html) {
@@ -639,9 +652,15 @@ const TemplateEditor = () => {
         toast.success('Template generated! Click Save to create.');
         setActiveTab('details');
       } else {
+        setHasGeneratedAIResponse(false);
+        setAiGenerationCompleted(false);
+        setGeneratedDocumentContent('');
         toast.error(result.error || 'Failed to generate template');
       }
     } catch (error) {
+      setHasGeneratedAIResponse(false);
+      setAiGenerationCompleted(false);
+      setGeneratedDocumentContent('');
       console.error('Error generating template:', error);
       toast.error('Failed to generate template');
     } finally {
@@ -727,6 +746,9 @@ const TemplateEditor = () => {
             })
           );
         } catch (_) {}
+        setHasGeneratedAIResponse(false);
+        setAiGenerationCompleted(false);
+        setGeneratedDocumentContent('');
         toast.success('Draft saved');
       } else {
         const response = await docflowService.createTemplate(saveData);
@@ -738,7 +760,7 @@ const TemplateEditor = () => {
         }
         toast.success('Template saved as draft');
       }
-      setTimeout(() => navigate('/setup/docflow'), 1000);
+      setTimeout(() => navigate(-1), 1000);
     } catch (error) {
       console.error('Save as Draft failed', error);
       toast.error(error?.response?.data?.detail || 'Failed to save draft');
@@ -785,8 +807,11 @@ const TemplateEditor = () => {
         if (fieldPlacements && fieldPlacements.length > 0) {
           try { await docflowService.updateFieldPlacements(templateId, fieldPlacements); } catch {}
         }
+        setHasGeneratedAIResponse(false);
+        setAiGenerationCompleted(false);
+        setGeneratedDocumentContent('');
         toast.success('Template saved and activated!');
-        setTimeout(() => navigate('/setup/docflow'), 1200);
+        setTimeout(() => navigate(-1), 1200);
         return;
       }
 
@@ -811,8 +836,11 @@ const TemplateEditor = () => {
           if (contentBlocks && contentBlocks.length > 0) {
             try { await docflowService.updateContentBlocks(response.id, contentBlocks); } catch {}
           }
+          setHasGeneratedAIResponse(false);
+          setAiGenerationCompleted(false);
+          setGeneratedDocumentContent('');
           toast.success(`New version v${response.version} created from v${fromVer}!`);
-          setTimeout(() => navigate('/setup/docflow'), 1200);
+          setTimeout(() => navigate(-1), 1200);
         } else {
           toast.error('Failed to create new version');
         }
@@ -831,8 +859,11 @@ const TemplateEditor = () => {
       if (fieldPlacements && fieldPlacements.length > 0) {
         await docflowService.updateFieldPlacements(response.id, fieldPlacements);
       }
+      setHasGeneratedAIResponse(false);
+      setAiGenerationCompleted(false);
+      setGeneratedDocumentContent('');
       toast.success('Template created as draft');
-      setTimeout(() => navigate('/setup/docflow'), 1500);
+      setTimeout(() => navigate(-1), 1500);
     } catch (error) {
       console.error('Error saving template:', error);
       toast.error('Failed to save template');
@@ -870,7 +901,7 @@ const TemplateEditor = () => {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
             <button
-              onClick={() => navigate('/setup/docflow')}
+              onClick={() => navigate(-1)}
               className="p-2 text-gray-500 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
               data-testid="back-to-dashboard-btn"
             >
@@ -1406,7 +1437,7 @@ const TemplateEditor = () => {
                 </div>
 
                 {/* Document Preview */}
-                {templateData.html_content && (
+                {hasGeneratedAIResponse && aiGenerationCompleted && generatedDocumentContent.trim().length > 0 && (
                   <div className="bg-white rounded-lg border border-gray-200 p-6">
                     <div className="flex items-center justify-between mb-4">
                       <h3 className="text-lg font-semibold text-gray-900">Rendered AI Document</h3>
@@ -1525,7 +1556,7 @@ const TemplateEditor = () => {
           h1, h2, h3 { margin-top: 0; }
           p { margin-bottom: 10px; }
         </style>
-        ${templateData.html_content}
+        ${generatedDocumentContent || templateData.html_content}
       </div>
     `;
 
@@ -1586,7 +1617,7 @@ const TemplateEditor = () => {
                                     const convResp = await fetch(`${API_URL}/api/docflow/templates/convert-html-to-blocks`, {
                                       method: 'POST',
                                       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                                      body: JSON.stringify({ html: templateData.html_content })
+                                      body: JSON.stringify({ html: generatedDocumentContent || templateData.html_content })
                                     });
                                     if (convResp.ok) {
                                       const convData = await convResp.json();
@@ -1639,7 +1670,7 @@ const TemplateEditor = () => {
                           </head>
                           <body>
                             <div class="preview-container">
-                              ${templateData.html_content}
+                              ${generatedDocumentContent}
                             </div>
                           </body>
                         </html>

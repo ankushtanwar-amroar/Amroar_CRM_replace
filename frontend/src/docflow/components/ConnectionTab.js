@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Cloud, CheckCircle2, XCircle, Loader2, Database, RefreshCw, Save, ShieldCheck, AlertTriangle, ChevronDown, ExternalLink } from 'lucide-react';
+import { Cloud, CheckCircle2, XCircle, Loader2, Database, RefreshCw, Save, ShieldCheck, AlertTriangle, ExternalLink, Zap } from 'lucide-react';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import SearchableSelect from './SearchableSelect';
+import ProviderCard from './ProviderCard';
 import { useModuleEntitlementsContext } from '../../context/ModuleContext';
 
 const ConnectionTab = ({ templateData, onUpdate }) => {
@@ -275,99 +276,113 @@ const ConnectionTab = ({ templateData, onUpdate }) => {
   return (
     <div className="space-y-5" data-testid="connection-tab">
       {/* Provider Type Selection */}
-      <div className="bg-white rounded-lg border border-gray-200 p-5">
-        <h3 className="text-base font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <Cloud className="h-5 w-5 text-indigo-600" />
-          {isDocFlowOnly ? 'Integration Provider' : 'CRM Provider'}
-        </h3>
-        <div className={`grid grid-cols-1 ${isDocFlowOnly ? '' : 'md:grid-cols-2'} gap-3`}>
-          {/* Internal CRM — hidden for DocFlow-only tenants */}
-          {!isDocFlowOnly && (
-          <button
-            data-testid="provider-internal"
-            onClick={() => handleProviderTypeChange('internal')}
-            className={`p-4 rounded-lg border-2 text-left transition-all ${
-              providerType === 'internal'
-                ? 'border-indigo-500 bg-indigo-50/50 shadow-sm'
-                : 'border-gray-200 hover:border-gray-300 hover:shadow-sm'
-            }`}
-          >
-            <div className="flex items-center justify-between mb-2">
-              <Database className={`h-5 w-5 ${providerType === 'internal' ? 'text-indigo-600' : 'text-gray-400'}`} />
-              {providerType === 'internal' && (
-                <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] font-semibold rounded-full flex items-center gap-1">
-                  <CheckCircle2 className="h-3 w-3" /> Active
-                </span>
-              )}
-            </div>
-            <h4 className="font-semibold text-gray-900 text-sm">Internal CRM</h4>
-            <p className="text-xs text-gray-500 mt-0.5">Use objects from this CRM</p>
-          </button>
-          )}
+      <div className="bg-white rounded-lg border border-gray-200 p-6">
+        <div className="mb-6">
+          <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-1 flex items-center gap-2">
+            <Cloud className="h-4 w-4 text-indigo-600" />
+            {isDocFlowOnly ? 'Integration Provider' : 'CRM Provider'}
+          </h3>
+          <p className="text-xs text-gray-500">
+            {isDocFlowOnly 
+              ? 'Select your integration provider to enable document generation and field mapping'
+              : 'Choose a CRM provider for your document templates. Connect via CRM Sync or use your internal CRM.'
+            }
+          </p>
+        </div>
 
-          {/* Salesforce */}
-          <button
-            data-testid="provider-salesforce"
-            onClick={() => handleProviderTypeChange('salesforce')}
-            className={`p-4 rounded-lg border-2 text-left transition-all ${
-              providerType === 'salesforce'
-                ? 'border-indigo-500 bg-indigo-50/50 shadow-sm'
-                : 'border-gray-200 hover:border-gray-300 hover:shadow-sm'
-            }`}
-          >
-            <div className="flex items-center justify-between mb-2">
-              <Cloud className={`h-5 w-5 ${providerType === 'salesforce' ? 'text-indigo-600' : 'text-gray-400'}`} />
-              {providerType === 'salesforce' && isConnected && selectedConnectionId && (
-                <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] font-semibold rounded-full flex items-center gap-1">
-                  <CheckCircle2 className="h-3 w-3" /> Connected
-                </span>
-              )}
-              {providerType === 'salesforce' && connectionStatus === 'error' && (
-                <span className="px-2 py-0.5 bg-red-100 text-red-600 text-[10px] font-semibold rounded-full flex items-center gap-1">
-                  <XCircle className="h-3 w-3" /> Error
-                </span>
-              )}
-            </div>
-            <h4 className="font-semibold text-gray-900 text-sm">Salesforce</h4>
-            <p className="text-xs text-gray-500 mt-0.5">Connect via CRM Sync providers</p>
-          </button>
+        <div className={`grid grid-cols-1 ${isDocFlowOnly ? 'md:grid-cols-2 lg:grid-cols-3' : 'md:grid-cols-2'} gap-4`}>
+          {/* Internal CRM Provider — Show but disabled for DocFlow-only tenants */}
+          <ProviderCard
+            provider={{
+              icon: Database,
+              name: 'Internal CRM',
+              description: 'Use objects from your CRM',
+              id: 'internal'
+            }}
+            isSelected={!isDocFlowOnly && providerType === 'internal'}
+            isDisabled={isDocFlowOnly}
+            onSelect={!isDocFlowOnly ? handleProviderTypeChange : undefined}
+            badge={!isDocFlowOnly && providerType === 'internal' ? 'active' : (isDocFlowOnly ? 'disabled' : null)}
+            tooltip={isDocFlowOnly ? 'Internal CRM is not available. Please use Salesforce or upgrade your plan.' : undefined}
+          />
+
+          {/* Salesforce Provider */}
+          <ProviderCard
+            provider={{
+              icon: Cloud,
+              name: 'Salesforce',
+              description: 'Connect via CRM Sync providers',
+              id: 'salesforce'
+            }}
+            isSelected={providerType === 'salesforce'}
+            isDisabled={false}
+            onSelect={handleProviderTypeChange}
+            badge={providerType === 'salesforce' && isConnected && selectedConnectionId ? 'connected' : (providerType === 'salesforce' ? 'active' : null)}
+          />
+
+          {/* HubSpot Provider (Coming Soon) */}
+          <ProviderCard
+            provider={{
+              icon: Cloud,
+              name: 'HubSpot',
+              description: 'Enterprise sales and marketing',
+              id: 'hubspot'
+            }}
+            isSelected={false}
+            isDisabled={true}
+            badge="coming-soon"
+            tooltip="HubSpot integration coming soon"
+          />
+        </div>
+
+        {/* Info message for disabled providers */}
+        <div className="mt-5 p-3 bg-blue-50 border border-blue-200 rounded-lg flex items-start gap-2">
+          <Zap className="h-4 w-4 text-blue-600 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-xs font-medium text-blue-900">Roadmap</p>
+            <p className="text-[11px] text-blue-700 mt-0.5">
+              Additional integrations are coming soon. Contact us if you have specific integration requests.
+            </p>
+          </div>
         </div>
       </div>
 
       {/* Salesforce Connection Selector — only visible when Salesforce is selected */}
       {providerType === 'salesforce' && (
-        <div className="bg-white rounded-lg border border-gray-200 p-5">
-          <h3 className="text-base font-semibold text-gray-900 mb-1 flex items-center gap-2">
-            <Cloud className="h-5 w-5 text-indigo-600" />
-            Select Salesforce Connection
-          </h3>
-          <p className="text-xs text-gray-500 mb-3">
-            Choose a Salesforce connection from CRM Sync. <a href="/setup/connections" target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline inline-flex items-center gap-0.5">Manage connections <ExternalLink className="h-3 w-3" /></a>
-          </p>
+        <div className="bg-white rounded-lg border border-gray-200 p-6">
+          <div className="mb-4">
+            <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-1 flex items-center gap-2">
+              <Cloud className="h-4 w-4 text-indigo-600" />
+              Select Salesforce Connection
+            </h3>
+            <p className="text-xs text-gray-500">
+              Choose a Salesforce connection from CRM Sync. <a href="/setup/connections" target="_blank" rel="noreferrer" className="text-indigo-600 hover:text-indigo-700 font-medium inline-flex items-center gap-0.5">Manage connections <ExternalLink className="h-3 w-3" /></a>
+            </p>
+          </div>
 
           {/* Migration warning */}
           {needsMigration && (
-            <div className="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2">
+            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-2">
               <AlertTriangle className="h-4 w-4 text-amber-500 mt-0.5 shrink-0" />
               <div>
-                <p className="text-xs font-medium text-amber-800">Please select a Salesforce connection</p>
+                <p className="text-xs font-medium text-amber-800">Action Required: Select a Salesforce connection</p>
                 <p className="text-[11px] text-amber-600 mt-0.5">This template was using the legacy direct Salesforce connection. Please select a provider from CRM Sync to continue.</p>
               </div>
             </div>
           )}
 
           {loadingSfConnections ? (
-            <div className="flex items-center gap-2 text-gray-500 py-3">
+            <div className="flex items-center justify-center gap-2 text-gray-500 py-6">
               <Loader2 className="h-4 w-4 animate-spin" />
               <span className="text-sm">Loading Salesforce connections...</span>
             </div>
           ) : sfConnections.length === 0 ? (
-            <div className="py-4 text-center bg-gray-50 rounded-lg border border-dashed border-gray-300">
+            <div className="py-6 text-center bg-gray-50 rounded-lg border border-dashed border-gray-300">
               <Cloud className="h-8 w-8 text-gray-300 mx-auto mb-2" />
-              <p className="text-sm text-gray-500 font-medium">No Salesforce connections found</p>
-              <p className="text-xs text-gray-400 mt-1">
+              <p className="text-sm text-gray-600 font-medium">No Salesforce connections found</p>
+              <p className="text-xs text-gray-500 mt-1">
                 Add a Salesforce connection in{' '}
-                <a href="/setup/connections" className="text-indigo-600 hover:underline">CRM Sync</a> first.
+                <a href="/setup/connections" className="text-indigo-600 hover:text-indigo-700 font-medium">CRM Sync</a> first.
               </p>
             </div>
           ) : (
@@ -381,22 +396,22 @@ const ConnectionTab = ({ templateData, onUpdate }) => {
                     onClick={() => handleConnectionSelect(conn.id)}
                     className={`w-full p-3 rounded-lg border-2 text-left transition-all flex items-center justify-between ${
                       isSelected
-                        ? 'border-blue-500 bg-blue-50/50 shadow-sm'
-                        : 'border-gray-200 hover:border-gray-300'
+                        ? 'border-indigo-500 bg-indigo-50/60 shadow-sm'
+                        : 'border-gray-200 hover:border-indigo-300 hover:shadow-sm hover:bg-gray-50/50'
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      <Cloud className={`h-4 w-4 ${isSelected ? 'text-blue-600' : 'text-gray-400'}`} />
+                      <Cloud className={`h-4 w-4 ${isSelected ? 'text-indigo-600' : 'text-gray-400'}`} />
                       <div>
-                        <p className={`text-sm font-medium ${isSelected ? 'text-blue-700' : 'text-gray-700'}`}>
+                        <p className={`text-sm font-medium ${isSelected ? 'text-indigo-900' : 'text-gray-700'}`}>
                           {conn.name}
                         </p>
-                        <p className="text-[11px] text-gray-400">{conn.provider_name || 'Salesforce'}</p>
+                        <p className="text-[11px] text-gray-500">{conn.provider_name || 'Salesforce'}</p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
                       {statusBadge(conn.status)}
-                      {isSelected && <CheckCircle2 className="h-4 w-4 text-blue-600" />}
+                      {isSelected && <CheckCircle2 className="h-4 w-4 text-indigo-600" />}
                     </div>
                   </button>
                 );
@@ -407,19 +422,25 @@ const ConnectionTab = ({ templateData, onUpdate }) => {
       )}
 
       {/* Connection Status + Actions */}
-      <div className={`rounded-lg border p-4 ${
-        isConnected ? 'bg-green-50 border-green-200' :
-        connectionStatus === 'error' ? 'bg-red-50 border-red-200' :
-        'bg-gray-50 border-gray-200'
+      <div className={`rounded-lg border p-5 transition-all duration-200 ${
+        isConnected 
+          ? 'bg-green-50/50 border-green-200' 
+          : connectionStatus === 'error' 
+            ? 'bg-red-50/50 border-red-200' 
+            : 'bg-gray-50/50 border-gray-200'
       }`}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            {isConnected && <ShieldCheck className="h-5 w-5 text-green-600" />}
-            {connectionStatus === 'error' && <AlertTriangle className="h-5 w-5 text-red-500" />}
-            {!isConnected && connectionStatus !== 'error' && <Cloud className="h-5 w-5 text-gray-400" />}
-            <div>
-              <p className={`text-sm font-medium ${
-                isConnected ? 'text-green-700' : connectionStatus === 'error' ? 'text-red-700' : 'text-gray-600'
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3 flex-1">
+            {isConnected && <ShieldCheck className="h-5 w-5 text-green-600 mt-0.5 shrink-0" />}
+            {connectionStatus === 'error' && <AlertTriangle className="h-5 w-5 text-red-500 mt-0.5 shrink-0" />}
+            {!isConnected && connectionStatus !== 'error' && <Cloud className="h-5 w-5 text-gray-400 mt-0.5 shrink-0" />}
+            <div className="flex-1">
+              <p className={`text-sm font-semibold ${
+                isConnected 
+                  ? 'text-green-700' 
+                  : connectionStatus === 'error' 
+                    ? 'text-red-700' 
+                    : 'text-gray-700'
               }`}>
                 {isConnected
                   ? `${providerLabel} Connection Active${selectedConn ? ` — ${selectedConn.name}` : ''}`
@@ -431,30 +452,30 @@ const ConnectionTab = ({ templateData, onUpdate }) => {
                 }
               </p>
               {lastTestedAt && isConnected && (
-                <p className="text-[10px] text-green-600 mt-0.5">Last tested: {lastTestedAt}</p>
+                <p className="text-[10px] text-green-600 mt-1">Last tested: {lastTestedAt}</p>
               )}
               {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               data-testid="test-connection-btn"
               onClick={handleTestConnection}
               disabled={testing || (providerType === 'salesforce' && !selectedConnectionId)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 transition-colors disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-md border border-gray-300 bg-white hover:bg-gray-50 text-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {testing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-              Test
+              <span>Test</span>
             </button>
             <button
               data-testid="save-connection-btn"
               onClick={handleSaveConnection}
               disabled={saving || !isConnected || (providerType === 'salesforce' && !selectedConnectionId)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-md bg-indigo-600 text-white hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-              Save
+              <span>Save</span>
             </button>
           </div>
         </div>
@@ -462,20 +483,22 @@ const ConnectionTab = ({ templateData, onUpdate }) => {
 
       {/* Object Selection — disabled until connected, hidden for DocFlow-only internal */}
       {!(isDocFlowOnly && providerType === 'internal') && (
-        <div className={`bg-white rounded-lg border border-gray-200 p-5 transition-opacity ${!isConnected ? 'opacity-50 pointer-events-none' : ''}`}>
-          <h3 className="text-base font-semibold text-gray-900 mb-1 flex items-center gap-2">
-            <Database className="h-5 w-5 text-indigo-600" />
-            {providerType === 'salesforce' ? 'Salesforce Object' : 'CRM Object'}
-          </h3>
-          <p className="text-xs text-gray-500 mb-3">
-            {providerType === 'salesforce'
-              ? 'Select a Salesforce object to use for merge fields'
-              : 'Select an internal CRM object to use for merge fields'
-            }
-          </p>
+        <div className={`bg-white rounded-lg border border-gray-200 p-6 transition-all duration-200 ${!isConnected ? 'opacity-60 pointer-events-none' : ''}`}>
+          <div className="mb-4">
+            <h3 className="text-sm font-bold text-gray-900 uppercase tracking-wide mb-1 flex items-center gap-2">
+              <Database className="h-4 w-4 text-indigo-600" />
+              {providerType === 'salesforce' ? 'Salesforce Object' : 'CRM Object'}
+            </h3>
+            <p className="text-xs text-gray-500">
+              {providerType === 'salesforce'
+                ? 'Select a Salesforce object to use for merge fields. These fields will be available in your templates.'
+                : 'Select an internal CRM object to use for merge fields. These fields will be available in your templates.'
+              }
+            </p>
+          </div>
 
           {loadingObjects ? (
-            <div className="flex items-center gap-2 text-gray-500 py-3">
+            <div className="flex items-center justify-center gap-2 text-gray-500 py-4">
               <Loader2 className="h-4 w-4 animate-spin" />
               <span className="text-sm">Loading objects...</span>
             </div>
@@ -491,13 +514,17 @@ const ConnectionTab = ({ templateData, onUpdate }) => {
           )}
 
           {selectedObject && (
-            <div className="mt-3 flex items-center gap-2 text-xs text-gray-500 bg-gray-50 rounded-md px-3 py-2">
-              <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
-                providerType === 'salesforce' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
-              }`}>
-                {providerType === 'salesforce' ? 'Salesforce' : 'Internal CRM'}
-              </span>
-              <span>Merge fields: <code className="bg-gray-100 px-1 py-0.5 rounded font-mono">{`{{${selectedObject}.FieldName}}`}</code></span>
+            <div className="mt-4 p-3 bg-indigo-50 border border-indigo-200 rounded-lg">
+              <p className="text-xs text-indigo-800 font-medium mb-2">Merge Field Format</p>
+              <div className="flex items-center gap-2">
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${
+                  providerType === 'salesforce' ? 'bg-blue-100 text-blue-700' : 'bg-emerald-100 text-emerald-700'
+                }`}>
+                  {providerType === 'salesforce' ? 'Salesforce' : 'Internal CRM'}
+                </span>
+                <code className="bg-white border border-indigo-200 px-2 py-1 rounded font-mono text-[11px] text-indigo-900">{`{{${selectedObject}.FieldName}}`}</code>
+              </div>
+              <p className="text-[10px] text-indigo-600 mt-2">Use this syntax in your templates to reference fields from this object.</p>
             </div>
           )}
         </div>

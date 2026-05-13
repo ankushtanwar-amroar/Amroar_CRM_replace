@@ -28,16 +28,29 @@ const DocFlowDashboard = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
+  // Merge a single URL param without wiping the others
+  const setParam = useCallback((key, value) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (value === null || value === undefined || value === '') {
+        next.delete(key);
+      } else {
+        next.set(key, String(value));
+      }
+      return next;
+    });
+  }, [setSearchParams]);
+
   const [templates, setTemplates] = useState([]);
   const [documents, setDocuments] = useState([]);
   const [emailHistory, setEmailHistory] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [viewMode, setViewMode] = useState('grid');
-  const [activeTab, setActiveTab] = useState(searchParams.get('tab') || 'templates');
-  const [typeFilter, setTypeFilter] = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [sortBy, setSortBy] = useState('created_at');
+  const [searchQuery, setSearchQuery] = useState(() => searchParams.get('tpl_q') || '');
+  const [viewMode, setViewMode] = useState(() => searchParams.get('tpl_view') || 'grid');
+  const [activeTab, setActiveTab] = useState(searchParams.get('tab') || 'analytics');
+  const [typeFilter, setTypeFilter] = useState(() => searchParams.get('tpl_type') || 'all');
+  const [statusFilter, setStatusFilter] = useState(() => searchParams.get('tpl_status') || 'all');
+  const [sortBy, setSortBy] = useState(() => searchParams.get('tpl_sort') || 'created_at');
   const [showDeleteMenu, setShowDeleteMenu] = useState(null);
   // Clone modal
   const [cloneModalTemplate, setCloneModalTemplate] = useState(null); // template object to clone
@@ -53,8 +66,8 @@ const DocFlowDashboard = () => {
     total: 0,
     pages: 1
   });
-  const [tplPageSize, setTplPageSize] = useState(12);
-  const [tplPage, setTplPage] = useState(1);
+  const [tplPageSize, setTplPageSize] = useState(() => Number(searchParams.get('tpl_size')) || 12);
+  const [tplPage, setTplPage] = useState(() => Number(searchParams.get('tpl_page')) || 1);
   const [emailPagination, setEmailPagination] = useState({
     page: 1,
     limit: 20,
@@ -76,14 +89,14 @@ const DocFlowDashboard = () => {
   // Package listing
   const [packages, setPackages] = useState([]);
   const [packagesLoading, setPackagesLoading] = useState(false);
-  const [pkgSearch, setPkgSearch] = useState('');
-  const [pkgViewMode, setPkgViewMode] = useState('grid');
+  const [pkgSearch, setPkgSearch] = useState(() => searchParams.get('pkg_q') || '');
+  const [pkgViewMode, setPkgViewMode] = useState(() => searchParams.get('pkg_view') || 'grid');
   const [deletingPkgId, setDeletingPkgId] = useState(null);
   const [showPkgDeleteModal, setShowPkgDeleteModal] = useState(false);
   const [pkgDeleting, setPkgDeleting] = useState(false);
-  const [pkgPage, setPkgPage] = useState(1);
+  const [pkgPage, setPkgPage] = useState(() => Number(searchParams.get('pkg_page')) || 1);
   const [pkgPageSize] = useState(12);
-  const [pkgStatusFilter, setPkgStatusFilter] = useState('all');
+  const [pkgStatusFilter, setPkgStatusFilter] = useState(() => searchParams.get('pkg_status') || 'all');
   const [selectedRejectDoc, setSelectedRejectDoc] = useState(null);
   const [showRejectReasonModal, setShowRejectReasonModal] = useState(false);
 
@@ -93,7 +106,8 @@ const DocFlowDashboard = () => {
 
   useEffect(() => {
     const tab = searchParams.get('tab');
-    if (tab) setActiveTab(tab);
+    if (tab && tab !== activeTab) setActiveTab(tab);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
   const loadTemplates = async (page = 1) => {
@@ -398,7 +412,7 @@ const DocFlowDashboard = () => {
   }, [filteredPackages, pkgPage, pkgPageSize]);
 
   // Reset page on filter/search change
-  useEffect(() => { setPkgPage(1); }, [pkgSearch, pkgStatusFilter]);
+  useEffect(() => { setPkgPage(1); setParam('pkg_page', 1); }, [pkgSearch, pkgStatusFilter]); // eslint-disable-line react-hooks/exhaustive-deps
 
 
   const filteredEmailHistory = useMemo(() => {
@@ -557,10 +571,10 @@ const DocFlowDashboard = () => {
         <div className="max-w-7xl mx-auto px-6">
           <nav className="flex gap-1 py-3" data-testid="main-nav">
             {[
+              { id: 'analytics', label: 'Analytics', icon: Eye },
               { id: 'templates', label: 'Templates', icon: FileText },
               { id: 'packages', label: 'Packages', icon: Layers },
               { id: 'documents', label: 'Documents', icon: Send },
-              { id: 'analytics', label: 'Analytics', icon: Eye },
               { id: 'emails', label: 'Email History', icon: Mail },
               { id: 'email_templates', label: 'Notifications', icon: Mail },
               { id: 'content_config', label: 'Content Config', icon: Settings },
@@ -568,7 +582,7 @@ const DocFlowDashboard = () => {
             ].map(tab => (
               <button
                 key={tab.id}
-                onClick={() => { setActiveTab(tab.id); setSearchParams({ tab: tab.id }); }}
+                onClick={() => { setActiveTab(tab.id); setParam('tab', tab.id); }}
                 className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${activeTab === tab.id
                     ? 'bg-indigo-50 text-indigo-700'
                     : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
@@ -594,7 +608,7 @@ const DocFlowDashboard = () => {
                 <input
                   type="text"
                   value={searchQuery}
-                  onChange={(e) => { setSearchQuery(e.target.value); setTplPage(1); }}
+                  onChange={(e) => { const v = e.target.value; setSearchQuery(v); setTplPage(1); setParam('tpl_q', v); setParam('tpl_page', 1); }}
                   placeholder="Search templates..."
                   className="w-full pl-10 pr-4 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:border-transparent bg-gray-50 focus:bg-white transition-colors"
                   data-testid="tpl-search-input"
@@ -608,7 +622,7 @@ const DocFlowDashboard = () => {
               <div className="relative">
                 <select
                   value={typeFilter}
-                  onChange={(e) => { setTypeFilter(e.target.value); setTplPage(1); }}
+                  onChange={(e) => { setTypeFilter(e.target.value); setTplPage(1); setParam('tpl_type', e.target.value); setParam('tpl_page', 1); }}
                   className="appearance-none pl-8 pr-8 py-2 border border-gray-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 bg-white cursor-pointer"
                   data-testid="tpl-type-filter"
                 >
@@ -628,7 +642,7 @@ const DocFlowDashboard = () => {
                 {['all', 'active', 'draft'].map(s => (
                   <button
                     key={s}
-                    onClick={() => { setStatusFilter(s); setTplPage(1); }}
+                    onClick={() => { setStatusFilter(s); setTplPage(1); setParam('tpl_status', s); setParam('tpl_page', 1); }}
                     className={`px-3.5 py-1.5 text-xs font-semibold rounded-md capitalize transition-all ${
                       statusFilter === s
                         ? 'bg-white text-gray-900 shadow-sm'
@@ -649,7 +663,7 @@ const DocFlowDashboard = () => {
                 <ArrowUpDown className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400 pointer-events-none" />
                 <select
                   value={sortBy}
-                  onChange={(e) => { setSortBy(e.target.value); setTplPage(1); }}
+                  onChange={(e) => { setSortBy(e.target.value); setTplPage(1); setParam('tpl_sort', e.target.value); setParam('tpl_page', 1); }}
                   className="appearance-none pl-8 pr-8 py-2 border border-gray-200 rounded-lg text-sm bg-white cursor-pointer"
                   data-testid="tpl-sort-toggle"
                 >
@@ -665,7 +679,7 @@ const DocFlowDashboard = () => {
               {/* Page Size */}
               <select
                 value={tplPageSize}
-                onChange={(e) => { setTplPageSize(Number(e.target.value)); setTplPage(1); }}
+                onChange={(e) => { setTplPageSize(Number(e.target.value)); setTplPage(1); setParam('tpl_size', e.target.value); setParam('tpl_page', 1); }}
                 className="px-2 py-2 text-sm border border-gray-200 rounded-lg bg-white"
                 data-testid="tpl-page-size"
               >
@@ -677,14 +691,14 @@ const DocFlowDashboard = () => {
               {/* View Toggle */}
               <div className="flex border border-gray-200 rounded-lg overflow-hidden">
                 <button
-                  onClick={() => setViewMode('grid')}
+                  onClick={() => { setViewMode('grid'); setParam('tpl_view', 'grid'); }}
                   className={`p-2 transition-colors ${viewMode === 'grid' ? 'bg-indigo-50 text-indigo-600' : 'text-gray-400 hover:bg-gray-50'}`}
                   data-testid="tpl-view-grid"
                 >
                   <LayoutGrid className="h-4 w-4" />
                 </button>
                 <button
-                  onClick={() => setViewMode('list')}
+                  onClick={() => { setViewMode('list'); setParam('tpl_view', 'list'); }}
                   className={`p-2 transition-colors ${viewMode === 'list' ? 'bg-indigo-50 text-indigo-600' : 'text-gray-400 hover:bg-gray-50'}`}
                   data-testid="tpl-view-list"
                 >
@@ -1025,7 +1039,7 @@ const DocFlowDashboard = () => {
             </div>
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setTplPage(p => Math.max(1, p - 1))}
+                onClick={() => { const p = Math.max(1, tplPage - 1); setTplPage(p); setParam('tpl_page', p); }}
                 disabled={tplPage === 1}
                 className="px-4 py-2 text-xs font-semibold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-all"
                 data-testid="tpl-prev-page"
@@ -1036,7 +1050,7 @@ const DocFlowDashboard = () => {
                 Page {tplPage} of {tplTotalPages}
               </span>
               <button
-                onClick={() => setTplPage(p => Math.min(tplTotalPages, p + 1))}
+                onClick={() => { const p = Math.min(tplTotalPages, tplPage + 1); setTplPage(p); setParam('tpl_page', p); }}
                 disabled={tplPage === tplTotalPages}
                 className="px-4 py-2 text-xs font-semibold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-all"
                 data-testid="tpl-next-page"
@@ -1348,7 +1362,7 @@ const DocFlowDashboard = () => {
                 <input
                   type="text"
                   value={pkgSearch}
-                  onChange={(e) => setPkgSearch(e.target.value)}
+                  onChange={(e) => { setPkgSearch(e.target.value); setParam('pkg_q', e.target.value); }}
                   placeholder="Search packages by name, status, or recipient..."
                   className="w-full pl-10 pr-3 py-2.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
                   data-testid="pkg-search-input"
@@ -1358,7 +1372,7 @@ const DocFlowDashboard = () => {
                 {/* Status filter */}
                 <select
                   value={pkgStatusFilter}
-                  onChange={(e) => setPkgStatusFilter(e.target.value)}
+                  onChange={(e) => { setPkgStatusFilter(e.target.value); setParam('pkg_status', e.target.value); }}
                   className="px-3 py-2.5 border border-gray-200 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   data-testid="pkg-status-filter"
                 >
@@ -1372,14 +1386,14 @@ const DocFlowDashboard = () => {
                 {/* View toggle */}
                 <div className="flex items-center bg-gray-100 rounded-lg p-0.5" data-testid="pkg-view-toggle">
                   <button
-                    onClick={() => setPkgViewMode('grid')}
+                    onClick={() => { setPkgViewMode('grid'); setParam('pkg_view', 'grid'); }}
                     className={`p-2 rounded-md transition-colors ${pkgViewMode === 'grid' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
                     data-testid="pkg-view-grid-btn"
                   >
                     <LayoutGrid className="h-4 w-4" />
                   </button>
                   <button
-                    onClick={() => setPkgViewMode('table')}
+                    onClick={() => { setPkgViewMode('table'); setParam('pkg_view', 'table'); }}
                     className={`p-2 rounded-md transition-colors ${pkgViewMode === 'table' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
                     data-testid="pkg-view-table-btn"
                   >
@@ -1584,7 +1598,7 @@ const DocFlowDashboard = () => {
                 </div>
                 <div className="flex gap-2">
                   <button
-                    onClick={() => setPkgPage(p => Math.max(1, p - 1))}
+                    onClick={() => { const p = Math.max(1, pkgPage - 1); setPkgPage(p); setParam('pkg_page', p); }}
                     disabled={pkgPage === 1}
                     className="px-4 py-2 text-xs font-semibold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50"
                     data-testid="pkg-prev-page"
@@ -1595,7 +1609,7 @@ const DocFlowDashboard = () => {
                     Page {pkgPage} of {pkgTotalPages}
                   </span>
                   <button
-                    onClick={() => setPkgPage(p => Math.min(pkgTotalPages, p + 1))}
+                    onClick={() => { const p = Math.min(pkgTotalPages, pkgPage + 1); setPkgPage(p); setParam('pkg_page', p); }}
                     disabled={pkgPage === pkgTotalPages}
                     className="px-4 py-2 text-xs font-semibold text-gray-700 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50"
                     data-testid="pkg-next-page"
