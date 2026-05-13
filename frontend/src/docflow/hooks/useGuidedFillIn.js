@@ -229,7 +229,9 @@ export default function useGuidedFillIn({
   const totalRequired = requiredFieldIds.length;
   const completedCount = totalRequired - pendingFieldIds.length;
   const hasAnyRequired = totalRequired > 0;
-  const allComplete = totalRequired > 0 && pendingFieldIds.length === 0;
+  // Document is complete if: NO required fields exist, OR all required fields are filled.
+  // This allows optional-only documents to be marked complete.
+  const allComplete = pendingFieldIds.length === 0;
 
   // Auto-advance: after a field is filled, move to the next UNFILLED navigable
   // field so the signer flows through everything (DocuSign-style), not just the

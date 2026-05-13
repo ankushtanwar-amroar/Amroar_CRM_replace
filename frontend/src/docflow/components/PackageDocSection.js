@@ -260,6 +260,7 @@ export default function PackageDocSection({
               Complete
             </span>
           )}
+          {console.log(isSigner,allComplete,typeof onNextDoc === 'function',"asdasdasdasd")}
           {isSigner && allComplete && typeof onNextDoc === 'function' && (
             <button
               onClick={(e) => { e.stopPropagation(); onNextDoc(); }}

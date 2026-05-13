@@ -1679,7 +1679,7 @@ const PackagePublicView = () => {
                     onToggle={() => { /* Phase 81.60: collapse disabled — sidebar controls active doc */ }}
                     onFieldsChange={(values) => handleDocFieldsChange(doc.document_id, values)}
                     showSignatureModal={(fieldId, isInit, fieldObj) => openSignatureModal(doc.document_id, fieldId, isInit, fieldObj)}
-                    signatureModalOpen={signatureModalOpen}
+                    signatureModalOpen={signatureModalOpen || reusePrompt.open}
                     onNextDoc={i < documents.length - 1 ? () => setActiveDocIndex(i + 1) : undefined}
                   />
                 </div>

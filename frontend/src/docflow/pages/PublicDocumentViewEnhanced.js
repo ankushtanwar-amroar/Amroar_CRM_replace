@@ -1755,6 +1755,7 @@ const PublicDocumentViewEnhanced = () => {
                     onHiddenFieldsChange={setHiddenFieldIds}
                     onFieldClick={syncGuidedFromClick}
                     onEnterNext={handleNextGuided}
+                    signatureModalOpen={signatureModalOpen || reusePrompt.open}
                     scrollToken={scrollToken}
                   />
                 );

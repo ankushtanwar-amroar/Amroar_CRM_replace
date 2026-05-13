@@ -1167,7 +1167,7 @@ const PackagePublicLinkView = () => {
                       showSignatureModal={(fieldId, isInit, fieldObj) => openSignatureModal(doc.document_id, fieldId, isInit, fieldObj)}
                       hasSignedVersion={false}
                       autoStartToken={autoStartTokens[doc.document_id] || 0}
-                      signatureModalOpen={signatureModalOpen}
+                      signatureModalOpen={signatureModalOpen || reusePrompt.open}
                     />
                   </div>
                 );
