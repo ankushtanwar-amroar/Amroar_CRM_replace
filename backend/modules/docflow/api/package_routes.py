@@ -615,10 +615,25 @@ async def update_package_documents(
         if not tmpl:
             raise HTTPException(status_code=400, detail=f"Template '{doc.template_id}' not found")
 
-    new_docs = [
-        {"template_id": d.template_id, "document_name": d.document_name, "order": d.order}
-        for d in sorted(req.documents, key=lambda x: x.order)
-    ]
+    # Preserve any existing field_placements so the Package Builder edits survive
+    # a Documents-tab reorder/add/remove operation.
+    existing_pkg = await db.docflow_packages.find_one(
+        {"id": package_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0, "documents": 1}
+    )
+    existing_fps_by_tid = {
+        d.get("template_id"): d.get("field_placements", [])
+        for d in (existing_pkg or {}).get("documents", [])
+        if d.get("template_id")
+    }
+
+    new_docs = []
+    for d in sorted(req.documents, key=lambda x: x.order):
+        entry = {"template_id": d.template_id, "document_name": d.document_name, "order": d.order}
+        fp = existing_fps_by_tid.get(d.template_id, [])
+        if fp:
+            entry["field_placements"] = fp
+        new_docs.append(entry)
 
     await db.docflow_packages.update_one(
         {"id": package_id},
@@ -940,6 +955,151 @@ async def download_submission_document(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{safe_name}_signed.pdf"'},
     )
+
+
+# ── Package Virtual Builder ──
+# These endpoints allow editing field placements at the PACKAGE level without
+# modifying the underlying template. Edits are stored in the package blueprint's
+# documents[].field_placements and are carried to every new run/send.
+
+class SavePackageBuilderFieldsRequest(BaseModel):
+    field_placements: List[Dict[str, Any]] = []
+
+
+@router.get("/{package_id}/builder/{template_id}/fields")
+async def get_package_builder_fields(
+    package_id: str,
+    template_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the field placements for the Package Builder.
+
+    Returns the package-level overrides if they exist, otherwise seeds from the
+    template's field_placements so the builder starts with the template's default
+    layout and the user can adjust from there.
+    """
+    # Load the blueprint (not a run)
+    package = await db.docflow_packages.find_one(
+        {"id": package_id, "tenant_id": current_user.tenant_id, "_type": {"$ne": "run"}},
+        {"_id": 0, "id": 1, "documents": 1}
+    )
+    if not package:
+        raise HTTPException(status_code=404, detail="Package not found")
+
+    # Find the requested document entry
+    doc_entry = next(
+        (d for d in (package.get("documents") or []) if d.get("template_id") == template_id),
+        None
+    )
+    if doc_entry is None:
+        raise HTTPException(status_code=404, detail="Document not found in package")
+
+    # Load the template for PDF URL + recipient definitions
+    template = await db.docflow_templates.find_one(
+        {"id": template_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0, "id": 1, "name": 1, "s3_key": 1, "pdf_file_path": 1,
+         "field_placements": 1, "recipients": 1, "crm_connection": 1, "crm_objects": 1}
+    )
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Generate a fresh presigned S3 URL for the PDF
+    pdf_url = ""
+    s3_key = template.get("s3_key")
+    if s3_key:
+        try:
+            from ..services.s3_service import S3Service
+            pdf_url = S3Service().get_document_url(s3_key, expiration=3600)
+        except Exception:
+            pdf_url = ""
+    if not pdf_url and template.get("pdf_file_path"):
+        pdf_url = template.get("pdf_file_path", "")
+
+    # Package-level overrides take priority; fall back to template fields as seed
+    package_fields = doc_entry.get("field_placements", [])
+    has_overrides = bool(package_fields)
+    fields = package_fields if has_overrides else (template.get("field_placements") or [])
+
+    return {
+        "success": True,
+        "package_id": package_id,
+        "template_id": template_id,
+        "template_name": template.get("name", ""),
+        "pdf_url": pdf_url,
+        "field_placements": fields,
+        "has_package_overrides": has_overrides,
+        "template_recipients": template.get("recipients") or [],
+        "crm_connection": template.get("crm_connection"),
+        "crm_objects": template.get("crm_objects") or [],
+    }
+
+
+@router.put("/{package_id}/builder/{template_id}/fields")
+async def save_package_builder_fields(
+    package_id: str,
+    template_id: str,
+    req: SavePackageBuilderFieldsRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Save package-level field placements for a single document.
+
+    Writes to docflow_packages.documents[].field_placements for the matching
+    template_id. The original template is NEVER modified.
+    """
+    from datetime import datetime, timezone
+
+    package = await db.docflow_packages.find_one(
+        {"id": package_id, "tenant_id": current_user.tenant_id, "_type": {"$ne": "run"}},
+        {"_id": 0, "id": 1, "status": 1, "documents": 1}
+    )
+    if not package:
+        raise HTTPException(status_code=404, detail="Package not found")
+
+    if package.get("status") == "voided":
+        raise HTTPException(status_code=400, detail="Cannot modify a voided package")
+
+    # Verify the template_id exists in the package's documents
+    doc_entry = next(
+        (d for d in (package.get("documents") or []) if d.get("template_id") == template_id),
+        None
+    )
+    if doc_entry is None:
+        raise HTTPException(status_code=404, detail="Document not found in package")
+
+    # Update only the matching document's field_placements (array-element update)
+    documents = package.get("documents", [])
+    for doc in documents:
+        if doc.get("template_id") == template_id:
+            doc["field_placements"] = req.field_placements
+            break
+
+    await db.docflow_packages.update_one(
+        {"id": package_id},
+        {"$set": {
+            "documents": documents,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }}
+    )
+
+    await audit_service.log_event(
+        tenant_id=current_user.tenant_id,
+        package_id=package_id,
+        event_type="package_builder_fields_saved",
+        actor=current_user.id,
+        metadata={
+            "template_id": template_id,
+            "field_count": len(req.field_placements),
+        },
+    )
+
+    return {
+        "success": True,
+        "package_id": package_id,
+        "template_id": template_id,
+        "field_count": len(req.field_placements),
+    }
 
 
 @router.get("/{package_id}/runs/{run_id}/submissions/{submission_id}/download/combined")

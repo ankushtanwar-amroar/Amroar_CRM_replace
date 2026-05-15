@@ -530,6 +530,7 @@ async def get_package_public(
             "has_signed_version": bool(doc_detail.get("signed_file_url") or doc_detail.get("signed_s3_key")) if doc_detail else False,
             "merge_field_values": doc_detail.get("merge_field_values", {}) if doc_detail else {},
             "field_data": doc_detail.get("field_data", {}) if doc_detail else {},
+            "field_placements": doc.get("field_placements", []),
         })
 
     # Fire "opened" webhook when recipient views the package
@@ -828,13 +829,18 @@ async def sign_with_fields(
             # (b) fully unassigned, or (c) already-signed (read-only pass-through
             # via existing field_data).
             try:
-                # Look up the template placements EARLY so we can validate
-                # ownership before merging.
-                _tpl_preview = await db.docflow_templates.find_one(
-                    {"id": template_id},
-                    {"_id": 0, "field_placements": 1}
-                )
-                _placements = (_tpl_preview or {}).get("field_placements", []) or []
+                # Look up field placements for ownership validation.
+                # Prefer package-level overrides stored on the run document;
+                # fall back to the master template only when none exist.
+                _pkg_fps = pkg_doc.get("field_placements", [])
+                if _pkg_fps:
+                    _placements = _pkg_fps
+                else:
+                    _tpl_preview = await db.docflow_templates.find_one(
+                        {"id": template_id},
+                        {"_id": 0, "field_placements": 1}
+                    )
+                    _placements = (_tpl_preview or {}).get("field_placements", []) or []
                 _placements_by_id = {p.get("id"): p for p in _placements if p.get("id")}
                 active_tpl_rid = active_recipient.get("template_recipient_id")
                 all_recipients_on_pkg = package.get("recipients", []) or []
@@ -891,20 +897,34 @@ async def sign_with_fields(
             existing_merge_values = document.get("merge_field_values", {}) or {}
             combined_field_data = {**existing_merge_values, **existing_doc_field_data, **field_data_for_doc}
 
-            # Load template field placements
-            template = await db.docflow_templates.find_one(
-                {"id": template_id},
-                {"_id": 0, "field_placements": 1, "template_group_id": 1, "name": 1, "tenant_id": 1}
-            )
-            field_placements = (template or {}).get("field_placements", [])
+            # Load field placements for PDF overlay.
+            # Package-level overrides (saved in the run document by the Virtual
+            # Builder) take priority.  Only fall back to the master template when
+            # no package overrides exist so the original template is NEVER
+            # mutated by package-specific edits.
+            _pkg_fps_for_doc = pkg_doc.get("field_placements", [])
+            if _pkg_fps_for_doc:
+                field_placements = _pkg_fps_for_doc
+                # Still need template metadata (tenant_id, name, group) for
+                # downstream logic; skip the field_placements projection.
+                template = await db.docflow_templates.find_one(
+                    {"id": template_id},
+                    {"_id": 0, "template_group_id": 1, "name": 1, "tenant_id": 1}
+                )
+            else:
+                template = await db.docflow_templates.find_one(
+                    {"id": template_id},
+                    {"_id": 0, "field_placements": 1, "template_group_id": 1, "name": 1, "tenant_id": 1}
+                )
+                field_placements = (template or {}).get("field_placements", [])
 
-            # If no field placements on this template version, resolve from latest
-            if not field_placements and template:
-                from ..services.document_service_enhanced import EnhancedDocumentService
-                _doc_svc = EnhancedDocumentService(db)
-                field_placements = await _doc_svc._resolve_latest_field_placements(template)
-                if field_placements:
-                    logger.info(f"sign-with-fields: Resolved {len(field_placements)} fields from latest template version")
+                # If no field placements on this template version, resolve from latest
+                if not field_placements and template:
+                    from ..services.document_service_enhanced import EnhancedDocumentService
+                    _doc_svc = EnhancedDocumentService(db)
+                    field_placements = await _doc_svc._resolve_latest_field_placements(template)
+                    if field_placements:
+                        logger.info(f"sign-with-fields: Resolved {len(field_placements)} fields from latest template version")
 
             # Phase 81.71 — populate missing radio-group selections from the
             # authored `defaultChecked: True` option so the PDF matches the
@@ -1443,14 +1463,30 @@ async def sign_with_fields(
                             {"_id": 0}
                         ).to_list(length=None)
 
-                    # Load this doc's template once.
+                    # Build a lookup of package-level field overrides keyed by
+                    # template_id so forward/reverse fanout uses the correct
+                    # (possibly overridden) placements for every sibling doc.
+                    _pkg_fps_map = {
+                        d.get("template_id"): d.get("field_placements", [])
+                        for d in package.get("documents", [])
+                        if d.get("template_id") and d.get("field_placements")
+                    }
+
+                    # Load this doc's placements — prefer package override.
                     tpl_cache = {}
-                    this_tpl = await db.docflow_templates.find_one(
-                        {"id": template_id},
-                        {"_id": 0, "field_placements": 1, "recipients": 1}
-                    )
-                    tpl_cache[template_id] = this_tpl or {}
-                    source_placements = (this_tpl or {}).get("field_placements", []) or []
+                    _this_pkg_fps = _pkg_fps_map.get(template_id, [])
+                    if _this_pkg_fps:
+                        _this_tpl_meta = await db.docflow_templates.find_one(
+                            {"id": template_id}, {"_id": 0, "recipients": 1}
+                        )
+                        tpl_cache[template_id] = {"field_placements": _this_pkg_fps, **(_this_tpl_meta or {})}
+                    else:
+                        this_tpl = await db.docflow_templates.find_one(
+                            {"id": template_id},
+                            {"_id": 0, "field_placements": 1, "recipients": 1}
+                        )
+                        tpl_cache[template_id] = this_tpl or {}
+                    source_placements = tpl_cache[template_id].get("field_placements", []) or []
                     source_placements_by_id = {p.get("id"): p for p in source_placements}
 
                     # Build "source value" map keyed by placement id. For
@@ -1471,11 +1507,15 @@ async def sign_with_fields(
                         if not sib_tpl_id:
                             continue
                         if sib_tpl_id not in tpl_cache:
-                            t = await db.docflow_templates.find_one(
-                                {"id": sib_tpl_id},
-                                {"_id": 0, "field_placements": 1}
-                            )
-                            tpl_cache[sib_tpl_id] = t or {}
+                            _sib_pkg_fps = _pkg_fps_map.get(sib_tpl_id, [])
+                            if _sib_pkg_fps:
+                                tpl_cache[sib_tpl_id] = {"field_placements": _sib_pkg_fps}
+                            else:
+                                t = await db.docflow_templates.find_one(
+                                    {"id": sib_tpl_id},
+                                    {"_id": 0, "field_placements": 1}
+                                )
+                                tpl_cache[sib_tpl_id] = t or {}
                         sib_placements = tpl_cache[sib_tpl_id].get("field_placements", []) or []
                         sib_updates = {}
                         for p in sib_placements:

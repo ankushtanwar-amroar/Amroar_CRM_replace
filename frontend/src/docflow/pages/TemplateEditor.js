@@ -1076,43 +1076,45 @@ const TemplateEditor = () => {
         {/* Tab Content */}
         {activeTab === 'visual' && (isEditMode || uploadedPdfFile || contentBlocks.length > 0) ? (
           (uploadedPdfFile || contentBlocks.length > 0) ? (
-            <MultiPageVisualBuilder
-              pdfFile={uploadedPdfFile}
-              currentTemplateId={templateId}
-              fields={fieldPlacements}
-              serverFieldsVersion={serverFieldsVersion}
-              onFieldsChange={(fields) => {
-                handleFieldPlacementsChange(fields);
-                setTemplateData(prev => ({ ...prev, field_placements: fields }));
-              }}
-              crmObjects={crmObjects}
-              crmConnection={templateData.crm_connection}
-              templateRecipients={templateData.recipients}
-              contentBlocks={contentBlocks}
-              onContentBlocksChange={(blocks) => {
-                setContentBlocks(blocks);
-                invalidateValidation();
-              }}
-              onTextSelect={(text, blockId) => {
-                setSelectedText(text);
-                setSelectedBlockId(blockId || '');
-              }}
-              highlightBlockId={highlightBlockId}
-              onConvertToEditable={isEditMode ? async () => {
-                try {
-                  const result = await docflowService.convertToBlocks(templateId);
-                  if (result.content_blocks?.length > 0) {
-                    setContentBlocks(result.content_blocks);
-                    toast.success(`Converted to ${result.content_blocks.length} editable blocks`);
-                  } else {
-                    toast.error('No content could be extracted from this document');
+            <div style={{ height: 'calc(100vh - 140px)' }} className="overflow-hidden">
+              <MultiPageVisualBuilder
+                pdfFile={uploadedPdfFile}
+                currentTemplateId={templateId}
+                fields={fieldPlacements}
+                serverFieldsVersion={serverFieldsVersion}
+                onFieldsChange={(fields) => {
+                  handleFieldPlacementsChange(fields);
+                  setTemplateData(prev => ({ ...prev, field_placements: fields }));
+                }}
+                crmObjects={crmObjects}
+                crmConnection={templateData.crm_connection}
+                templateRecipients={templateData.recipients}
+                contentBlocks={contentBlocks}
+                onContentBlocksChange={(blocks) => {
+                  setContentBlocks(blocks);
+                  invalidateValidation();
+                }}
+                onTextSelect={(text, blockId) => {
+                  setSelectedText(text);
+                  setSelectedBlockId(blockId || '');
+                }}
+                highlightBlockId={highlightBlockId}
+                onConvertToEditable={isEditMode ? async () => {
+                  try {
+                    const result = await docflowService.convertToBlocks(templateId);
+                    if (result.content_blocks?.length > 0) {
+                      setContentBlocks(result.content_blocks);
+                      toast.success(`Converted to ${result.content_blocks.length} editable blocks`);
+                    } else {
+                      toast.error('No content could be extracted from this document');
+                    }
+                  } catch (err) {
+                    console.error('Convert to blocks failed:', err);
+                    toast.error('Failed to convert document');
                   }
-                } catch (err) {
-                  console.error('Convert to blocks failed:', err);
-                  toast.error('Failed to convert document');
-                }
-              } : undefined}
-            />
+                } : undefined}
+              />
+            </div>
           ) : templateFileError ? (
             /* Phase 81.74 — actionable error surface when the template's
                PDF is missing/unavailable in storage. Replaces the blind

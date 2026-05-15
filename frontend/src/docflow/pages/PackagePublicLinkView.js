@@ -282,10 +282,15 @@ const PackagePublicLinkView = () => {
       const templateId = doc.template_id;
       if (!templateId || newMap[templateId]) continue;
       try {
-        const res = await fetch(`${API_URL}/api/docflow/templates/${templateId}/field-placements-public`);
-        if (res.ok) {
-          const data = await res.json();
-          newMap[templateId] = data.field_placements || [];
+        // Prefer package-level field overrides; fall back to template fields.
+        if (doc.field_placements && doc.field_placements.length > 0) {
+          newMap[templateId] = doc.field_placements;
+        } else {
+          const res = await fetch(`${API_URL}/api/docflow/templates/${templateId}/field-placements-public`);
+          if (res.ok) {
+            const data = await res.json();
+            newMap[templateId] = data.field_placements || [];
+          }
         }
       } catch (e) {
         console.error(`Failed to load fields for template ${templateId}:`, e);

@@ -26,7 +26,7 @@ const GRID_SIZE = 10;
 
 const snapToGrid = (value) => Math.round(value / GRID_SIZE) * GRID_SIZE;
 
-const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, crmConnection, templateRecipients = [], contentBlocks = [], onContentBlocksChange, onTextSelect, highlightBlockId = null, onConvertToEditable, currentTemplateId = null, serverFieldsVersion = 0 }) => {
+const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, crmConnection, templateRecipients = [], contentBlocks = [], onContentBlocksChange, onTextSelect, highlightBlockId = null, onConvertToEditable, currentTemplateId = null, serverFieldsVersion = 0, packageDocuments = null }) => {
   // Color palette for recipient assignment badges
   const RECIPIENT_COLORS = useMemo(() => [
     { bg: 'bg-blue-100', border: 'border-blue-400', text: 'text-blue-700', dot: 'bg-blue-500' },
@@ -91,6 +91,19 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   // the canvas/preview to render colored link badges without per-field
   // requests. { [fieldId]: [ { source_template_id, ..., direction }, ... ] }
   const [incomingLinksMap, setIncomingLinksMap] = useState({});
+
+  // When inside a Package Virtual Builder (packageDocuments provided), restrict
+  // the interlink template list to only the documents in this package.
+  // In the Template Virtual Builder (packageDocuments is null), fall back to the
+  // API-loaded full tenant list so global linking is preserved.
+  const visibleInterlinkTemplates = useMemo(() => {
+    if (packageDocuments && packageDocuments.length > 0) {
+      return packageDocuments
+        .filter(d => d.template_id && d.template_id !== currentTemplateId)
+        .map(d => ({ id: d.template_id, name: d.document_name || 'Untitled', version: null, template_group_id: d.template_id }));
+    }
+    return interlinkTemplates;
+  }, [packageDocuments, currentTemplateId, interlinkTemplates]);
 
   const loadInterlinkTemplates = useCallback(async () => {
     if (interlinkTemplates.length > 0 || interlinkTemplatesLoading) return;
@@ -365,7 +378,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     if (f?.linked_to?.enabled && f?.linked_to?.field_id) {
       const tplId = f.linked_to.template_id;
       const fieldId = f.linked_to.field_id;
-      const tplName = (interlinkTemplates.find(t => t.id === tplId) || {}).name || 'Linked Template';
+      const tplName = (visibleInterlinkTemplates.find(t => t.id === tplId) || {}).name || 'Linked Template';
       const fieldLabel = ((interlinkTargetFields[tplId] || []).find(x => x.id === fieldId) || {}).label || 'Linked Field';
       const dir = f.linked_to.direction || 'one_way';
       const sep = dir === 'two_way' ? '↔' : '→';
@@ -1134,7 +1147,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   };
 
   return (
-    <div className="flex w-full gap-4 h-[calc(100vh-140px)] min-h-[700px] overflow-hidden">
+    <div className="flex w-full gap-4 h-full min-h-0 overflow-hidden">
       {/* Left Sidebar - Field Palette */}
       <div className="w-64 xl:w-72 2xl:w-80 flex-shrink-0 bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col overflow-hidden">
         
@@ -2159,7 +2172,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           onChange={(e) => {
                             const tplId = e.target.value;
                             loadInterlinkTargetFields(tplId);
-                            const tplMeta = interlinkTemplates.find(t => t.id === tplId);
+                            const tplMeta = visibleInterlinkTemplates.find(t => t.id === tplId);
                             updateFieldProperty(selectedField.id, 'linked_to', {
                               ...(selectedField.linked_to || {}),
                               template_id: tplId,
@@ -2167,12 +2180,12 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                               field_id: '',
                             });
                           }}
-                          onFocus={loadInterlinkTemplates}
+                          onFocus={packageDocuments ? undefined : loadInterlinkTemplates}
                           className="w-full px-2 py-1.5 text-xs border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 bg-white"
                           data-testid="field-interlink-template"
                         >
-                          <option value="">{interlinkTemplatesLoading ? 'Loading...' : '-- Select template --'}</option>
-                          {interlinkTemplates.map(t => (
+                          <option value="">{(!packageDocuments && interlinkTemplatesLoading) ? 'Loading...' : '-- Select template --'}</option>
+                          {visibleInterlinkTemplates.map(t => (
                             <option key={t.id} value={t.id}>{t.name} {t.version ? `(v${t.version})` : ''}</option>
                           ))}
                         </select>

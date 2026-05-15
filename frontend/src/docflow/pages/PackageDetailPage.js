@@ -6,8 +6,9 @@ import {
   Eye, Send, Ban, Loader2, AlertCircle,
   Download, Webhook, Play, Bell,
   Link2, Mail, BarChart3, ScrollText,
-  Plus, Trash2, GripVertical, Search, X
+  Plus, Trash2, GripVertical, Search, X, Wrench
 } from 'lucide-react';
+import PackageBuilderTab from '../components/PackageBuilderTab';
 import { toast } from 'react-hot-toast';
 import { docflowService } from '../services/docflowService';
 import { Badge } from '../../components/ui/badge';
@@ -199,7 +200,15 @@ const PackageDetailPage = () => {
         signed_at: new Date().toISOString()
       }],
       recipient_details: { name: 'John Doe', email: 'signer@example.com' },
-      metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', performed_by: 'John Doe', performed_by_email: 'signer@example.com' }
+      field_data: {
+        'text_field_001': 'John Doe',
+        'date_field_002': '2026-03-30',
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO',
+        'record_id': 'sf_contact_123',
+        'object_type': 'Contact'
+      },
+      metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', browser: { name: 'Chrome', version: '120.0.0.0' }, os: { name: 'Windows', version: '10' }, device: { type: 'desktop' }, performed_by: 'John Doe', performed_by_email: 'signer@example.com' }
     },
     opened: {
       event: 'opened',
@@ -211,7 +220,7 @@ const PackageDetailPage = () => {
       recipient_email: 'user@example.com',
       recipient_name: 'John Doe',
       opened_at: new Date().toISOString(),
-      metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0' }
+      metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15', browser: { name: 'Safari', version: '17.0' }, os: { name: 'macOS', version: '10.15.7' }, device: { type: 'desktop' } }
     },
     sent: {
       event: 'sent',
@@ -235,8 +244,10 @@ const PackageDetailPage = () => {
       action: 'approved',
       recipient_email: 'approver@example.com',
       recipient_name: 'Jane Smith',
+      role_type: 'APPROVE_REJECT',
       reason: null,
-      metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh)', performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' }
+      approved_at: new Date().toISOString(),
+      metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', browser: { name: 'Chrome', version: '120.0.0.0' }, os: { name: 'macOS', version: '10.15.7' }, device: { type: 'desktop' }, performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' }
     },
     signed_copy: {
       event: 'signed_copy',
@@ -252,6 +263,14 @@ const PackageDetailPage = () => {
         signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
         signed_at: new Date().toISOString()
       }],
+      field_data: {
+        'text_field_001': 'John Doe',
+        'date_field_002': '2026-03-30',
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO',
+        'record_id': 'sf_contact_123',
+        'object_type': 'Contact'
+      },
       generated_at: new Date().toISOString()
     }
   };
@@ -458,6 +477,7 @@ const PackageDetailPage = () => {
               { id: 'overview', label: 'Overview', icon: Eye },
               { id: 'runs', label: 'Activity / Runs', icon: Play },
               { id: 'documents', label: 'Documents', icon: FileText },
+              { id: 'builder', label: 'Virtual Builder', icon: Wrench },
               { id: 'webhooks', label: 'Webhooks', icon: Webhook },
               { id: 'logs', label: 'Logs', icon: ScrollText },
             ].map(t => (
@@ -470,7 +490,7 @@ const PackageDetailPage = () => {
         </div>
       </div>
 
-      <div className="max-w-6xl mx-auto px-6 py-6">
+      {activeSection !== 'builder' && <div className="max-w-6xl mx-auto px-6 py-6">
         {/* ═══ Overview ═══ */}
         {activeSection === 'overview' && (
           <div className="grid gap-6 lg:grid-cols-3" data-testid="section-overview">
@@ -835,7 +855,22 @@ const PackageDetailPage = () => {
             })()}
           </div>
         )}
-      </div>
+      </div>}
+
+      {/* ═══ Virtual Builder — full-width, outside max-w-6xl ═══ */}
+      {activeSection === 'builder' && (
+        <div
+          data-testid="section-builder"
+          style={{ height: 'calc(100vh - 172px)' }}
+          className="overflow-hidden"
+        >
+          <PackageBuilderTab
+            packageId={packageId}
+            documents={documents}
+            isVoided={isVoided}
+          />
+        </div>
+      )}
 
       {/* Void Modal */}
       {showVoidModal && (

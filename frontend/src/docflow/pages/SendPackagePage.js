@@ -338,12 +338,21 @@ const SendPackagePage = () => {
     for (const doc of pkg.documents) {
       try {
         const data = await docflowService.getFieldPlacements(doc.template_id);
-        newFields[doc.template_id] = data?.field_placements || [];
         if (data?.template_group_id) {
           newGroupIds[doc.template_id] = data.template_group_id;
         }
+        // Package Virtual Builder overrides take priority over the master
+        // template. When the builder has saved custom placements for this
+        // document, use those — the template API result is still fetched above
+        // so template_group_id (needed for interlink version tracking) is
+        // available regardless.
+        newFields[doc.template_id] =
+          doc.field_placements && doc.field_placements.length > 0
+            ? doc.field_placements
+            : (data?.field_placements || []);
       } catch (e) {
-        newFields[doc.template_id] = [];
+        // On API failure, still surface any package-level overrides.
+        newFields[doc.template_id] = doc.field_placements || [];
       }
     }
     setTemplateFields(newFields);

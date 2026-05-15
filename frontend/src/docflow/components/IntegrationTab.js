@@ -16,38 +16,152 @@ const WEBHOOK_EVENTS = [
 const SAMPLE_PAYLOADS = {
   signed: {
     event: 'signed',
-    document_id: 'doc_abc123',
-    document_status: 'signed',
+    timestamp: '2026-03-30T14:30:00Z',
+    template_id: 'tpl_abc123',
     template_name: 'NDA Agreement',
-    recipient_email: 'signer@example.com',
-    recipient_name: 'John Doe',
-    signed_at: '2026-03-30T14:30:00Z',
-    status: 'completed',
-    signed_documents: [{
+    tenant_id: 'tenant_abc123',
+    data: {
       document_id: 'doc_abc123',
+      document_status: 'signed',
       template_name: 'NDA Agreement',
-      signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
-      signed_at: '2026-03-30T14:30:00Z'
-    }],
-    recipient_details: { name: 'John Doe', email: 'signer@example.com' },
-    metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', performed_by: 'John Doe', performed_by_email: 'signer@example.com' }
+      recipient_email: 'signer@example.com',
+      recipient_name: 'John Doe',
+      crm_object_type: 'Contact',
+      crm_object_id: 'sf_contact_123',
+      field_data: {
+        'text_field_001': 'John Doe',
+        'date_field_002': '2026-03-30',
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO'
+      },
+      merge_fields: {
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO'
+      },
+      signed_documents: [{
+        document_id: 'doc_abc123',
+        template_name: 'NDA Agreement',
+        signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+        signed_at: '2026-03-30T14:30:00Z'
+      }]
+    },
+    metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', browser: { name: 'Chrome', version: '120.0.0.0' }, os: { name: 'Windows', version: '10' }, device: { type: 'desktop' }, performed_by: 'John Doe', performed_by_email: 'signer@example.com' }
   },
-  opened: { event: 'opened', document_id: 'doc_abc123', recipient_email: 'user@example.com', recipient_name: 'John Doe', opened_at: '2026-03-30T13:45:00Z', metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0' } },
-  sent: { event: 'sent', document_id: 'doc_abc123', recipient_email: 'user@example.com', recipient_name: 'John Doe', sent_at: '2026-03-30T12:00:00Z', delivery_method: 'email' },
-  approve: { event: 'approve', document_id: 'doc_abc123', action: 'approved', recipient_email: 'approver@example.com', recipient_name: 'Jane Smith', role_type: 'APPROVE_REJECT', metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh)', performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' } },
-  reject: { event: 'reject', document_id: 'doc_abc123', action: 'rejected', recipient_email: 'approver@example.com', recipient_name: 'Jane Smith', role_type: 'APPROVE_REJECT', reason: 'Terms not acceptable', metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh)', performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' } },
-  review: { event: 'review', document_id: 'doc_abc123', action: 'reviewed', recipient_email: 'reviewer@example.com', recipient_name: 'Bob Wilson', role_type: 'VIEW_ONLY', metadata: { ip_address: '192.0.2.55', user_agent: 'Mozilla/5.0 (iPhone)', performed_by: 'Bob Wilson', performed_by_email: 'reviewer@example.com' } },
+  opened: {
+    event: 'opened',
+    timestamp: '2026-03-30T13:45:00Z',
+    template_id: 'tpl_abc123',
+    template_name: 'NDA Agreement',
+    tenant_id: 'tenant_abc123',
+    data: {
+      document_id: 'doc_abc123',
+      document_status: 'sent',
+      recipient_email: 'user@example.com',
+      recipient_name: 'John Doe',
+      crm_object_type: 'Contact',
+      crm_object_id: 'sf_contact_123'
+    },
+    metadata: { ip_address: '203.0.113.42', user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15', browser: { name: 'Safari', version: '17.0' }, os: { name: 'macOS', version: '10.15.7' }, device: { type: 'desktop' } }
+  },
+  sent: {
+    event: 'sent',
+    timestamp: '2026-03-30T12:00:00Z',
+    template_id: 'tpl_abc123',
+    template_name: 'NDA Agreement',
+    tenant_id: 'tenant_abc123',
+    data: {
+      document_id: 'doc_abc123',
+      document_status: 'sent',
+      recipient_email: 'user@example.com',
+      recipient_name: 'John Doe',
+      crm_object_type: 'Contact',
+      crm_object_id: 'sf_contact_123'
+    }
+  },
+  approve: {
+    event: 'approve',
+    timestamp: '2026-03-30T15:00:00Z',
+    template_id: 'tpl_abc123',
+    template_name: 'NDA Agreement',
+    tenant_id: 'tenant_abc123',
+    data: {
+      document_id: 'doc_abc123',
+      document_status: 'approved',
+      action: 'approved',
+      recipient_email: 'approver@example.com',
+      recipient_name: 'Jane Smith',
+      role_type: 'APPROVE_REJECT',
+      crm_object_type: 'Contact',
+      crm_object_id: 'sf_contact_123'
+    },
+    metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', browser: { name: 'Chrome', version: '120.0.0.0' }, os: { name: 'macOS', version: '10.15.7' }, device: { type: 'desktop' }, performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' }
+  },
+  reject: {
+    event: 'reject',
+    timestamp: '2026-03-30T15:02:00Z',
+    template_id: 'tpl_abc123',
+    template_name: 'NDA Agreement',
+    tenant_id: 'tenant_abc123',
+    data: {
+      document_id: 'doc_abc123',
+      document_status: 'declined',
+      action: 'rejected',
+      recipient_email: 'approver@example.com',
+      recipient_name: 'Jane Smith',
+      role_type: 'APPROVE_REJECT',
+      reason: 'Terms not acceptable',
+      crm_object_type: 'Contact',
+      crm_object_id: 'sf_contact_123'
+    },
+    metadata: { ip_address: '198.51.100.23', user_agent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36', browser: { name: 'Chrome', version: '120.0.0.0' }, os: { name: 'macOS', version: '10.15.7' }, device: { type: 'desktop' }, performed_by: 'Jane Smith', performed_by_email: 'approver@example.com' }
+  },
+  review: {
+    event: 'review',
+    timestamp: '2026-03-30T14:50:00Z',
+    template_id: 'tpl_abc123',
+    template_name: 'NDA Agreement',
+    tenant_id: 'tenant_abc123',
+    data: {
+      document_id: 'doc_abc123',
+      document_status: 'reviewed',
+      action: 'reviewed',
+      recipient_email: 'reviewer@example.com',
+      recipient_name: 'Bob Wilson',
+      role_type: 'VIEW_ONLY',
+      crm_object_type: 'Contact',
+      crm_object_id: 'sf_contact_123'
+    },
+    metadata: { ip_address: '192.0.2.55', user_agent: 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1', browser: { name: 'Safari', version: '17.0' }, os: { name: 'iOS', version: '17.0' }, device: { type: 'mobile' }, performed_by: 'Bob Wilson', performed_by_email: 'reviewer@example.com' }
+  },
   signed_copy: {
     event: 'signed_copy',
-    document_id: 'doc_abc123',
+    timestamp: '2026-03-30T15:05:00Z',
+    template_id: 'tpl_abc123',
     template_name: 'NDA Agreement',
-    signed_documents: [{
+    tenant_id: 'tenant_abc123',
+    data: {
       document_id: 'doc_abc123',
       template_name: 'NDA Agreement',
-      signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
-      signed_at: '2026-03-30T15:05:00Z'
-    }],
-    generated_at: '2026-03-30T15:05:00Z'
+      crm_object_type: 'Contact',
+      crm_object_id: 'sf_contact_123',
+      field_data: {
+        'text_field_001': 'John Doe',
+        'date_field_002': '2026-03-30',
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO'
+      },
+      merge_fields: {
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO'
+      },
+      signed_documents: [{
+        document_id: 'doc_abc123',
+        template_name: 'NDA Agreement',
+        signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+        signed_at: '2026-03-30T15:05:00Z'
+      }],
+      generated_at: '2026-03-30T15:05:00Z'
+    }
   }
 };
 

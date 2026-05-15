@@ -75,6 +75,7 @@ async def get_public_link_package(token: str):
             "order": doc.get("order", 1),
             "status": doc_detail.get("status", "generated") if doc_detail else "generated",
             "has_pdf": bool(doc_detail.get("unsigned_pdf_url")) if doc_detail else False,
+            "field_placements": doc.get("field_placements", []),
         })
 
     require_otp = package.get("security_settings", {}).get("require_auth", True)
@@ -353,12 +354,17 @@ async def submit_public_link(
                 })
                 continue
 
-            # Load template field placements
-            template = await db.docflow_templates.find_one(
-                {"id": template_id},
-                {"_id": 0, "field_placements": 1}
-            )
-            field_placements = (template or {}).get("field_placements", [])
+            # Load field placements — package-level overrides take priority
+            # over the master template so Virtual Builder changes are honoured.
+            _pkg_fps = pkg_doc.get("field_placements", [])
+            if _pkg_fps:
+                field_placements = _pkg_fps
+            else:
+                template = await db.docflow_templates.find_one(
+                    {"id": template_id},
+                    {"_id": 0, "field_placements": 1}
+                )
+                field_placements = (template or {}).get("field_placements", [])
 
             # Phase 81.71 — apply authored radio defaults.
             from ..services.field_defaults import apply_radio_defaults

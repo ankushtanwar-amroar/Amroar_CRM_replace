@@ -390,46 +390,56 @@ const PackagePublicView = () => {
       const templateId = doc.template_id;
       if (!templateId || newMap[templateId]) continue;
       try {
-        const res = await fetch(`${API_URL}/api/docflow/templates/${templateId}/field-placements-public`);
-        if (res.ok) {
-          const data = await res.json();
-          let fields = data.field_placements || [];
-
-          const assignedFieldIds = assignedComponents[templateId] || [];
-          // Phase 81.11 — Strict per-recipient isolation for ALL field types
-          // including merge fields. Only `label` (purely static document text)
-          // is treated as "always-visible". Previously `merge`, `checkbox`,
-          // and `radio` were globally assigned, which leaked merge fields
-          // belonging to a future recipient into the current recipient's view.
-          const NON_ASSIGNABLE = ['label'];
-          const fieldType = (f) => (f.type || f.field_type);
-          const hasAnyAssignment = fields.some(f => f.assigned_to || f.recipient_id);
-
-          fields = fields.map(f => {
-            let isAssigned;
-            if (assignedFieldIds.length > 0) {
-              // Explicit non-empty list for this recipient+template.
-              isAssigned = assignedFieldIds.includes(f.id) || NON_ASSIGNABLE.includes(fieldType(f));
-            } else if (hasPackageLevelAssignments) {
-              // Package has assignment data but this template is either absent
-              // from the recipient's map or explicitly empty → they own zero
-              // fields here. Only non-assignable types (labels) pass through.
-              // This fixes the isolation bug where ALL fields in a template
-              // assigned to one recipient were incorrectly exposed to others.
-              isAssigned = NON_ASSIGNABLE.includes(fieldType(f));
-            } else if (hasAnyAssignment) {
-              // No package-level map, but field-level assigned_to attrs exist.
-              // Only fields with no explicit owner are considered "public".
-              isAssigned = (!f.assigned_to && !f.recipient_id) || NON_ASSIGNABLE.includes(fieldType(f));
-            } else {
-              // Backward compat: no assignment data at all → all fields visible.
-              isAssigned = true;
-            }
-            return { ...f, __isAssigned: isAssigned };
-          });
-
-          newMap[templateId] = fields;
+        // Use package-level field overrides when the blueprint's builder has
+        // customised this document's fields. Fall back to the template endpoint
+        // so unchanged documents continue to work exactly as before.
+        let fields;
+        if (doc.field_placements && doc.field_placements.length > 0) {
+          fields = doc.field_placements;
+        } else {
+          const res = await fetch(`${API_URL}/api/docflow/templates/${templateId}/field-placements-public`);
+          if (res.ok) {
+            const data = await res.json();
+            fields = data.field_placements || [];
+          } else {
+            fields = [];
+          }
         }
+
+        const assignedFieldIds = assignedComponents[templateId] || [];
+        // Phase 81.11 — Strict per-recipient isolation for ALL field types
+        // including merge fields. Only `label` (purely static document text)
+        // is treated as "always-visible". Previously `merge`, `checkbox`,
+        // and `radio` were globally assigned, which leaked merge fields
+        // belonging to a future recipient into the current recipient's view.
+        const NON_ASSIGNABLE = ['label'];
+        const fieldType = (f) => (f.type || f.field_type);
+        const hasAnyAssignment = fields.some(f => f.assigned_to || f.recipient_id);
+
+        fields = fields.map(f => {
+          let isAssigned;
+          if (assignedFieldIds.length > 0) {
+            // Explicit non-empty list for this recipient+template.
+            isAssigned = assignedFieldIds.includes(f.id) || NON_ASSIGNABLE.includes(fieldType(f));
+          } else if (hasPackageLevelAssignments) {
+            // Package has assignment data but this template is either absent
+            // from the recipient's map or explicitly empty → they own zero
+            // fields here. Only non-assignable types (labels) pass through.
+            // This fixes the isolation bug where ALL fields in a template
+            // assigned to one recipient were incorrectly exposed to others.
+            isAssigned = NON_ASSIGNABLE.includes(fieldType(f));
+          } else if (hasAnyAssignment) {
+            // No package-level map, but field-level assigned_to attrs exist.
+            // Only fields with no explicit owner are considered "public".
+            isAssigned = (!f.assigned_to && !f.recipient_id) || NON_ASSIGNABLE.includes(fieldType(f));
+          } else {
+            // Backward compat: no assignment data at all → all fields visible.
+            isAssigned = true;
+          }
+          return { ...f, __isAssigned: isAssigned };
+        });
+
+        newMap[templateId] = fields;
       } catch (e) {
         console.error(`Failed to load fields for template ${templateId}:`, e);
         newMap[templateId] = [];

@@ -487,6 +487,18 @@ export const docflowService = {
     return api.get(`/docflow/packages/${packageId}/submissions`);
   },
 
+  // ===== Package Virtual Builder APIs =====
+
+  async getPackageBuilderFields(packageId, templateId) {
+    return api.get(`/docflow/packages/${packageId}/builder/${templateId}/fields`);
+  },
+
+  async savePackageBuilderFields(packageId, templateId, fieldPlacements) {
+    return api.put(`/docflow/packages/${packageId}/builder/${templateId}/fields`, {
+      field_placements: fieldPlacements,
+    });
+  },
+
   // ===== SMS Templates APIs (Phase 81.81) =====
 
   async listSmsTemplates() {

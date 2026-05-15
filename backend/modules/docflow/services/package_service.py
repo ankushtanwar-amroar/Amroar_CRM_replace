@@ -395,13 +395,19 @@ class PackageService:
             doc_merge_fields = doc.get("merge_fields", {})
             if template_merge_fields and tid in template_merge_fields:
                 doc_merge_fields = {**doc_merge_fields, **template_merge_fields[tid]}
-            run_documents.append({
+            entry = {
                 "template_id": tid,
                 "document_id": None,
                 "document_name": doc.get("document_name", ""),
                 "order": doc.get("order", 1),
                 "merge_fields": doc_merge_fields,
-            })
+            }
+            # Carry package-level field overrides to the run so the signing view
+            # uses the builder's layout instead of the original template fields.
+            pkg_fps = doc.get("field_placements", [])
+            if pkg_fps:
+                entry["field_placements"] = pkg_fps
+            run_documents.append(entry)
         run_documents.sort(key=lambda d: d.get("order", 1))
 
         public_link_token = str(uuid4())
