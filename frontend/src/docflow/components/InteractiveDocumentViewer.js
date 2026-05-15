@@ -584,7 +584,7 @@ const InteractiveDocumentViewer = ({
         // Then scroll inside the viewer's own scroll container if the field
         // isn't centred there yet.
         scrollFieldIntoContainer(el);
-            setTimeout(() => {
+        timers.push(setTimeout(() => {
           try {
             const fieldType = (f.type || f.field_type || '').toLowerCase();
             if ((fieldType === 'signature' || fieldType === 'initials')
@@ -605,7 +605,7 @@ const InteractiveDocumentViewer = ({
               return;
             }
             const focusable = el.querySelector(
-              'input:not([disabled]), textarea:not([disabled]), button:not([disabled])'
+              'input:not([disabled]), textarea:not([disabled]), button:not([disabled]), div[tabindex="0"]'
             );
             if (focusable && typeof focusable.focus === 'function') {
               focusable.focus({ preventScroll: true });
@@ -615,7 +615,7 @@ const InteractiveDocumentViewer = ({
               }
             }
           } catch (_) { /* noop */ }
-        }, 360);
+        }, 360));
         return;
       }
       if (attempts < MAX_ATTEMPTS) {
@@ -1289,7 +1289,9 @@ const InteractiveDocumentViewer = ({
         };
         return (
           <div
+            tabIndex={isDisabled ? -1 : 0}
             onClick={!isDisabled ? () => showSignatureModal && showSignatureModal(field.id, false, field) : null}
+            onKeyDown={!isDisabled ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showSignatureModal && showSignatureModal(field.id, false, field); } } : null}
             className={`w-full h-full border-2 border-dashed rounded flex items-center ${sigJustify} transition-colors ${
               field.field_disabled
                 ? 'border-gray-300 bg-gray-50'
@@ -1335,7 +1337,9 @@ const InteractiveDocumentViewer = ({
         };
         return (
           <div
+            tabIndex={isDisabled ? -1 : 0}
             onClick={!isDisabled ? () => showSignatureModal && showSignatureModal(field.id, true, field) : null}
+            onKeyDown={!isDisabled ? (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); showSignatureModal && showSignatureModal(field.id, true, field); } } : null}
             className={`w-full h-full border-2 border-dashed rounded flex items-center ${iniJustify} transition-colors ${
               field.field_disabled
                 ? 'border-gray-300 bg-gray-50'
