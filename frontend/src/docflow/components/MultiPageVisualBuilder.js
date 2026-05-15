@@ -742,7 +742,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
       }),
       ...(draggingFromPalette.id === 'label' && {
         text: 'Label Text',
-        style: { fontSize: '12px', color: '#000000', fontWeight: 'normal' },
+        style: { fontSize: '12pt', color: '#000000', fontWeight: 'normal', verticalAlign: 'bottom' },
         isStatic: true
       }),
       ...(draggingFromPalette.id === 'signature' && { signatureSize: 'medium' }),
@@ -1517,7 +1517,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   onDoubleClick={() => handleLabelDoubleClick(field)}
                 >
                   {/* Field Content */}
-                  <div className="flex items-center justify-center h-full px-1 overflow-hidden">
+                  <div className={`flex ${(() => { const va = field.style?.verticalAlign || 'bottom'; return va === 'top' ? 'items-start' : va === 'center' ? 'items-center' : 'items-end'; })()} justify-center h-full px-1 overflow-hidden`}>
                     {isEditing ? (
                       <input
                         autoFocus
@@ -1688,10 +1688,14 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                             ...(field.style && previewMode !== 'placeholder' ? {
                               fontFamily: field.style.fontFamily || undefined,
                               fontSize: field.style.fontSize ? (() => {
-                                const base = parseInt(field.style.fontSize) || 12;
+                                const _raw = String(field.style.fontSize).trim();
+                                const _isPt = _raw.endsWith('pt');
+                                const _num = Math.max(6, parseFloat(_raw) || 12);
+                                const _basePx = _isPt ? _num * (4 / 3) : _num;
                                 const hCap = Math.max(6, Math.floor((field.height - 2) * 0.85));
                                 const wCap = Math.max(6, Math.floor(field.width / 2.5));
-                                return `${Math.min(base, hCap, wCap)}px`;
+                                const eff = Math.max(6, Math.min(_basePx, hCap, wCap));
+                                return _isPt ? `${Math.round((eff / (4 / 3)) * 10) / 10}pt` : `${Math.round(eff)}px`;
                               })() : undefined,
                               fontWeight: field.style.fontWeight || undefined,
                               textDecoration: field.style.textDecoration || undefined,
@@ -1964,12 +1968,26 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                     <div>
                       <label className="block text-[10px] font-medium text-gray-500 mb-1">Font Size</label>
                       <select
-                        value={selectedField.style?.fontSize || '12'}
+                        value={(() => {
+                          const raw = selectedField.style?.fontSize;
+                          if (!raw) return '12pt';
+                          if (String(raw).endsWith('pt')) return raw;
+                          // Normalize legacy px / bare-number: find nearest pt option for display.
+                          const n = parseFloat(raw);
+                          if (!n) return '12pt';
+                          const ptApprox = Math.round(n * 0.75);
+                          const opts = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32];
+                          const nearest = opts.reduce((a, b) => Math.abs(b - ptApprox) < Math.abs(a - ptApprox) ? b : a);
+                          return `${nearest}pt`;
+                        })()}
                         onChange={(e) => {
-                          const newFs = parseInt(e.target.value) || 12;
-                          const newStyle = { ...(selectedField.style || {}), fontSize: e.target.value };
-                          // Auto-grow field height to fit the new font (py-1=8px + border-2=4px = 12px overhead in signer view).
-                          const minH = newFs + 12;
+                          const rawFs = e.target.value; // e.g. "12pt"
+                          const fsNum = parseInt(rawFs) || 12;
+                          // pt → px for min-height guard (1pt ≈ 1.333px)
+                          const fsPx = rawFs.endsWith('pt') ? Math.round(fsNum * 4 / 3) : fsNum;
+                          const newStyle = { ...(selectedField.style || {}), fontSize: rawFs };
+                          // Auto-grow field height to fit the new font (py-1=8px + border-2=4px = 12px overhead).
+                          const minH = fsPx + 12;
                           const updates = { style: newStyle };
                           if ((selectedField.height || 40) < minH) updates.height = minH;
                           updateFieldProperties(selectedField.id, updates);
@@ -1978,7 +1996,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         data-testid="field-font-size"
                       >
                         {[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32].map(s => (
-                          <option key={s} value={String(s)}>{s}px</option>
+                          <option key={s} value={`${s}pt`}>{s}pt</option>
                         ))}
                       </select>
                     </div>
@@ -2030,6 +2048,30 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           </button>
                         ))}
                       </div>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-medium text-gray-500 mb-1">V-Align</label>
+                    <div className="flex gap-1">
+                      {[
+                        { val: 'top', label: '⬆', title: 'Top' },
+                        { val: 'center', label: '↕', title: 'Middle' },
+                        { val: 'bottom', label: '⬇', title: 'Bottom' },
+                      ].map(({ val, label: lbl, title }) => (
+                        <button
+                          key={val}
+                          title={title}
+                          onClick={() => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), verticalAlign: val })}
+                          className={`flex-1 px-2 py-1 text-xs rounded-md transition-colors ${
+                            (selectedField.style?.verticalAlign || 'bottom') === val
+                              ? 'bg-indigo-600 text-white'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                          data-testid={`field-valign-${val}`}
+                        >
+                          {lbl}
+                        </button>
+                      ))}
                     </div>
                   </div>
                   <div>

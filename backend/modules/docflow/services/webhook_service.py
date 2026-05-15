@@ -478,10 +478,13 @@ class WebhookService:
                 "wave_started": "sent",
                 "package_created": "sent",
                 "document_generated": "sent",
-                "approved": "approve_reject",
-                "rejected": "approve_reject",
-                "recipient_approved": "approve_reject",
-                "recipient_rejected": "approve_reject",
+                "approved": "approve",
+                "rejected": "reject",
+                "recipient_approved": "approve",
+                "recipient_rejected": "reject",
+                "reviewed": "review",
+                "review": "review",
+                "recipient_reviewed": "review",
                 "signed_copy": "signed_copy",
             }
             mapped_event = _EVENT_MAP.get(event_type, event_type)
@@ -498,9 +501,21 @@ class WebhookService:
                 "tenant_id": tenant_id,
             }
 
-            # Add metadata if present in extra_data
+            # Build metadata block: prefer an explicit nested "metadata" key,
+            # then fall back to flat fields spread by routing_engine / direct callers.
             if extra.get("metadata"):
-                payload["metadata"] = extra["metadata"]
+                payload["metadata"] = dict(extra["metadata"])
+            else:
+                _meta: Dict[str, Any] = {}
+                for _k in ("ip_address", "user_agent", "browser", "os", "device"):
+                    if _k in extra:
+                        _meta[_k] = extra[_k]
+                for _k in ("performed_by", "performed_by_email", "signer_name", "signer_email",
+                           "approver_name", "reviewer_name"):
+                    if extra.get(_k):
+                        _meta[_k] = extra[_k]
+                if _meta:
+                    payload["metadata"] = _meta
 
             # Get the first document for context (many events are doc-level)
             first_doc_entry = (package.get("documents") or [{}])[0] if package.get("documents") else {}
@@ -563,16 +578,24 @@ class WebhookService:
                 payload["delivery_method"] = extra.get("delivery_method", "email")
                 payload["recipient_count"] = extra.get("recipient_count", len(package.get("recipients", [])))
 
-            elif mapped_event == "approve_reject":
-                action = extra.get("action", "approved")
+            elif mapped_event in ("approve", "reject"):
+                action = extra.get("action", mapped_event + "d")
                 payload["action"] = action
                 payload["recipient_email"] = recipient_email
                 payload["recipient_name"] = recipient_name
-                if action == "rejected":
+                payload["role_type"] = "APPROVE_REJECT"
+                if mapped_event == "reject":
                     payload["reason"] = extra.get("reason") or extra.get("reject_reason", "")
                     payload["rejected_at"] = extra.get("rejected_at", now_iso)
                 else:
                     payload["approved_at"] = extra.get("approved_at", now_iso)
+
+            elif mapped_event == "review":
+                payload["action"] = "reviewed"
+                payload["recipient_email"] = recipient_email
+                payload["recipient_name"] = recipient_name
+                payload["role_type"] = "VIEW_ONLY"
+                payload["reviewed_at"] = extra.get("reviewed_at", now_iso)
 
             elif mapped_event == "signed_copy":
                 payload["document_id"] = extra.get("document_id", first_doc_id)

@@ -22,6 +22,7 @@ from shared.auth import get_current_user
 from ..models.document_model import Document, DocumentGenerate
 from ..services.document_service import DocumentService
 from ..services.document_service_enhanced import EnhancedDocumentService
+from ..utils.request_utils import build_request_metadata, get_client_ip
 
 router = APIRouter(prefix="/docflow", tags=["DocFlow Documents"])
 
@@ -361,11 +362,17 @@ async def get_document_public(token: str):
             if result["has_signed_version"]:
                 result["signed_view_url"] = f"/api/docflow/documents/{doc_id}/view/signed"
 
-        # Phase 74: Resolve sender info (document.created_by → user record)
-        # for the public signing-view header. Falls back silently if missing.
-        sender_info = await _resolve_sender_info(result.get("created_by"))
-        if sender_info:
-            result["sender"] = sender_info
+        # Phase 74 + API sender override: Enrich with sender info for the signing-view header.
+        # Priority 1: sender_name/sender_email stored on the document (set via API from_name/from_email).
+        # Priority 2: created_by user record lookup (fallback for documents without explicit sender).
+        _doc_sender_name = result.get("sender_name")
+        _doc_sender_email = result.get("sender_email")
+        if _doc_sender_name or _doc_sender_email:
+            result["sender"] = {"name": _doc_sender_name or "", "email": _doc_sender_email or ""}
+        else:
+            sender_info = await _resolve_sender_info(result.get("created_by"))
+            if sender_info:
+                result["sender"] = sender_info
 
         # Phase 80: surface voided state so the signing page can block actions
         # and show the "access revoked" popup. Frontend polls this endpoint to
@@ -731,8 +738,7 @@ async def sign_document(
         signature_data = {
             "signer_name": signer_name,
             "signer_email": signer_email,
-            "ip_address": request.client.host if request else None,
-            "user_agent": request.headers.get("user-agent") if request else None
+            **build_request_metadata(request),
         }
 
         success = await enhanced_document_service.add_signature_with_pdf(
@@ -1329,8 +1335,7 @@ async def void_document(
         system_email_service=SystemEmailService(),
     )
 
-    ip_address = request.client.host if request.client else None
-    user_agent = request.headers.get("user-agent", "")
+    _req_meta = build_request_metadata(request)
 
     try:
         result = await void_service.void_document(
@@ -1339,8 +1344,8 @@ async def void_document(
             reason=body.reason,
             actor=current_user.id,
             actor_email=current_user.email,
-            ip_address=ip_address,
-            user_agent=user_agent,
+            ip_address=_req_meta.get("ip_address"),
+            user_agent=_req_meta.get("user_agent"),
         )
     except LookupError:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -1388,8 +1393,9 @@ async def document_role_action(document_id: str, request: Request):
         raise HTTPException(status_code=400, detail=f"Recipient role is {role}, not REVIEWER")
 
     # Extract metadata
-    ip_address = request.client.host if request.client else None
-    user_agent = request.headers.get("user-agent", "")
+    _req_meta = build_request_metadata(request)
+    ip_address = _req_meta.get("ip_address")
+    user_agent = _req_meta.get("user_agent", "")
 
     now = datetime.now(timezone.utc).isoformat()
     action_taken = action + "ed" if action == "reject" else (action + "d" if action != "review" else "reviewed")  # approved, rejected, reviewed
@@ -1543,8 +1549,7 @@ async def document_role_action(document_id: str, request: Request):
                 "role_type": role,
                 "reason": rejection_reason if action == "reject" else None,
                 "metadata": {
-                    "ip_address": ip_address,
-                    "user_agent": user_agent,
+                    **_req_meta,
                     "performed_by": body.get("name") or matched.get("name", ""),
                     "performed_by_email": body.get("email") or matched.get("email", ""),
                 },

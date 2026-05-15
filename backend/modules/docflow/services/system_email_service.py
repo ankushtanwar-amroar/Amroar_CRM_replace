@@ -56,6 +56,8 @@ class SystemEmailService:
         message_from_sender: str = "",
         support_email: str = "support@cluvik.com",
         support_url: str = "https://cluvik.com/support",
+        from_name_override: Optional[str] = None,
+        from_email_override: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Send document via email - tries SendGrid first, then SMTP fallback
@@ -130,18 +132,24 @@ class SystemEmailService:
             or self._get_document_email_template()
         )
         
+        # Resolve effective FROM name/email: override wins over defaults.
+        effective_from_name = from_name_override or self.from_name
+        effective_from_email = from_email_override or self.sendgrid_sender
+
         # Try SendGrid first
         if self.sendgrid_api_key:
             result = await self._send_via_sendgrid(
-                recipient_email, recipient_name, subject, html_body, pdf_content, template_name
+                recipient_email, recipient_name, subject, html_body, pdf_content, template_name,
+                from_name=effective_from_name, from_email=effective_from_email,
             )
             if result.get("success"):
                 return result
             logger.warning(f"SendGrid failed, trying SMTP fallback: {result.get('error')}")
-        
+
         # Fallback to SMTP
         return await self._send_via_smtp(
-            recipient_email, recipient_name, subject, html_body, pdf_content, template_name, document_url, sender_name
+            recipient_email, recipient_name, subject, html_body, pdf_content, template_name, document_url, sender_name,
+            from_name=effective_from_name, from_email=from_email_override or self.from_email,
         )
 
     def _get_document_email_template(self) -> str:
@@ -424,25 +432,27 @@ class SystemEmailService:
         return await self._send_via_smtp(to_email, "", subject, html_content, None, "", "", "DocFlow")
 
     async def _send_via_sendgrid(
-        self, 
+        self,
         recipient_email: str,
         recipient_name: str,
         subject: str,
         html_body: str,
         pdf_content: Optional[bytes],
-        template_name: str
+        template_name: str,
+        from_name: Optional[str] = None,
+        from_email: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send email using SendGrid API"""
         try:
             logger.info(f"Sending document email via SendGrid to {recipient_email}")
-            
+
             # Build SendGrid payload
             payload = {
                 "personalizations": [{
                     "to": [{"email": recipient_email, "name": recipient_name}],
                     "subject": subject
                 }],
-                "from": {"email": self.sendgrid_sender, "name": self.from_name},
+                "from": {"email": from_email or self.sendgrid_sender, "name": from_name or self.from_name},
                 "content": [{"type": "text/html", "value": html_body}]
             }
             
@@ -502,15 +512,19 @@ class SystemEmailService:
         pdf_content: Optional[bytes],
         template_name: str,
         document_url: str,
-        sender_name: str
+        sender_name: str,
+        from_name: Optional[str] = None,
+        from_email: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send email using SMTP (fallback)"""
         try:
             logger.info(f"Sending document email via SMTP to {recipient_email}")
-            
+
             # Create MIME message
+            effective_from_name = from_name or self.from_name
+            effective_from_email = from_email or self.from_email
             message = MIMEMultipart('alternative')
-            message['From'] = f"{self.from_name} <{self.from_email}>"
+            message['From'] = f"{effective_from_name} <{effective_from_email}>"
             message['To'] = recipient_email
             message['Subject'] = subject
             

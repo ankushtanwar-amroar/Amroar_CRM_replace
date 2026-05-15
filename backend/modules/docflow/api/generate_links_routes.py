@@ -2,6 +2,8 @@
 Generate Links API v2 - Complete document generation with routing, delivery, and field assignment
 Supports: sequential/parallel routing, email/public_link/both delivery, assigned_components per recipient
 """
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
@@ -195,11 +197,34 @@ class GenerateLinksRequest(BaseModel):
             raise ValueError("delivery_mode must be 'email', 'public_link', 'both', or 'public_recipients'")
         return v
 
+    from_name: Optional[str] = Field(default=None, description="Custom sender display name shown in emails and signing UI")
+    from_email: Optional[str] = Field(default=None, description="Custom sender email address shown in email From header")
+
     @field_validator('send_mode')
     @classmethod
     def validate_send_mode(cls, v):
         if v not in ('basic', 'package'):
             raise ValueError("send_mode must be 'basic' or 'package'")
+        return v
+
+    @field_validator('from_name')
+    @classmethod
+    def validate_from_name(cls, v):
+        if v is not None:
+            v = v.strip()
+            if len(v) > 200:
+                raise ValueError("from_name must be 200 characters or less")
+            return v or None
+        return v
+
+    @field_validator('from_email')
+    @classmethod
+    def validate_from_email(cls, v):
+        if v is not None:
+            v = v.strip()
+            if v and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
+                raise ValueError(f"from_email '{v}' is not a valid email address")
+            return v or None
         return v
 
 
@@ -493,6 +518,30 @@ async def generate_links(
             except (ValueError, AttributeError):
                 errors.append(f"Invalid expires_at format: {req.expires_at}")
 
+        # Resolve sender: when from_name/from_email are absent and request uses API key auth,
+        # fall back to the API key owner's real name/email so the signing page FROM section is populated.
+        resolved_sender_name = req.from_name
+        resolved_sender_email = req.from_email
+        if resolved_sender_name is None and resolved_sender_email is None and current_user.email == "api-key@docflow":
+            try:
+                key_rec = await db.docflow_api_keys.find_one({"id": current_user.id}, {"_id": 0, "created_by": 1})
+                owner_id = (key_rec or {}).get("created_by")
+                if owner_id:
+                    owner = await db.users.find_one(
+                        {"id": owner_id},
+                        {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
+                    )
+                    if owner:
+                        resolved_sender_name = (
+                            owner.get("full_name")
+                            or owner.get("name")
+                            or " ".join(filter(None, [owner.get("first_name"), owner.get("last_name")])).strip()
+                            or None
+                        ) or None
+                        resolved_sender_email = owner.get("email") or None
+            except Exception as _e:
+                logger.warning(f"[generate-links] API key owner lookup failed: {_e}")
+
         document = await enhanced_document_service.generate_document(
             template_id=req.template_id,
             crm_object_id=(req.source_context.record_id if req.source_context else "") or "api-call",
@@ -509,6 +558,8 @@ async def generate_links(
             delivery_mode=req.delivery_mode,
             sms_mode=bool(req.sms_mode),
             sms_consent=bool(req.sms_consent),
+            sender_name=resolved_sender_name,
+            sender_email=resolved_sender_email,
         )
 
         # ── 8. Build response ──
@@ -739,6 +790,30 @@ async def _handle_package_mode(
         if req.source_context:
             source_ctx = req.source_context.model_dump()
 
+        # Resolve sender: when from_name/from_email are absent and request uses API key auth,
+        # fall back to the API key owner's real name/email so the signing page FROM section is populated.
+        pkg_resolved_sender_name = req.from_name
+        pkg_resolved_sender_email = req.from_email
+        if pkg_resolved_sender_name is None and pkg_resolved_sender_email is None and current_user.email == "api-key@docflow":
+            try:
+                key_rec = await db.docflow_api_keys.find_one({"id": current_user.id}, {"_id": 0, "created_by": 1})
+                owner_id = (key_rec or {}).get("created_by")
+                if owner_id:
+                    owner = await db.users.find_one(
+                        {"id": owner_id},
+                        {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
+                    )
+                    if owner:
+                        pkg_resolved_sender_name = (
+                            owner.get("full_name")
+                            or owner.get("name")
+                            or " ".join(filter(None, [owner.get("first_name"), owner.get("last_name")])).strip()
+                            or None
+                        ) or None
+                        pkg_resolved_sender_email = owner.get("email") or None
+            except Exception as _e:
+                logger.warning(f"[generate-links/package] API key owner lookup failed: {_e}")
+
         # Create and send package
         package = await package_service.create_and_send_package(
             name=package_name,
@@ -756,6 +831,8 @@ async def _handle_package_mode(
             webhook_config=req.webhook_config,
             sms_mode=bool(req.sms_mode),
             sms_consent=bool(req.sms_consent),
+            sender_name=pkg_resolved_sender_name,
+            sender_email=pkg_resolved_sender_email,
         )
 
         # Build response

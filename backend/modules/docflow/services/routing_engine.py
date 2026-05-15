@@ -467,7 +467,9 @@ class RoutingEngine:
                     package_id=package_id,
                     public_token=r.get("public_token", ""),
                     document_count=len(result.get("documents", [])),
-                    sender_name=result.get("created_by_name"),
+                    sender_name=result.get("sender_name") or result.get("created_by_name"),
+                    from_name=result.get("sender_name") or "DocFlow",
+                    from_email=result.get("sender_email") or None,
                 )
                 logger.info(f"[RoutingEngine] RECEIVE_COPY notification sent to {r['email']}")
             except Exception as e:
@@ -531,6 +533,11 @@ class RoutingEngine:
             else:
                 logger.info(f"[RoutingEngine] Sending notification to {email} for package '{package.get('name', '?')}' (role={recipient.get('role_type', '?')})")
 
+                # Resolve custom sender: API-provided values take precedence over the creator name.
+                pkg_sender_name = package.get("sender_name") or package.get("created_by_name") or None
+                pkg_from_name = package.get("sender_name") or "DocFlow"
+                pkg_from_email = package.get("sender_email") or None
+
                 # Try to resolve a custom email template for this recipient
                 custom_subject = None
                 custom_html = None
@@ -552,7 +559,7 @@ class RoutingEngine:
                             "document_name": package.get("name", "Package"),
                             "package_name": package.get("name", "Package"),
                             "signing_link": access_url,
-                            "sender_name": package.get("created_by_name") or "DocFlow",
+                            "sender_name": pkg_sender_name or "DocFlow",
                             "company_name": "Cluvik",
                             "status": "Pending",
                         }
@@ -568,7 +575,8 @@ class RoutingEngine:
                         to_email=email,
                         subject=custom_subject,
                         html_content=custom_html,
-                        from_name="DocFlow",
+                        from_name=pkg_from_name,
+                        from_email=pkg_from_email,
                     )
                 else:
                     # Fallback to hardcoded action-required email
@@ -581,7 +589,9 @@ class RoutingEngine:
                         package_id=package.get("id", ""),
                         public_token=recipient.get("public_token", ""),
                         document_count=len(package.get("documents", [])),
-                        sender_name=package.get("created_by_name"),
+                        sender_name=pkg_sender_name,
+                        from_name=pkg_from_name,
+                        from_email=pkg_from_email,
                     )
                 if success:
                     logger.info(f"[RoutingEngine] Email sent successfully to {email}")

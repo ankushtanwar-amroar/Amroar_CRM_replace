@@ -63,6 +63,10 @@ export const docflowService = {
     return api.put(`/docflow/templates/${templateId}`, data);
   },
 
+  async updateTemplateWebhook(templateId, webhookConfig) {
+    return api.patch(`/docflow/templates/${templateId}/webhook`, { webhook_config: webhookConfig });
+  },
+
   async deleteTemplate(templateId) {
     return api.delete(`/docflow/templates/${templateId}`);
   },

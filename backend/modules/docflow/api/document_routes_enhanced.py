@@ -15,6 +15,7 @@ from shared.services.license_enforcement import require_module_license, ModuleKe
 from ..models.document_model import Document, DocumentGenerate
 from ..services.document_service_enhanced import EnhancedDocumentService
 from ..services.activity_log_service import ActivityLogService
+from ..utils.request_utils import build_request_metadata, get_client_ip
 
 router = APIRouter(prefix="/docflow", tags=["DocFlow Documents Enhanced"])
 
@@ -25,12 +26,18 @@ activity_log_service = ActivityLogService(db)
 
 async def _resolve_sender_info(user_id: Optional[str]) -> Optional[dict]:
     """Phase 74: Resolve `created_by` user id → {name, email} for public
-    signing-view header. Returns None when user_id is missing or the user
-    record cannot be found (caller must treat as optional)."""
+    signing-view header. Handles both real user IDs and API key IDs stored
+    in created_by (for generate-links API key auth, created_by = api_key.id).
+    Returns None when user_id is missing or cannot be resolved."""
     if not user_id:
         return None
     try:
         user = await db.users.find_one({"id": user_id}, {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1})
+        if not user:
+            # created_by may be an API key ID — resolve through the key owner.
+            key_rec = await db.docflow_api_keys.find_one({"id": user_id}, {"_id": 0, "created_by": 1})
+            if key_rec and key_rec.get("created_by"):
+                user = await db.users.find_one({"id": key_rec["created_by"]}, {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1})
         if not user:
             return None
         name = (
@@ -196,11 +203,17 @@ async def get_document_public(token: str):
         
         document["active_recipient"] = active_recipient or {}
 
-        # Phase 74: Enrich with sender info (from document.created_by) for the
-        # signing-view header. Falls back silently if user record is missing.
-        sender_info = await _resolve_sender_info(document.get("created_by"))
-        if sender_info:
-            document["sender"] = sender_info
+        # Phase 74 + API sender override: Enrich with sender info for the signing-view header.
+        # Priority 1: sender_name/sender_email on the document (set by API custom sender or API key owner auto-resolution).
+        # Priority 2: created_by user record lookup.
+        doc_sender_name = document.get("sender_name")
+        doc_sender_email = document.get("sender_email")
+        if doc_sender_name or doc_sender_email:
+            document["sender"] = {"name": doc_sender_name or "", "email": doc_sender_email or ""}
+        else:
+            sender_info = await _resolve_sender_info(document.get("created_by"))
+            if sender_info:
+                document["sender"] = sender_info
 
         # Log view event
         try:
@@ -321,8 +334,7 @@ async def sign_document(
         raise HTTPException(status_code=410, detail="This document has been voided by the sender")
 
     # Add metadata
-    signature_data["ip_address"] = request.client.host
-    signature_data["user_agent"] = request.headers.get("user-agent")
+    signature_data.update(build_request_metadata(request))
     
     # Extract field data if present
     field_data = signature_data.pop("field_data", None)

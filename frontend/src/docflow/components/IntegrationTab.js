@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { Webhook, Download, CheckCircle2, Bell, Settings, ChevronDown } from 'lucide-react';
+import { Webhook, Download, CheckCircle2, Bell, Settings, ChevronDown, Save, Loader2 } from 'lucide-react';
 import { toast } from 'react-hot-toast';
+import docflowService from '../services/docflowService';
 
 const WEBHOOK_EVENTS = [
   { id: 'signed', label: 'Signed', description: 'When document is signed by recipient' },
@@ -52,12 +53,39 @@ const SAMPLE_PAYLOADS = {
 
 const IntegrationTab = ({ templateData, onUpdate }) => {
   const [webhookUrl, setWebhookUrl] = useState(templateData?.webhook_config?.url || '');
-  const [webhookEvents, setWebhookEvents] = useState(templateData?.webhook_config?.events || ['signed', 'viewed', 'opened']);
+  const [webhookEvents, setWebhookEvents] = useState(templateData?.webhook_config?.events || ['signed', 'opened']);
   const [webhookHeaders, setWebhookHeaders] = useState(templateData?.webhook_config?.headers || {});
   const [webhookSecret, setWebhookSecret] = useState(templateData?.webhook_config?.secret || '');
   const [retryEnabled, setRetryEnabled] = useState(templateData?.webhook_config?.retry_enabled !== false);
   const [maxRetries, setMaxRetries] = useState(templateData?.webhook_config?.max_retries || 3);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [lastSaved, setLastSaved] = useState(null);
+
+  const handleSaveWebhook = async () => {
+    const templateId = templateData?.id;
+    if (!templateId) {
+      toast.error('Template must be saved before webhook settings can be stored');
+      return;
+    }
+    setSaving(true);
+    try {
+      await docflowService.updateTemplateWebhook(templateId, {
+        url: webhookUrl,
+        events: webhookEvents,
+        headers: webhookHeaders,
+        secret: webhookSecret,
+        retry_enabled: retryEnabled,
+        max_retries: maxRetries,
+      });
+      setLastSaved(new Date());
+      toast.success('Webhook settings saved');
+    } catch (err) {
+      toast.error('Failed to save webhook settings');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   useEffect(() => {
     if (onUpdate) {
@@ -148,7 +176,6 @@ const IntegrationTab = ({ templateData, onUpdate }) => {
           <button
             data-testid="download-webhook-config-btn"
             onClick={handleDownloadConfig}
-            // disabled={!webhookUrl || webhookEvents.length === 0}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
             title="Download webhook config with sample payloads"
           >
@@ -156,7 +183,26 @@ const IntegrationTab = ({ templateData, onUpdate }) => {
             Download
           </button>
         </div>
-        
+
+        <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
+          {lastSaved ? (
+            <span className="text-[11px] text-gray-400 flex items-center gap-1">
+              <CheckCircle2 className="h-3 w-3 text-green-500" />
+              Saved {lastSaved.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          ) : (
+            <span className="text-[11px] text-gray-400">Changes are not saved until you click Save</span>
+          )}
+          <button
+            data-testid="save-webhook-btn"
+            onClick={handleSaveWebhook}
+            disabled={saving}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors text-sm font-semibold disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            {saving ? 'Saving...' : 'Save Webhook Settings'}
+          </button>
+        </div>
       </div>
 
       {/* Event Notifications */}

@@ -228,13 +228,17 @@ class PDFOverlayService:
                 style = fld.get('style') or {}
                 align = style.get('textAlign') or 'center'
 
-                # Resolve target height from configured fontSize × scale.
+                # Resolve target height from configured fontSize.
+                # "Npt" → use N as PDF points directly; legacy "N"/"Npx" → N * scale.
                 try:
                     _raw_fs = style.get('fontSize')
-                    _fs_css = float(str(_raw_fs).replace('px', '')) if _raw_fs else 18.0
+                    _fs_str = str(_raw_fs).strip() if _raw_fs else ''
+                    _is_pt = _fs_str.endswith('pt')
+                    _fs_num = float(_fs_str.rstrip('pt').rstrip('px').strip()) if _fs_str else 18.0
+                    _fs_pt = _fs_num if _is_pt else _fs_num * scale
                 except Exception:
-                    _fs_css = 18.0
-                target_h = min(max(6.0, _fs_css * scale), height)
+                    _fs_pt = 18.0 * scale
+                target_h = min(max(6.0, _fs_pt), height)
 
                 if iw > 0 and ih > 0:
                     aspect = iw / ih
@@ -289,18 +293,21 @@ class PDFOverlayService:
         font_style_css = style.get('fontStyle', 'normal')
         text_color = style.get('color', '#000000')
 
-        # Resolve font size
+        # Resolve font size — pt values skip the px→pt scale multiplication.
+        # Stored as "12pt" → use directly as PDF points.
+        # Stored as "12", "12px" (legacy) → multiply by scale (px → pt).
+        _fs_str = str(font_size_raw).strip()
+        _is_pt = _fs_str.endswith('pt')
         try:
-            font_size = float(str(font_size_raw).replace('px', ''))
+            _fs_num = float(_fs_str.rstrip('pt').rstrip('px').strip())
         except (ValueError, TypeError):
-            font_size = default_size
+            _fs_num = default_size
+            _is_pt = False
 
-        # Phase 81.69 — match the signing-UI font math exactly:
-        #   baseFs = css_px * scale
-        #   hCap   = (height - 4) * 0.85   (height is ALREADY scaled)
-        #   wCap   = width / 2.5           (width is ALREADY scaled)
-        #   final  = max(6.0, min(base_fs, hCap, wCap, 72.0))
-        base_fs = font_size * scale
+        if _is_pt:
+            base_fs = max(6.0, _fs_num)   # already in PDF points — no scale
+        else:
+            base_fs = max(6.0, _fs_num * scale)  # px / bare → convert to pt
         h_cap = max(6.0, (height - 4.0) * 0.85)
         if width and width > 0:
             w_cap = max(6.0, width / 2.5)
@@ -373,6 +380,7 @@ class PDFOverlayService:
         font_size, style = self._apply_field_style(c, field, height, scale=scale, width=width)
         text_align = style.get('textAlign', 'left')
         text_decoration = style.get('textDecoration', 'none')
+        vert_align = style.get('verticalAlign') or 'bottom'
         pad_x = 5.0 * scale
         pad_y = 2.0 * scale
         line_height = max(font_size * 1.2, font_size + 2)
@@ -409,11 +417,13 @@ class PDFOverlayService:
                 text_x = x + width - text_width - pad_x
             else:
                 text_x = x + pad_x
-            # Phase 81.69 — match frontend baseline formula exactly:
-            # `y + ptHeight/2 - fSize*0.35`. This visually centers the text
-            # glyph within the field rect the same way the signing preview
-            # does, eliminating the 2-4pt upward offset seen in the final PDF.
-            text_y = y + (height / 2) - (font_size * 0.35)
+            # Vertical alignment (default: bottom — matches form-field convention).
+            if vert_align == 'top':
+                text_y = y + height - pad_y - font_size
+            elif vert_align == 'center':
+                text_y = y + (height / 2) - (font_size * 0.35)
+            else:  # bottom
+                text_y = y + pad_y + font_size * 0.15
             c.drawString(text_x, text_y, single)
             if text_decoration == 'underline':
                 c.setLineWidth(0.5)
@@ -459,8 +469,14 @@ class PDFOverlayService:
         if len(wrapped) > max_lines:
             wrapped = wrapped[:max_lines]
 
-        # Top of first baseline (PDF coords: origin at bottom-left)
-        first_baseline = y + height - pad_y - font_size
+        # First baseline position depends on vertical alignment.
+        _n_lines = len(wrapped)
+        if vert_align == 'top':
+            first_baseline = y + height - pad_y - font_size
+        elif vert_align == 'center':
+            first_baseline = y + (height / 2) + max(0, _n_lines - 1) * (line_height / 2)
+        else:  # bottom
+            first_baseline = y + pad_y + font_size * 0.15 + max(0, _n_lines - 1) * line_height
         for i, ln in enumerate(wrapped):
             text_width = c.stringWidth(ln, c._fontname, c._fontsize)
             if text_align == 'center':
@@ -726,10 +742,13 @@ class PDFOverlayService:
 
                 try:
                     _raw_fs = style.get('fontSize')
-                    _fs_css = float(str(_raw_fs).replace('px', '')) if _raw_fs else 16.0
+                    _fs_str = str(_raw_fs).strip() if _raw_fs else ''
+                    _is_pt = _fs_str.endswith('pt')
+                    _fs_num = float(_fs_str.rstrip('pt').rstrip('px').strip()) if _fs_str else 16.0
+                    _fs_pt = _fs_num if _is_pt else _fs_num * scale
                 except Exception:
-                    _fs_css = 16.0
-                target_h = min(max(6.0, _fs_css * scale), height)
+                    _fs_pt = 16.0 * scale
+                target_h = min(max(6.0, _fs_pt), height)
 
                 if iw > 0 and ih > 0:
                     aspect = iw / ih

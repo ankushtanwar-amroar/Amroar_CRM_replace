@@ -55,23 +55,36 @@ const getRadioGroupName = (field) => field.groupName || field.group_name || `__s
 
 /**
  * Responsive font-size for text-like fields. Never exceeds the author's
- * configured size; scales down when the box is too small to fit. Keeps the
- * field content strictly inside its bounding box.
+ * configured size; scales down when the box is too small to fit.
  *
- *   baseSize — px value from field.style.fontSize (or default)
- *   fieldHeight — field height in px
- *   fieldWidth  — field width in px (used to clamp very narrow fields)
+ *   rawSize     — field.style.fontSize string ("12pt", "12px", "12", or number)
+ *   fieldHeight — field height in CSS px
+ *   fieldWidth  — field width in CSS px
+ *
+ * Returns a CSS font-size string ("12pt" or "12px") preserving the stored unit.
  */
-const resolveResponsiveFontSize = (baseSize, fieldHeight, fieldWidth) => {
-  const base = Math.max(6, Number(baseSize) || 10);
-  // Phase 82.1 — Refined font scaling: use 0.85 multiplier (was 0.70) to
-  // better respect authored font sizes. Reduces the aggressive "shrink"
-  // that made 12px look smaller than 11px document text.
+const _PT_TO_PX = 4 / 3; // 1pt = 1.333…px at 96 DPI
+
+const resolveResponsiveFontSize = (rawSize, fieldHeight, fieldWidth) => {
+  const raw = String(rawSize ?? '').trim();
+  const isPt = raw.endsWith('pt');
+  const numVal = Math.max(6, parseFloat(raw) || 10);
+  const basePx = isPt ? numVal * _PT_TO_PX : numVal;
   const heightCap = Math.max(6, Math.floor((fieldHeight - 2) * 0.85));
-  // Relax the width cap — 1em ≈ 0.5px per char is too aggressive for
-  // signature/initials fields which are wide.
   const widthCap = Math.max(6, Math.floor(fieldWidth / 2.5));
-  return Math.min(base, heightCap, widthCap);
+  const capped = Math.max(6, Math.min(basePx, heightCap, widthCap));
+  if (isPt) return `${Math.round((capped / _PT_TO_PX) * 10) / 10}pt`;
+  return `${Math.round(capped)}px`;
+};
+
+// Returns the font size in CSS pixels for numeric calculations (lineHeight, image sizing).
+// Handles "pt", "px", and legacy bare-number formats.
+const parseFontSizePx = (rawSize, defaultPx = 13) => {
+  const raw = String(rawSize ?? '').trim();
+  const isPt = raw.endsWith('pt');
+  const n = parseFloat(raw);
+  if (!Number.isFinite(n) || n <= 0) return defaultPx;
+  return isPt ? n * _PT_TO_PX : n;
 };
 
 /**
@@ -855,8 +868,7 @@ const InteractiveDocumentViewer = ({
             </div>
           );
         }
-        const baseFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 13;
-        const effectiveFs = resolveResponsiveFontSize(baseFs, field.height, field.width);
+        const effectiveFs = resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width);
         const align = field.style?.textAlign || 'left';
         const justify = align === 'center' ? 'center' : align === 'right' ? 'flex-end' : 'flex-start';
         return (
@@ -865,7 +877,7 @@ const InteractiveDocumentViewer = ({
             style={{
               justifyContent: justify,
               fontFamily: field.style?.fontFamily || undefined,
-              fontSize: `${effectiveFs}px`,
+              fontSize: effectiveFs,
               fontWeight: field.style?.fontWeight || undefined,
               fontStyle: field.style?.fontStyle || undefined,
               textDecoration: field.style?.textDecoration || undefined,
@@ -890,8 +902,7 @@ const InteractiveDocumentViewer = ({
             </div>
           );
         }
-        const baseFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 13;
-        const effectiveFs = resolveResponsiveFontSize(baseFs, field.height, field.width);
+        const effectiveFs = resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width);
         // Phase 81.41 — Single-line read-only text stays on one line (clipped
         // if too long). Multi-line wraps as before. Honours the Visual
         // Builder's Field Type dropdown so the printed view matches what was
@@ -900,10 +911,10 @@ const InteractiveDocumentViewer = ({
           || (field.fieldSubType !== 'single-line' && Boolean(field.multiline));
         return (
           <div
-            className="w-full h-full px-1 py-0.5 pointer-events-none"
+            className="w-full px-1 py-0.5 pointer-events-none"
             style={{
               fontFamily: field.style?.fontFamily || undefined,
-              fontSize: `${effectiveFs}px`,
+              fontSize: effectiveFs,
               fontWeight: field.style?.fontWeight || undefined,
               fontStyle: field.style?.fontStyle || undefined,
               textAlign: field.style?.textAlign || 'left',
@@ -932,14 +943,13 @@ const InteractiveDocumentViewer = ({
             </div>
           );
         }
-        const baseFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 13;
-        const effectiveFs = resolveResponsiveFontSize(baseFs, field.height, field.width);
+        const effectiveFs = resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width);
         return (
           <div
             className="w-full h-full px-1 py-0.5 pointer-events-none flex items-center"
             style={{
               fontFamily: field.style?.fontFamily || undefined,
-              fontSize: `${effectiveFs}px`,
+              fontSize: effectiveFs,
               fontWeight: field.style?.fontWeight || undefined,
               fontStyle: field.style?.fontStyle || undefined,
               textAlign: field.style?.textAlign || 'left',
@@ -961,15 +971,16 @@ const InteractiveDocumentViewer = ({
 
     switch (field.type || field.field_type) {
       case 'text': {
-        const baseFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 13;
-        const effectiveFs = resolveResponsiveFontSize(baseFs, field.height, field.width);
+        const effectiveFs = resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width);
+        const effectiveFsPx = parseFontSizePx(field.style?.fontSize || '13px', 13);
         // Phase 81.9 — text fields ALWAYS render as <textarea> with
         // pre-wrap + word-break so long input wraps INSIDE the field box
         // instead of overflowing into surrounding document content.
         // Multi-line vs single-line distinction is purely about Enter handling:
         //   - single-line → Enter is blocked (does nothing; user must Tab/Next)
         //   - multi-line  → Enter inserts a newline naturally
-        const lineHeight = Math.max(effectiveFs * 1.25, 16);
+        const cappedFsPx = Math.max(6, Math.min(effectiveFsPx, Math.floor((field.height - 2) * 0.85), Math.floor(field.width / 2.5)));
+        const lineHeight = Math.max(cappedFsPx * 1.25, 16);
         const autoMulti = field.height >= lineHeight * 1.9;
         // Phase 81.23 — Honour the Visual Builder's `fieldSubType` dropdown
         // so a field explicitly set to "Multi-Line Text" wraps and accepts
@@ -992,7 +1003,7 @@ const InteractiveDocumentViewer = ({
         //     wraps inside the box and newlines are honoured.
         const textStyle = {
           fontFamily: field.style?.fontFamily || undefined,
-          fontSize: `${effectiveFs}px`,
+          fontSize: effectiveFs,
           fontWeight: field.style?.fontWeight || undefined,
           fontStyle: field.style?.fontStyle || undefined,
           textDecoration: field.style?.textDecoration || undefined,
@@ -1020,6 +1031,12 @@ const InteractiveDocumentViewer = ({
         const sharedClass = `w-full h-full px-2 py-1 border-2 border-blue-400 bg-blue-50 rounded focus:ring-2 focus:ring-blue-400 focus:border-transparent ${disabledStyle}`;
         const sharedTitle = field.field_disabled ? (field.field_hint || 'Assigned to another recipient') : '';
         if (!isMultiline) {
+          const _va = field.style?.verticalAlign || 'bottom';
+          const _lineH = Math.max(cappedFsPx * 1.4, cappedFsPx + 4);
+          const _inputH = _lineH + 10;
+          const _ptTop = _va === 'top' ? 2
+            : _va === 'center' ? Math.max(2, (field.height - _inputH) / 2)
+            : Math.max(2, field.height - _inputH);
           return (
             <input
               type="text"
@@ -1029,7 +1046,7 @@ const InteractiveDocumentViewer = ({
               placeholder={field.placeholder || field.defaultValue || visibleLabel || 'Enter text...'}
               disabled={isDisabled}
               className={sharedClass}
-              style={textStyle}
+              style={{ ...textStyle, paddingTop: `${_ptTop}px`, paddingBottom: '2px' }}
               title={sharedTitle}
               data-testid={`field-${field.id}`}
               maxLength={field.characterLimit || undefined}
@@ -1062,8 +1079,7 @@ const InteractiveDocumentViewer = ({
         const textAlign = field.style?.textAlign || 'left';
         // Responsive date typography: shrinks to fit a small box so a value
         // like "12/31/2026" never spills beyond the author's bounding box.
-        const baseDateFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 13;
-        const dateFs = resolveResponsiveFontSize(baseDateFs, field.height, field.width);
+        const dateFs = resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width);
 
         // Parse any stored format back to a Date. Accept all 4 formats so that
         // a field whose format changed later still renders the stored value.
@@ -1091,7 +1107,7 @@ const InteractiveDocumentViewer = ({
           const isoValue = parsed ? formatDate(parsed, 'YYYY-MM-DD') : '';
           const manualDateStyle = {
             fontFamily: field.style?.fontFamily || undefined,
-            fontSize: `${dateFs}px`,
+            fontSize: dateFs,
             fontWeight: field.style?.fontWeight || undefined,
             fontStyle: field.style?.fontStyle || undefined,
             textAlign: textAlign,
@@ -1129,7 +1145,7 @@ const InteractiveDocumentViewer = ({
         const showCheckIcon = (field.height || 0) >= 24;
         const autoDateStyle = {
           fontFamily: field.style?.fontFamily || undefined,
-          fontSize: `${dateFs}px`,
+          fontSize: dateFs,
           fontWeight: field.style?.fontWeight || undefined,
           fontStyle: field.style?.fontStyle || undefined,
           lineHeight: 1,
@@ -1263,14 +1279,7 @@ const InteractiveDocumentViewer = ({
         // font size (CSS px). This is what makes a 24px signature visibly
         // larger than a 12px signature — they no longer all aspect-fit
         // into the field box.
-        const sigFs = (() => {
-          const raw = field.style?.fontSize;
-          if (raw) {
-            const n = Number(String(raw).replace('px', ''));
-            if (Number.isFinite(n) && n > 0) return n;
-          }
-          return 18; // sensible default
-        })();
+        const sigFs = parseFontSizePx(field.style?.fontSize, 18);
         const sigImgStyle = {
           height: `${sigFs}px`,
           width: 'auto',
@@ -1298,7 +1307,7 @@ const InteractiveDocumentViewer = ({
                 className="inline-flex items-center gap-1 font-semibold text-indigo-700 truncate px-1.5 uppercase tracking-wide"
                 style={{
                   fontFamily: field.style?.fontFamily || undefined,
-                  fontSize: field.style?.fontSize ? `${resolveResponsiveFontSize(field.style.fontSize, field.height, field.width)}px` : '11px',
+                  fontSize: field.style?.fontSize ? resolveResponsiveFontSize(field.style.fontSize, field.height, field.width) : '11px',
                   fontWeight: field.style?.fontWeight || 'semibold',
                   fontStyle: field.style?.fontStyle || undefined,
                   color: field.style?.color || undefined,
@@ -1316,14 +1325,7 @@ const InteractiveDocumentViewer = ({
         const hasInitials = Boolean(fieldValue);
         const iniAlign = field.style?.textAlign || field.alignment || 'center';
         const iniJustify = iniAlign === 'left' ? 'justify-start' : iniAlign === 'right' ? 'justify-end' : 'justify-center';
-        const iniFs = (() => {
-          const raw = field.style?.fontSize;
-          if (raw) {
-            const n = Number(String(raw).replace('px', ''));
-            if (Number.isFinite(n) && n > 0) return n;
-          }
-          return 16;
-        })();
+        const iniFs = parseFontSizePx(field.style?.fontSize, 16);
         const iniImgStyle = {
           height: `${iniFs}px`,
           width: 'auto',
@@ -1351,7 +1353,7 @@ const InteractiveDocumentViewer = ({
                 className="inline-flex items-center gap-1 font-semibold text-indigo-700 truncate px-1.5 uppercase tracking-wide"
                 style={{
                   fontFamily: field.style?.fontFamily || undefined,
-                  fontSize: field.style?.fontSize ? `${resolveResponsiveFontSize(field.style.fontSize, field.height, field.width)}px` : '11px',
+                  fontSize: field.style?.fontSize ? resolveResponsiveFontSize(field.style.fontSize, field.height, field.width) : '11px',
                   fontWeight: field.style?.fontWeight || 'semibold',
                   fontStyle: field.style?.fontStyle || undefined,
                   color: field.style?.color || undefined,
@@ -1412,11 +1414,10 @@ const InteractiveDocumentViewer = ({
               const d = new Date(s);
               return Number.isNaN(d.getTime()) ? null : d;
             };
-            const baseMergeDateFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 13;
-            const mergeDateFs = resolveResponsiveFontSize(baseMergeDateFs, field.height, field.width);
+            const mergeDateFs = resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width);
             const mergeDateStyle = {
               fontFamily: field.style?.fontFamily || undefined,
-              fontSize: `${mergeDateFs}px`,
+              fontSize: mergeDateFs,
               fontWeight: field.style?.fontWeight || undefined,
               fontStyle: field.style?.fontStyle || undefined,
               textAlign: field.style?.textAlign || 'left',
@@ -1462,7 +1463,7 @@ const InteractiveDocumentViewer = ({
                   className="w-full h-full px-2 py-1 border-2 border-orange-400 bg-orange-50 rounded focus:ring-2 focus:ring-orange-400 focus:border-transparent"
                   style={{
                     fontFamily: field.style?.fontFamily || undefined,
-                    fontSize: `${resolveResponsiveFontSize(Number((field.style?.fontSize || '').toString().replace('px', '')) || 13, field.height, field.width)}px`,
+                    fontSize: resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width),
                     fontWeight: field.style?.fontWeight || undefined,
                     fontStyle: field.style?.fontStyle || undefined,
                     textAlign: field.style?.textAlign || 'left',
@@ -1577,11 +1578,10 @@ const InteractiveDocumentViewer = ({
         const displayValue = field.fallbackToInput
           ? (userEnteredValue || crmValue)
           : (crmValue || userEnteredValue);
-        const baseMergeFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 13;
-        const mergeFs = resolveResponsiveFontSize(baseMergeFs, field.height, field.width);
+        const mergeFs = resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width);
         const mergeStyle = {
           fontFamily: field.style?.fontFamily || undefined,
-          fontSize: `${mergeFs}px`,
+          fontSize: mergeFs,
           fontWeight: field.style?.fontWeight || undefined,
           fontStyle: field.style?.fontStyle || undefined,
           textDecoration: field.style?.textDecoration || undefined,
@@ -1608,21 +1608,19 @@ const InteractiveDocumentViewer = ({
       }
 
       case 'label':
-          const baseLabelFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 12;
-          const labelFs = resolveResponsiveFontSize(baseLabelFs, field.height, field.width);
+          const labelFs = resolveResponsiveFontSize(field.style?.fontSize || '12px', field.height, field.width);
           return (
-            <div 
-              className="w-full h-full px-2 py-1 flex items-center"
+            <div
+              className="w-full px-2 py-1"
               style={{
                 fontFamily: field.style?.fontFamily || undefined,
-                fontSize: `${labelFs}px`,
+                fontSize: labelFs,
                 fontWeight: field.style?.fontWeight || 'normal',
                 fontStyle: field.style?.fontStyle || undefined,
                 textDecoration: field.style?.textDecoration || undefined,
                 textAlign: field.style?.textAlign || 'left',
                 color: field.style?.color || '#000000',
-                justifyContent: field.style?.textAlign === 'center' ? 'center' : field.style?.textAlign === 'right' ? 'flex-end' : 'flex-start',
-                lineHeight: 1,
+                lineHeight: 1.25,
               }}
             >
               {field.text || field.label || 'Static Text'}
@@ -1631,8 +1629,7 @@ const InteractiveDocumentViewer = ({
 
       case 'dropdown': {
         const options = field.options || [];
-        const baseFs = Number((field.style?.fontSize || '').toString().replace('px', '')) || 13;
-        const effectiveFs = resolveResponsiveFontSize(baseFs, field.height, field.width);
+        const effectiveFs = resolveResponsiveFontSize(field.style?.fontSize || '13px', field.height, field.width);
         return (
           <select
             value={fieldValue || ''}
@@ -1641,7 +1638,7 @@ const InteractiveDocumentViewer = ({
             className={`w-full h-full px-2 py-1 border-2 border-indigo-400 bg-indigo-50 rounded focus:ring-2 focus:ring-indigo-400 focus:border-transparent ${disabledStyle}`}
             style={{
               fontFamily: field.style?.fontFamily || undefined,
-              fontSize: `${effectiveFs}px`,
+              fontSize: effectiveFs,
               fontWeight: field.style?.fontWeight || undefined,
               fontStyle: field.style?.fontStyle || undefined,
               textAlign: field.style?.textAlign || undefined,
@@ -1750,6 +1747,7 @@ const InteractiveDocumentViewer = ({
                   animation: isActive ? 'pulseActiveField 1.6s ease-in-out infinite' : undefined,
                 }}
                 onClick={isNonInteractive ? undefined : () => onFieldClick && onFieldClick(field.id)}
+                onFocus={isNonInteractive ? undefined : () => onFieldClick && onFieldClick(field.id)}
               >
                 {/* Inner contained rect — clips field content strictly inside
                     the author's bounding box. The "Fill In" badge is rendered
@@ -1760,6 +1758,9 @@ const InteractiveDocumentViewer = ({
                     height: '100%',
                     overflow: 'hidden',
                     boxSizing: 'border-box',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: (() => { const va = field.style?.verticalAlign || 'bottom'; return va === 'top' ? 'flex-start' : va === 'center' ? 'center' : 'flex-end'; })(),
                   }}
                 >
                   {renderField(field)}
@@ -2003,6 +2004,7 @@ const InteractiveDocumentViewer = ({
                         animation: isActive ? 'pulseActiveField 1.6s ease-in-out infinite' : undefined,
                       }}
                       onClick={isNonInteractive ? undefined : () => onFieldClick && onFieldClick(field.id)}
+                      onFocus={isNonInteractive ? undefined : () => onFieldClick && onFieldClick(field.id)}
                     >
                       {/* Inner contained rect — clips field content inside the
                           author's bounding box. The "Fill In" badge is a sibling
@@ -2013,6 +2015,9 @@ const InteractiveDocumentViewer = ({
                           height: '100%',
                           overflow: 'hidden',
                           boxSizing: 'border-box',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          justifyContent: (() => { const va = field.style?.verticalAlign || 'bottom'; return va === 'top' ? 'flex-start' : va === 'center' ? 'center' : 'flex-end'; })(),
                         }}
                       >
                         {renderField(field)}

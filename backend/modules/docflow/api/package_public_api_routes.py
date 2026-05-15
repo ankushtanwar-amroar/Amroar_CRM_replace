@@ -15,8 +15,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..')))
@@ -32,16 +34,102 @@ package_service = PackageService(db)
 webhook_service = WebhookService(db)
 
 
-# Phase 81.65 — Shared field-shape helper used by both the LIST and DETAIL
+# Phase 81.65 — Shared field-shape helpers used by both the LIST and DETAIL
 # endpoints so external integrators see a consistent, lean response with
 # merge metadata baked in.
+
+def _build_radio_group_fp(group_name: str, options: list) -> dict:
+    """Synthesize a single radio_group placement from individual radio option placements.
+
+    The NEW radio model stores one field placement per option, all sharing the same
+    groupName. This collapses them into one logical group entry that matches
+    what external integrators actually expect to see.
+    """
+    first = options[0] if options else {}
+    # required is synced across siblings in the builder; true if ANY option carries it
+    required = any(bool(o.get("required")) for o in options)
+
+    built_options = []
+    for i, o in enumerate(options):
+        built_options.append({
+            "option_id": o.get("id"),
+            "label": (
+                o.get("optionLabel")
+                or o.get("option_label")
+                or f"Option {i + 1}"
+            ),
+            "value": (
+                o.get("optionValue")
+                or o.get("option_value")
+                or o.get("id")
+            ),
+            "default_selected": bool(
+                o.get("defaultChecked") or o.get("default_checked")
+            ),
+        })
+
+    return {
+        "id": group_name,
+        "type": "radio_group",
+        "field_type": "radio_group",
+        "label": first.get("label") or group_name,
+        "groupName": group_name,
+        "required": required,
+        "recipient_id": first.get("recipient_id") or first.get("assigned_to"),
+        "_radio_options": built_options,
+    }
+
+
+def _group_radio_placements(field_placements: list) -> list:
+    """Merge individual radio option placements into logical radio_group entries.
+
+    NEW model: each option is a separate placement sharing the same groupName.
+    Those are collapsed into one radio_group at the position of the first option.
+
+    LEGACY model: single placement with a radioOptions[] array — passed through
+    unchanged so old templates stay compatible.
+
+    Non-radio fields are always passed through unchanged.
+    """
+    # Pass 1: collect all options per group (preserving order)
+    group_options: dict = {}
+    for fp in field_placements:
+        raw_type = (fp.get("type") or fp.get("field_type") or "").lower()
+        if raw_type != "radio":
+            continue
+        gname = fp.get("groupName") or fp.get("group_name")
+        if not gname:
+            continue  # LEGACY or ungrouped — handled in pass 2
+        group_options.setdefault(gname, []).append(fp)
+
+    # Pass 2: rebuild list, inserting group entry at first-option position
+    result = []
+    seen: set = set()
+    for fp in field_placements:
+        raw_type = (fp.get("type") or fp.get("field_type") or "").lower()
+        if raw_type != "radio":
+            result.append(fp)
+            continue
+        gname = fp.get("groupName") or fp.get("group_name")
+        if not gname:
+            # LEGACY model (radioOptions array) — pass through as-is
+            result.append(fp)
+            continue
+        if gname not in seen:
+            seen.add(gname)
+            result.append(_build_radio_group_fp(gname, group_options[gname]))
+        # Subsequent options for an already-seen group are dropped (merged above)
+    return result
+
+
 def _build_public_field(fp: dict, *, include_extras: bool = False) -> dict:
     """Map a stored field_placement to the public-API shape.
 
     Removes implementation-detail keys ("assigned_role", "position") that
     third parties don't need (Phase 81.65). For merge fields, attaches a
     `merge_source` block so CRMs (Salesforce, etc.) can map data without
-    parsing template patterns.
+    parsing template patterns. For radio_group entries (produced by
+    _group_radio_placements), exposes the grouped options array.
     """
     raw_type = (fp.get("type") or fp.get("field_type") or "text").lower()
     # Normalize external-facing type label for merge fields.
@@ -53,6 +141,11 @@ def _build_public_field(fp: dict, *, include_extras: bool = False) -> dict:
         "field_type": field_type,
         "required": bool(fp.get("required", False)),
     }
+
+    # Radio group — expose the options array so integrators see the full structure.
+    # option_id values are the underlying field placement IDs to use in field_assignments.
+    if field_type == "radio_group":
+        out["options"] = fp.get("_radio_options", [])
 
     if field_type == "merge":
         merge_object = fp.get("merge_object") or fp.get("mergeObject") or ""
@@ -326,7 +419,8 @@ async def list_packages(
 
             fields = []
             if template:
-                for fp in template.get("field_placements", []):
+                grouped = _group_radio_placements(template.get("field_placements", []))
+                for fp in grouped:
                     fields.append(_build_public_field(fp))
 
             enriched_docs.append({
@@ -519,6 +613,28 @@ class SendPackageRequest(BaseModel):
     template_merge_fields: Optional[List[TemplateMergeFields]] = None
     sms_mode: Optional[bool] = False  # Phase 81 — controls whether SMS is sent to recipients
     sms_consent: Optional[bool] = False  # controls whether the SMS disclaimer popup is shown
+    from_name: Optional[str] = Field(default=None, description="Custom sender display name shown in emails and signing UI")
+    from_email: Optional[str] = Field(default=None, description="Custom sender email address shown in email From header")
+
+    @field_validator('from_name')
+    @classmethod
+    def validate_from_name(cls, v):
+        if v is not None:
+            v = v.strip()
+            if len(v) > 200:
+                raise ValueError("from_name must be 200 characters or less")
+            return v or None
+        return v
+
+    @field_validator('from_email')
+    @classmethod
+    def validate_from_email(cls, v):
+        if v is not None:
+            v = v.strip()
+            if v and not re.match(r'^[^@\s]+@[^@\s]+\.[^@\s]+$', v):
+                raise ValueError(f"from_email '{v}' is not a valid email address")
+            return v or None
+        return v
 
 
 SEND_ROLE_MAP = {
@@ -683,6 +799,29 @@ async def send_package(
         otp_required = req.authentication.otp_required
     security = {"require_auth": otp_required, "session_timeout_minutes": 15}
 
+    # Resolve sender identity for the signing page FROM section.
+    # When explicit from_name/from_email are omitted, fall back to the API key owner's real name/email.
+    resolved_sender_name = req.from_name
+    resolved_sender_email = req.from_email
+    if resolved_sender_name is None and resolved_sender_email is None:
+        owner_id = api_key.get("created_by")
+        if owner_id:
+            try:
+                owner = await db.users.find_one(
+                    {"id": owner_id},
+                    {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
+                )
+                if owner:
+                    resolved_sender_name = (
+                        owner.get("full_name")
+                        or owner.get("name")
+                        or " ".join(filter(None, [owner.get("first_name"), owner.get("last_name")])).strip()
+                        or None
+                    ) or None
+                    resolved_sender_email = owner.get("email") or None
+            except Exception as _e:
+                logger.warning(f"[send-package] API key owner lookup failed: {_e}")
+
     # ── Execute Send via PackageService (same as internal flow) ──
     try:
         run = await package_service.send_package_run(
@@ -698,6 +837,8 @@ async def send_package(
             template_merge_fields=merge_fields_map,
             sms_mode=bool(req.sms_mode),
             sms_consent=bool(req.sms_consent),
+            sender_name=resolved_sender_name,
+            sender_email=resolved_sender_email,
         )
     except Exception as e:
         logger.error(f"Public API send_package failed: {e}")
@@ -796,7 +937,8 @@ async def get_package(
 
         fields = []
         if template:
-            for fp in template.get("field_placements", []):
+            grouped = _group_radio_placements(template.get("field_placements", []))
+            for fp in grouped:
                 fields.append(_build_public_field(fp, include_extras=True))
 
         enriched_docs.append({

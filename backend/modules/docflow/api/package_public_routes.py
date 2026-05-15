@@ -26,6 +26,7 @@ from ..services.docflow_audit_service import DocFlowAuditService
 from ..services.routing_engine import RoutingEngine
 from ..services.session_service import SessionService
 from ..services.webhook_service import WebhookService
+from ..utils.request_utils import build_request_metadata, get_client_ip
 
 router = APIRouter(prefix="/docflow/packages/public", tags=["DocFlow Package Public"])
 
@@ -545,26 +546,40 @@ async def get_package_public(
     except Exception as e:
         logger.warning(f"Webhook fire_package_event (opened) failed: {e}")
 
-    # Phase 74: Resolve sender info (document.created_by → user record) for
-    # the public signing-view header. Falls back silently if user is missing.
+    # Phase 74 + API sender override: Resolve sender info for the public signing-view header.
+    # Priority 1: sender_name/sender_email on the package/run (set by API custom sender or API key owner auto-resolution).
+    # Priority 2: created_by user record (portal UI senders).
     sender_info = None
     try:
-        sender_user_id = package.get("created_by")
-        if sender_user_id:
-            user = await db.users.find_one(
-                {"id": sender_user_id},
-                {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
-            )
-            if user:
-                name = (
-                    user.get("full_name")
-                    or user.get("name")
-                    or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
-                    or (user.get("email") or "").split("@")[0]
+        pkg_sender_name = package.get("sender_name")
+        pkg_sender_email = package.get("sender_email")
+        if pkg_sender_name or pkg_sender_email:
+            sender_info = {"name": pkg_sender_name or "", "email": pkg_sender_email or ""}
+        else:
+            sender_user_id = package.get("created_by")
+            if sender_user_id:
+                user = await db.users.find_one(
+                    {"id": sender_user_id},
+                    {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
                 )
-                email = user.get("email") or ""
-                if name or email:
-                    sender_info = {"name": name, "email": email}
+                if not user:
+                    # created_by may be an API key ID — resolve through the key owner.
+                    key_rec = await db.docflow_api_keys.find_one({"id": sender_user_id}, {"_id": 0, "created_by": 1})
+                    if key_rec and key_rec.get("created_by"):
+                        user = await db.users.find_one(
+                            {"id": key_rec["created_by"]},
+                            {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
+                        )
+                if user:
+                    name = (
+                        user.get("full_name")
+                        or user.get("name")
+                        or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
+                        or (user.get("email") or "").split("@")[0]
+                    )
+                    email = user.get("email") or ""
+                    if name or email:
+                        sender_info = {"name": name, "email": email}
     except Exception as e:
         logger.warning(f"Sender resolution failed for package {package.get('id')}: {e}")
 
@@ -713,8 +728,7 @@ async def mark_signed(
         actor=actor,
         metadata={
             "role_type": "SIGN",
-            "ip_address": request.client.host if request.client else None,
-            "user_agent": request.headers.get("user-agent"),
+            **build_request_metadata(request),
             "signer_name": req.signer_name or active_recipient.get("name"),
             "signer_email": req.signer_email or active_recipient.get("email"),
         },
@@ -1695,8 +1709,7 @@ async def sign_with_fields(
             actor=actor,
             metadata={
                 "role_type": "SIGN",
-                "ip_address": request.client.host if request.client else None,
-                "user_agent": request.headers.get("user-agent"),
+                **build_request_metadata(request),
                 "signer_name": signer_name,
                 "signer_email": signer_email,
                 "documents_signed": signed_doc_count,
@@ -1805,14 +1818,30 @@ async def mark_reviewed(
         actor=actor,
         metadata={
             "role_type": "VIEW_ONLY",
-            "ip_address": request.client.host if request.client else None,
-            "user_agent": request.headers.get("user-agent"),
+            **build_request_metadata(request),
             "reviewer_name": req.reviewer_name or active_recipient.get("name"),
         },
     )
 
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update recipient status")
+
+    # Fire review webhook
+    try:
+        await webhook_service.fire_package_event(
+            package_id=package["id"],
+            event_type="reviewed",
+            tenant_id=package.get("tenant_id", ""),
+            extra_data={
+                "action": "reviewed",
+                "recipient_name": active_recipient.get("name", ""),
+                "recipient_email": active_recipient.get("email", ""),
+                "reviewer_name": req.reviewer_name or active_recipient.get("name"),
+                **build_request_metadata(request),
+            },
+        )
+    except Exception as e:
+        logger.warning(f"Webhook fire_package_event (reviewed) failed: {e}")
 
     return {
         "success": True,
@@ -1887,8 +1916,7 @@ async def approve_package(
         actor=actor,
         metadata={
             "role_type": "APPROVE_REJECT",
-            "ip_address": request.client.host if request.client else None,
-            "user_agent": request.headers.get("user-agent"),
+            **build_request_metadata(request),
             "approver_name": req.approver_name or active_recipient.get("name"),
         },
     )
@@ -1907,6 +1935,7 @@ async def approve_package(
                 "recipient_name": active_recipient.get("name", ""),
                 "recipient_email": active_recipient.get("email", ""),
                 "approver_name": req.approver_name or active_recipient.get("name"),
+                **build_request_metadata(request),
             },
         )
     except Exception as e:
@@ -2023,7 +2052,7 @@ async def reject_package(
             metadata={
                 "role_type": "APPROVE_REJECT",
                 "reject_reason": req.reason.strip(),
-                "ip_address": request.client.host if request.client else None,
+                **build_request_metadata(request),
             },
         )
 
@@ -2046,6 +2075,7 @@ async def reject_package(
                 "recipient_email": active_recipient.get("email", ""),
                 "reason": req.reason.strip(),
                 "reject_reason": req.reason.strip(),
+                **build_request_metadata(request),
             },
         )
     except Exception as e:

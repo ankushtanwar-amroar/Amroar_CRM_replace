@@ -123,6 +123,12 @@ export default function useGuidedFillIn({
   // Tracks the previous activeFieldId to detect when the user clicks an
   // already-filled date field (vs. when a date value is actually committed).
   const prevActiveFieldIdRef = useRef(null);
+  // Tracks the field that was just auto-advanced FROM (so we can detect when
+  // the auto-advance jumped over a newly-revealed conditional field).
+  const lastAutoAdvanceSourceRef = useRef(null);
+  // Tracks the previous navigable IDs to detect newly-visible fields.
+  // null = not yet initialized (first render).
+  const prevNavigableIdsRef = useRef(null);
 
   const recipientIdSet = useMemo(() => {
     return new Set((recipientIds || []).filter(Boolean).map(x => String(x)));
@@ -301,11 +307,56 @@ export default function useGuidedFillIn({
         || navUnfilled[0]
         || navigableFieldIds[currentIdx + 1]
         || null;
+      lastAutoAdvanceSourceRef.current = activeFieldId;
       setActiveFieldId(nextId);
     } else {
       prevActiveFieldIdRef.current = activeFieldId;
     }
   }, [fieldValues, navigableFields, navigableFieldIds, pendingFieldIds, activeFieldId]);
+
+  // Detects conditional fields that became visible AFTER an auto-advance.
+  // When a radio/checkbox fill triggers a conditional field to appear, the
+  // hiddenFieldIds update arrives one tick later (setTimeout(0) in the viewer),
+  // so auto-advance runs with stale navigableFields and skips the new field.
+  // This effect fires whenever navigableFieldIds changes, checks if newly-visible
+  // unfilled fields appeared between the auto-advance source and current active,
+  // and redirects to the first such field.
+  useEffect(() => {
+    const prevIds = prevNavigableIdsRef.current;
+    if (prevIds === null) {
+      prevNavigableIdsRef.current = navigableFieldIds;
+      return;
+    }
+    const prevSet = new Set(prevIds);
+    prevNavigableIdsRef.current = navigableFieldIds;
+    if (!started) return;
+    const srcId = lastAutoAdvanceSourceRef.current;
+    if (!srcId) return;
+    const newlyVisible = navigableFields.filter(
+      f => !prevSet.has(f.id) && !isFilled(f, fieldValues)
+    );
+    if (newlyVisible.length === 0) {
+      lastAutoAdvanceSourceRef.current = null;
+      return;
+    }
+    const srcIdx = navigableFieldIds.indexOf(srcId);
+    const currActiveIdx = navigableFieldIds.indexOf(activeFieldId);
+    if (srcIdx === -1 || currActiveIdx === -1) {
+      lastAutoAdvanceSourceRef.current = null;
+      return;
+    }
+    const candidates = newlyVisible
+      .filter(f => {
+        const idx = navigableFieldIds.indexOf(f.id);
+        return idx !== -1 && idx > srcIdx && idx <= currActiveIdx;
+      })
+      .sort(sortByReadingOrder);
+    lastAutoAdvanceSourceRef.current = null;
+    if (candidates.length > 0) {
+      setActiveFieldId(candidates[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigableFieldIds]);
 
   const start = useCallback(() => {
     setStarted(true);

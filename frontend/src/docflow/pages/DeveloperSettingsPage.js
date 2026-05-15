@@ -329,11 +329,13 @@ const ApiDocumentation = () => {
       method: 'POST',
       path: '/api/public/packages/send',
       title: 'Send Package',
-      description: 'Send a package using an existing blueprint. Creates a new run, generates documents, assigns recipients, and triggers routing. Reuses the same logic as the internal "Send Package" flow.',
+      description: 'Send a package using an existing blueprint. Creates a new run, generates documents, assigns recipients, and triggers routing. Reuses the same logic as the internal "Send Package" flow. Supports custom sender name and email for white-labeling and CRM integrations.',
       auth: 'API Key (X-API-Key or Authorization: Bearer)',
       queryParams: [],
       requestBody: {
         package_id: "uuid-of-existing-package",
+        from_name: "BatonCare Finance Team",
+        from_email: "finance@batoncare.com",
         sms_mode: false,
         recipients: [
           {
@@ -416,6 +418,8 @@ const ApiDocumentation = () => {
       validationRules: [
         'package_id: required, must exist and belong to tenant',
         'Package must not be voided',
+        'from_name: optional string, max 200 characters. Whitespace is trimmed. Sets the sender display name in email From header, email body, and signing UI.',
+        'from_email: optional string. Must be a valid email address (format: user@domain.tld). Sets the sender address in the email From header. Omit to use the system default sender.',
         'recipients[].name: required (string)',
         'recipients[].email: required for email/both delivery mode',
         'recipients[].phone: required (E.164 format) when sms_mode=true; otherwise optional',
@@ -442,6 +446,7 @@ const ApiDocumentation = () => {
         parallel: 'All recipients are notified simultaneously. routing_order is ignored.',
         mixed: 'Recipients with the same routing_order (or wave) run in parallel. Different orders run sequentially. Example: Wave 1 = 2 signers in parallel, Wave 2 = 1 approver after both complete.',
         sms_mode: 'When true, the signing page renders an SMS Security Check screen before consent. Recipient must enter a 6-digit OTP delivered to their phone (real Twilio if TWILIO_* env vars set; otherwise stub mode logs OTP to backend stdout). Sign attempts before verification return 428 Precondition Required. Maps to internal endpoints POST /api/docflow/packages/public/{token}/sms/send-otp and /sms/verify-otp.',
+        custom_sender: 'from_name / from_email override the email From header and sender name shown in the email body and signing UI for this run. If omitted, the system default sender is used. Useful for white-labeled clients, finance teams, and CRM-based sending.',
       },
     },
     {
@@ -449,7 +454,7 @@ const ApiDocumentation = () => {
       method: 'POST',
       path: '/api/v1/documents/generate-links',
       title: 'Generate Document Links',
-      description: 'Generate document(s) with full workflow. Supports basic (single doc) and package (multi doc) modes. Phase 81: includes SMS verification mode and auto-assign sweep for unclaimed signable fields.',
+      description: 'Generate document(s) with full workflow. Supports basic (single doc) and package (multi doc) modes. Phase 81: includes SMS verification mode and auto-assign sweep for unclaimed signable fields. Supports custom sender name and email for white-labeling and CRM integrations.',
       auth: 'JWT Bearer Token (admin session) — or API Key for programmatic use',
       queryParams: [],
       requestBody: {
@@ -461,6 +466,8 @@ const ApiDocumentation = () => {
         send_email: true,
         require_auth: true,
         sms_mode: false,
+        from_name: "BatonCare Finance Team",
+        from_email: "finance@batoncare.com",
         recipients: [
           {
             name: "Client Name",
@@ -497,6 +504,8 @@ const ApiDocumentation = () => {
         'template_id: required for basic mode',
         'routing_type: sequential | parallel',
         'delivery_mode: email | public_link | both | public_recipients',
+        'from_name: optional string, max 200 characters. Whitespace is trimmed. Sets the sender display name in email From header, email body, and signing UI. Applies to both basic and package mode.',
+        'from_email: optional string. Must be a valid email address (format: user@domain.tld). Sets the sender address in the email From header. Omit to use the system default sender.',
         'recipients[].role: signer | approver | viewer',
         'recipients[].phone: required (E.164 format) when sms_mode=true; otherwise optional',
         'recipients[].assigned_components: array of field IDs (basic mode). Phase 81.1 — if EMPTY, auto-fills with all unclaimed signable fields. If partially populated and signable fields are still unclaimed after the empty-recipient sweep, leftovers are appended to the FIRST recipient so checkbox/radio/text overlays stay visible on the signer page.',
@@ -515,6 +524,7 @@ const ApiDocumentation = () => {
         parallel: 'All recipients notified at once.',
         sms_mode: 'When true, the signer page renders an SMS Security Check modal before consent. Recipient must enter a 6-digit OTP delivered to their phone (real Twilio if TWILIO_* env vars set; otherwise stub mode logs OTP to backend stdout). Sign attempts before verification return 428 Precondition Required.',
         auto_assign_sweep: 'Phase 81.1 — guarantees every signable field has at least one owner. (1) Empty assigned_components recipients get all unclaimed fields in routing_order. (2) Final sweep dumps any remaining unclaimed signable IDs onto the first (lowest routing_order) recipient. Merge/label fields are document-level and NEVER auto-assigned.',
+        custom_sender: 'from_name / from_email override the email From header and sender name shown in the email body and signing UI. Applies to all emails in the document lifecycle (initial send, sequential next-recipient, completion). If omitted, the system default sender is used.',
       },
     },
     {

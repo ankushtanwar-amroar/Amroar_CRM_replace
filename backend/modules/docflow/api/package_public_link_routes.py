@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..',
 from shared.database import db
 from ..services.docflow_audit_service import DocFlowAuditService
 from ..services.webhook_service import WebhookService
+from ..utils.request_utils import build_request_metadata
 
 router = APIRouter(prefix="/docflow/packages/public-link", tags=["DocFlow Public Link"])
 
@@ -78,6 +79,43 @@ async def get_public_link_package(token: str):
 
     require_otp = package.get("security_settings", {}).get("require_auth", True)
 
+    # Resolve sender info for the signing-view FROM header.
+    # Priority 1: sender_name/sender_email on the package (set by API custom sender or API key owner auto-resolution).
+    # Priority 2: created_by user record lookup.
+    sender_info = None
+    try:
+        pkg_sender_name = package.get("sender_name")
+        pkg_sender_email = package.get("sender_email")
+        if pkg_sender_name or pkg_sender_email:
+            sender_info = {"name": pkg_sender_name or "", "email": pkg_sender_email or ""}
+        else:
+            sender_user_id = package.get("created_by")
+            if sender_user_id:
+                user = await db.users.find_one(
+                    {"id": sender_user_id},
+                    {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
+                )
+                if not user:
+                    # created_by may be an API key ID — resolve through the key owner.
+                    key_rec = await db.docflow_api_keys.find_one({"id": sender_user_id}, {"_id": 0, "created_by": 1})
+                    if key_rec and key_rec.get("created_by"):
+                        user = await db.users.find_one(
+                            {"id": key_rec["created_by"]},
+                            {"_id": 0, "email": 1, "first_name": 1, "last_name": 1, "name": 1, "full_name": 1},
+                        )
+                if user:
+                    name = (
+                        user.get("full_name")
+                        or user.get("name")
+                        or " ".join(filter(None, [user.get("first_name"), user.get("last_name")])).strip()
+                        or (user.get("email") or "").split("@")[0]
+                    )
+                    email = user.get("email") or ""
+                    if name or email:
+                        sender_info = {"name": name, "email": email}
+    except Exception as _e:
+        logger.warning(f"Sender resolution failed for public-link package {package.get('id')}: {_e}")
+
     return {
         "package_id": package["id"],
         "package_name": package.get("name", ""),
@@ -85,6 +123,7 @@ async def get_public_link_package(token: str):
         "require_otp": require_otp,
         "total_documents": len(documents),
         "documents": documents,
+        "sender": sender_info,
     }
 
 
@@ -745,8 +784,7 @@ async def submit_public_link(
         "failed_documents": failed_documents,
         "submitted_at": now.isoformat(),
         "created_at": now.isoformat(),
-        "ip_address": request.client.host if request.client else None,
-        "user_agent": request.headers.get("user-agent"),
+        **build_request_metadata(request),
     }
 
     await db.docflow_public_submissions.insert_one(submission)

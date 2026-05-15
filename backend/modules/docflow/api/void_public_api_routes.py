@@ -21,6 +21,7 @@ from ..services.void_service import VoidService
 from ..services.docflow_audit_service import DocFlowAuditService
 from ..services.system_email_service import SystemEmailService
 from .package_public_api_routes import verify_api_key
+from ..utils.request_utils import get_client_ip
 
 router = APIRouter(prefix="/public", tags=["DocFlow Public API"])
 logger = logging.getLogger(__name__)
@@ -39,11 +40,7 @@ def _build_void_service() -> VoidService:
 
 
 def _client_ip(request: Request) -> Optional[str]:
-    # Honor X-Forwarded-For first (Kubernetes ingress sets this).
-    fwd = request.headers.get("x-forwarded-for") or ""
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
+    return get_client_ip(request)
 
 
 @router.post("/documents/{document_id}/void")

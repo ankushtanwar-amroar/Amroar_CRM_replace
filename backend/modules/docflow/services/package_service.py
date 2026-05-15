@@ -44,6 +44,8 @@ class PackageService:
         webhook_config: Optional[Dict[str, Any]] = None,
         sms_mode: bool = False,
         sms_consent: bool = False,
+        sender_name: Optional[str] = None,
+        sender_email: Optional[str] = None,
     ) -> dict:
         """
         Create a package, generate all documents, initialize routing.
@@ -112,6 +114,8 @@ class PackageService:
             "updated_at": now.isoformat(),
             "completed_at": None,
             "expires_at": expires_at.isoformat() if expires_at else None,
+            "sender_name": sender_name or None,
+            "sender_email": sender_email or None,
         }
 
         await self.db.docflow_packages.insert_one(package)
@@ -338,6 +342,8 @@ class PackageService:
         template_merge_fields: Optional[Dict[str, Dict[str, Any]]] = None,
         sms_mode: bool = False,
         sms_consent: bool = False,
+        sender_name: Optional[str] = None,
+        sender_email: Optional[str] = None,
     ) -> dict:
         """Create a new run/execution for a reusable package blueprint."""
         now = datetime.now(timezone.utc)
@@ -426,6 +432,8 @@ class PackageService:
             "updated_at": now.isoformat(),
             "completed_at": None,
             "expires_at": None,
+            "sender_name": sender_name or None,
+            "sender_email": sender_email or None,
         }
 
         # Insert the run into docflow_package_runs

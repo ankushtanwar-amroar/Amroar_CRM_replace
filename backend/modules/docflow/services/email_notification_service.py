@@ -124,6 +124,8 @@ def send_action_required_email(
     public_token: str,
     document_count: int,
     sender_name: Optional[str] = None,
+    from_name: Optional[str] = None,
+    from_email: Optional[str] = None,
 ) -> bool:
     """
     Send an 'Action Required' email to a package recipient.
@@ -153,7 +155,8 @@ def send_action_required_email(
             to_email=recipient_email,
             subject=subject,
             html_content=html,
-            from_name="DocFlow",
+            from_name=from_name or "DocFlow",
+            from_email=from_email or None,
         )
         if result:
             logger.info(f"[DocFlowEmail] Action-required email sent to {recipient_email}")

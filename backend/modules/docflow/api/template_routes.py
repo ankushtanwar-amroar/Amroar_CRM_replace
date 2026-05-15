@@ -495,6 +495,33 @@ async def get_template(
     return template
 
 
+@router.patch("/templates/{template_id}/webhook")
+async def update_template_webhook(
+    template_id: str,
+    payload: dict = Body(...),
+    current_user: User = Depends(get_current_user)
+):
+    """Save webhook/integration config without touching template versioning."""
+    webhook_config = payload.get("webhook_config") if "webhook_config" in payload else payload
+
+    existing = await db.docflow_templates.find_one(
+        {"id": template_id, "tenant_id": current_user.tenant_id},
+        {"_id": 0, "id": 1}
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    await db.docflow_templates.update_one(
+        {"id": template_id, "tenant_id": current_user.tenant_id},
+        {"$set": {
+            "webhook_config": webhook_config,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_by": current_user.id,
+        }}
+    )
+    return {"success": True, "message": "Webhook settings saved"}
+
+
 @router.put("/templates/{template_id}")
 async def update_template(
     template_id: str,

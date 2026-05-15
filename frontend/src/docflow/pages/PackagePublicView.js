@@ -1145,6 +1145,15 @@ const PackagePublicView = () => {
             </div>
             <h2 className="text-xl font-bold text-gray-800" data-testid="verify-title">Verify Your Identity</h2>
             <p className="text-sm text-gray-500 mt-1">To access "{pkg.package_name}", please verify your identity.</p>
+            {pkg?.sender && (pkg.sender.name || pkg.sender.email) && (
+              <div className="mt-3 inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-full text-xs text-slate-700 max-w-xs">
+                <span className="font-medium text-slate-500 uppercase tracking-wide shrink-0">From</span>
+                <span className="truncate font-semibold text-slate-800" data-testid="otp-sender-name">{pkg.sender.name || pkg.sender.email}</span>
+                {pkg.sender.email && pkg.sender.name && (
+                  <span className="truncate text-slate-500 hidden sm:inline">({pkg.sender.email})</span>
+                )}
+              </div>
+            )}
           </div>
           <div className="bg-white rounded-xl border border-gray-200 p-6 shadow-sm">
             {otpStep === 'form' && (
@@ -1433,6 +1442,44 @@ const PackagePublicView = () => {
                   {submitting ? 'Processing...' : 'Finish'}
                 </button>
               )}
+              {/* Reviewer: Mark as Reviewed — sticky header action, same handler as bottom button */}
+              {isViewOnly && !recipientCompleted && (
+                <button
+                  onClick={() => setConfirmDialog({ open: true, action: 'review' })}
+                  disabled={submitting}
+                  className={`inline-flex items-center gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all shrink-0 ${!submitting ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+                  data-testid="mark-reviewed-btn-header"
+                  title="Confirm you have reviewed all documents in this package"
+                >
+                  {submitting ? <Loader2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5 sm:h-4 sm:w-4" />}
+                  {submitting ? 'Processing...' : 'Mark as Reviewed'}
+                </button>
+              )}
+              {/* Approver: Reject + Approve — sticky header actions, same handlers as bottom section */}
+              {isApprover && !recipientCompleted && allSigningComplete && (
+                <>
+                  <button
+                    onClick={() => setShowRejectDialog(true)}
+                    disabled={submitting}
+                    className={`inline-flex items-center gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-semibold border transition-all shrink-0 ${!submitting ? 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100' : 'border-gray-200 text-gray-400 cursor-not-allowed'}`}
+                    data-testid="reject-btn-header"
+                    title="Reject this package"
+                  >
+                    {submitting ? <Loader2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 animate-spin" /> : <ThumbsDown className="h-3.5 w-3.5 sm:h-4 sm:w-4" />}
+                    {submitting ? 'Processing...' : 'Reject'}
+                  </button>
+                  <button
+                    onClick={() => setConfirmDialog({ open: true, action: 'approve' })}
+                    disabled={submitting}
+                    className={`inline-flex items-center gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-semibold transition-all shrink-0 ${!submitting ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'}`}
+                    data-testid="approve-btn-header"
+                    title="Approve this package"
+                  >
+                    {submitting ? <Loader2 className="h-3.5 w-3.5 sm:h-4 sm:w-4 animate-spin" /> : <ThumbsUp className="h-3.5 w-3.5 sm:h-4 sm:w-4" />}
+                    {submitting ? 'Processing...' : 'Approve'}
+                  </button>
+                </>
+              )}
             </div>
           </div>
           <div className="mt-2 sm:mt-3 p-2.5 sm:p-3 bg-gray-50 rounded-lg">
@@ -1688,63 +1735,32 @@ const PackagePublicView = () => {
           </div>
         </div>
 
-        {/* VIEW_ONLY: Mark Reviewed (confirmation via dialog) */}
+        {/* VIEW_ONLY: informational note — Mark as Reviewed action is in the sticky header */}
         {isViewOnly && !recipientCompleted && (
-          <div className="bg-white rounded-xl border border-gray-200 p-5" data-testid="review-action-section">
-            <h3 className="text-sm font-semibold text-gray-800 mb-2">Complete Your Review</h3>
-            <p className="text-xs text-gray-500 mb-4">
-              When you're done reviewing {documents.length > 1 ? 'all documents in' : 'the document in'} this package, click below to confirm and submit your review.
+          <div className="bg-slate-50 rounded-xl border border-slate-200 px-5 py-3" data-testid="review-action-section">
+            <p className="text-xs text-slate-500 flex items-center gap-1.5">
+              <CheckCircle2 className="h-3.5 w-3.5 text-indigo-400 shrink-0" />
+              When you're done reviewing, use the <span className="font-semibold text-slate-700">Mark as Reviewed</span> button in the header above.
             </p>
-            <button
-              onClick={() => setConfirmDialog({ open: true, action: 'review' })}
-              disabled={submitting}
-              className={`w-full flex items-center justify-center gap-2 px-6 py-3 rounded-lg text-sm font-semibold transition-all ${!submitting ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                }`}
-              data-testid="mark-reviewed-btn"
-            >
-              {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />} {submitting ? 'Processing...' : 'Mark as Reviewed'}
-            </button>
           </div>
         )}
 
         {/* SIGN: Field validation + Complete Signing */}
 
 
-        {/* APPROVE_REJECT */}
+        {/* APPROVE_REJECT: informational only — action buttons are in the sticky header */}
         {isApprover && !recipientCompleted && (
-          <div className="bg-white rounded-xl border border-gray-200 p-5" data-testid="approve-reject-section">
+          <div className="bg-slate-50 rounded-xl border border-slate-200 px-5 py-3" data-testid="approve-reject-section">
             {!allSigningComplete ? (
-              <div className="text-center py-4" data-testid="approval-disabled-notice">
-                <Clock className="h-8 w-8 text-amber-400 mx-auto mb-2" />
-                <h3 className="text-sm font-semibold text-gray-700 mb-1">Waiting for Signing</h3>
-                <p className="text-xs text-gray-500">Approval actions will be available once all signers have completed signing.</p>
+              <div className="flex items-center gap-2" data-testid="approval-disabled-notice">
+                <Clock className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                <p className="text-xs text-slate-500">Approval actions will be available once all signers have completed signing.</p>
               </div>
             ) : (
-              <>
-                <h3 className="text-sm font-semibold text-gray-800 mb-2">Your Decision</h3>
-                <p className="text-xs text-gray-500 mb-5">Review the signed documents above, then approve or reject this package.</p>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowRejectDialog(true)}
-                    disabled={submitting}
-                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold border transition-all ${!submitting ? 'border-red-200 text-red-600 bg-red-50 hover:bg-red-100' : 'border-gray-200 text-gray-400 cursor-not-allowed'
-                      }`}
-                    data-testid="reject-btn"
-                  >
-                    {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ThumbsDown className="h-4 w-4" />} {submitting ? 'Rejecting...' : 'Reject'}
-                  </button>
-                  <button
-                    onClick={() => setConfirmDialog({ open: true, action: 'approve' })}
-                    disabled={submitting}
-                    className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-lg text-sm font-semibold transition-all ${!submitting ? 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-sm' : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                      }`}
-                    data-testid="approve-btn"
-                  >
-                    {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <ThumbsUp className="h-4 w-4" />}
-                    {submitting ? 'Approving...' : 'Approve'}
-                  </button>
-                </div>
-              </>
+              <p className="text-xs text-slate-500 flex items-center gap-1.5">
+                <ThumbsUp className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+                Use the <span className="font-semibold text-slate-700">Approve</span> or <span className="font-semibold text-slate-700">Reject</span> buttons in the header above to submit your decision.
+              </p>
             )}
           </div>
         )}

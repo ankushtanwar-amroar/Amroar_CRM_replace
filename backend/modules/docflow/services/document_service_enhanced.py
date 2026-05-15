@@ -51,7 +51,7 @@ class EnhancedDocumentService:
         return "SIGN"
 
     
-    async def generate_document(self, template_id: str, crm_object_id: str, 
+    async def generate_document(self, template_id: str, crm_object_id: str,
                                crm_object_type: str, user_id: str, tenant_id: str,
                                delivery_channels: List[str], recipient_email: Optional[str] = None,
                                recipient_name: Optional[str] = None,
@@ -64,7 +64,9 @@ class EnhancedDocumentService:
                                require_auth: bool = True,
                                delivery_mode: Optional[str] = None,
                                sms_mode: bool = False,
-                               sms_consent: bool = False) -> dict:
+                               sms_consent: bool = False,
+                               sender_name: Optional[str] = None,
+                               sender_email: Optional[str] = None) -> dict:
         """Generate document from template and CRM data with PDF creation"""
         
         # Get template
@@ -462,8 +464,12 @@ class EnhancedDocumentService:
             # sms_mode controls SMS sending; sms_consent controls popup visibility.
             "sms_mode": bool(sms_mode),
             "sms_consent": bool(sms_consent),
+            # Custom sender info from API (from_name / from_email). Stored so that
+            # sequential-routing next-recipient emails use the same sender.
+            "sender_name": sender_name or None,
+            "sender_email": sender_email or None,
         }
-        
+
         await self.collection.insert_one(document)
         logger.info(f"Document {document['id']} created in database")
         
@@ -509,7 +515,7 @@ class EnhancedDocumentService:
                             "document_name": template["name"],
                             "package_name": template["name"],
                             "signing_link": recipient_url,
-                            "sender_name": "DocFlow CRM",
+                            "sender_name": sender_name or "DocFlow CRM",
                             "company_name": "Cluvik",
                             "status": "Pending",
                         }
@@ -524,10 +530,12 @@ class EnhancedDocumentService:
                     template_name=template["name"],
                     document_url=recipient_url,
                     pdf_content=None,
-                    sender_name="DocFlow CRM",
+                    sender_name=sender_name or "DocFlow CRM",
                     expires_in_days=expires_in_days,
                     subject_template=custom_subject,
                     html_body_template=custom_html,
+                    from_name_override=sender_name or None,
+                    from_email_override=sender_email or None,
                 )
 
                 if email_result.get("success"):
@@ -1129,6 +1137,9 @@ class EnhancedDocumentService:
                     "metadata": {
                         "ip_address": signature_data.get("ip_address"),
                         "user_agent": signature_data.get("user_agent"),
+                        "browser": signature_data.get("browser"),
+                        "os": signature_data.get("os"),
+                        "device": signature_data.get("device"),
                         "performed_by": signer_name,
                         "performed_by_email": signer_email,
                     },
@@ -1156,6 +1167,9 @@ class EnhancedDocumentService:
                         "metadata": {
                             "ip_address": signature_data.get("ip_address"),
                             "user_agent": signature_data.get("user_agent"),
+                            "browser": signature_data.get("browser"),
+                            "os": signature_data.get("os"),
+                            "device": signature_data.get("device"),
                             "performed_by": signer_name,
                             "performed_by_email": signer_email,
                         },
@@ -1234,13 +1248,14 @@ class EnhancedDocumentService:
                                 nr_role = "SIGN"
                             resolved = await ets.resolve_for_sending(tenant_id, nr_role, next_recipient.get("email_template_id"))
                             if resolved:
+                                doc_sender = document.get("sender_name") or "DocFlow CRM"
                                 variables = {
                                     "recipient_name": next_recipient.get("name", ""),
                                     "recipient_email": next_recipient.get("email", ""),
                                     "document_name": document.get("template_name", ""),
                                     "package_name": document.get("template_name", ""),
                                     "signing_link": recipient_url,
-                                    "sender_name": "DocFlow CRM",
+                                    "sender_name": doc_sender,
                                     "company_name": "Cluvik",
                                     "status": "Pending",
                                 }
@@ -1255,9 +1270,11 @@ class EnhancedDocumentService:
                             template_name=document.get("template_name"),
                             document_url=recipient_url,
                             pdf_content=None,
-                            sender_name="DocFlow CRM",
+                            sender_name=document.get("sender_name") or "DocFlow CRM",
                             subject_template=next_custom_subject,
                             html_body_template=next_custom_html,
+                            from_name_override=document.get("sender_name") or None,
+                            from_email_override=document.get("sender_email") or None,
                         )
                         if email_result.get("success"):
                             await self.email_history_service.log_email(

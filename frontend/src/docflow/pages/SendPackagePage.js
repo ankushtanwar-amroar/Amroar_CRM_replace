@@ -756,7 +756,7 @@ const SendPackagePage = () => {
               </div>
               <button
                 type="button"
-                onClick={() => setSmsMode(!smsMode)}
+                onClick={() => {setSmsMode(!smsMode); setSmsConsent(!smsMode)}}
                 className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${smsMode ? 'bg-indigo-500' : 'bg-gray-200'}`}
                 data-testid="sms-mode-toggle"
                 aria-pressed={smsMode}
@@ -767,7 +767,7 @@ const SendPackagePage = () => {
             </div>
 
             {/* SMS Disclaimer Popup — controls whether the consent popup is shown */}
-            <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between" data-testid="sms-disclaimer-section">
+            {/* <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-center justify-between" data-testid="sms-disclaimer-section">
               <div className="flex items-center gap-3">
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50">
                   <MessageSquare className="h-4 w-4 text-indigo-600" />
@@ -791,7 +791,7 @@ const SendPackagePage = () => {
               >
                 <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${smsConsent ? 'translate-x-6' : 'translate-x-1'}`} />
               </button>
-            </div>
+            </div> */}
 
             {/* Wave-grouped recipients */}
             <div className="space-y-4">

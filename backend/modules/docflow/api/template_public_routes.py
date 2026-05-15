@@ -95,6 +95,7 @@ def _map_field_placement(field: dict) -> dict:
         "id": field.get("id", ""),
         "name": field.get("label") or field.get("name") or "",
         "type": public_type,
+        "required": bool(field.get("required", False)),
     }
     if field.get("assigned_to"):
         result["assigned_to"] = field["assigned_to"]

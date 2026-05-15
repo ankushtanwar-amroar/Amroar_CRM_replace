@@ -995,22 +995,42 @@ const PackagePublicLinkView = () => {
                   </p>
                 </div>
               </div>
-              {/* Phase 81.16 — header "Finish" button mirrors the email-package
-                  signing UI. Same submit handler, same disabled rule, same
-                  required-field gating as the bottom button. */}
-              <button
-                onClick={handleSubmit}
-                disabled={submitting || (hasAnyFields && !allRequiredFieldsComplete)}
-                className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shrink-0 self-start ${
-                  !submitting && (!hasAnyFields || allRequiredFieldsComplete)
-                    ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
-                    : 'bg-gray-100 text-gray-400 cursor-not-allowed'
-                }`}
-                data-testid="public-link-finish-btn-header"
-                title={(!hasAnyFields || allRequiredFieldsComplete) ? 'Submit your signed package' : 'Complete all required fields to enable Finish'}
-              >
-                {submitting ? <><Loader2 className="h-4 w-4 animate-spin" /> Submitting...</> : <><FileText className="h-4 w-4" /> Finish</>}
-              </button>
+              {/* Sender chip + Finish button */}
+              <div className="flex items-center gap-2 flex-wrap order-1 sm:order-2 self-start">
+                {pkg?.sender && (pkg.sender.name || pkg.sender.email) && (
+                  <div
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 bg-slate-50 border border-slate-200 rounded-full text-[11px] sm:text-xs text-slate-700 max-w-full sm:max-w-[280px] shrink-0"
+                    data-testid="package-sender-chip"
+                    title={`From: ${pkg.sender.name}${pkg.sender.email ? ` <${pkg.sender.email}>` : ''}`}
+                  >
+                    <span className="font-medium text-slate-500 uppercase tracking-wide shrink-0">From</span>
+                    <span className="truncate font-semibold text-slate-800 min-w-0" data-testid="sender-name">
+                      {pkg.sender.name || pkg.sender.email}
+                    </span>
+                    {pkg.sender.email && pkg.sender.name && (
+                      <span className="truncate text-slate-500 hidden sm:inline min-w-0" data-testid="sender-email">
+                        ({pkg.sender.email})
+                      </span>
+                    )}
+                  </div>
+                )}
+                {/* Phase 81.16 — header "Finish" button mirrors the email-package
+                    signing UI. Same submit handler, same disabled rule, same
+                    required-field gating as the bottom button. */}
+                <button
+                  onClick={handleSubmit}
+                  disabled={submitting || (hasAnyFields && !allRequiredFieldsComplete)}
+                  className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shrink-0 ${
+                    !submitting && (!hasAnyFields || allRequiredFieldsComplete)
+                      ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                      : 'bg-gray-100 text-gray-400 cursor-not-allowed'
+                  }`}
+                  data-testid="public-link-finish-btn-header"
+                  title={(!hasAnyFields || allRequiredFieldsComplete) ? 'Submit your signed package' : 'Complete all required fields to enable Finish'}
+                >
+                  {submitting ? <><Loader2 className="h-4 w-4 animate-spin" /> Submitting...</> : <><FileText className="h-4 w-4" /> Finish</>}
+                </button>
+              </div>
             </div>
             <div className="mt-3 p-3 bg-gray-50 rounded-lg flex items-center justify-between">
               <div>
