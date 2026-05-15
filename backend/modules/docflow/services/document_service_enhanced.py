@@ -183,7 +183,7 @@ class EnhancedDocumentService:
             if not name and not is_public_link_only:
                 raise ValueError("Recipient name is required")
 
-            if "email" in delivery_channels and is_required and not email:
+            if "email" in delivery_channels and is_required and not email and delivery_mode != "public_recipients":
                 raise ValueError(f"Recipient email is required for recipient '{name}'")
 
             recipient_instances.append({
@@ -218,39 +218,36 @@ class EnhancedDocumentService:
             })
 
         # Phase 81.29 — Inject reminder configuration onto each recipient.
-        # The scheduler scans BOTH `docflow_package_runs` AND `docflow_documents`
-        # for due reminders, so the template/document flow needs the same
-        # `reminder_config` + `reminder_state` shape package recipients have.
-        # Note: recipient_instances was built 1:1 from recipient_inputs (no
-        # filtering), so we pair them directly to avoid index mismatches.
-        try:
-            from .reminder_service import normalize_reminder_config, initial_reminder_state
-            for inst, inp in zip(recipient_instances, recipient_inputs):
-                rcfg_raw = inp.get("reminder_config")
-                if not rcfg_raw and inp.get("reminder_enabled"):
-                    rcfg_raw = {
-                        "reminder_enabled": True,
-                        "reminder_frequency": inp.get("reminder_frequency"),
-                        "reminder_custom_value": inp.get("reminder_custom_value"),
-                        "reminder_custom_unit": inp.get("reminder_custom_unit"),
-                        "max_reminders": inp.get("max_reminders"),
-                    }
-                rcfg = None
-                rstate = None
-                if rcfg_raw:
-                    try:
-                        rcfg = normalize_reminder_config(rcfg_raw)
-                        if rcfg:
-                            rstate = initial_reminder_state(rcfg)
-                    except Exception as inner_e:
-                        logger.warning(f"[generate_document] Failed to normalize reminder config: {inner_e}")
-                        rcfg = None
-                        rstate = None
-                inst["reminder_config"] = rcfg
-                inst["reminder_state"] = rstate
-        except Exception as _e:
-            # Non-fatal: reminders are an enhancement, do not block the send.
-            logger.warning(f"[generate_document] Reminder config processing failed: {_e}")
+        # public_recipients mode is fully API/link-driven — reminders must never fire.
+        if delivery_mode != "public_recipients":
+            try:
+                from .reminder_service import normalize_reminder_config, initial_reminder_state
+                for inst, inp in zip(recipient_instances, recipient_inputs):
+                    rcfg_raw = inp.get("reminder_config")
+                    if not rcfg_raw and inp.get("reminder_enabled"):
+                        rcfg_raw = {
+                            "reminder_enabled": True,
+                            "reminder_frequency": inp.get("reminder_frequency"),
+                            "reminder_custom_value": inp.get("reminder_custom_value"),
+                            "reminder_custom_unit": inp.get("reminder_custom_unit"),
+                            "max_reminders": inp.get("max_reminders"),
+                        }
+                    rcfg = None
+                    rstate = None
+                    if rcfg_raw:
+                        try:
+                            rcfg = normalize_reminder_config(rcfg_raw)
+                            if rcfg:
+                                rstate = initial_reminder_state(rcfg)
+                        except Exception as inner_e:
+                            logger.warning(f"[generate_document] Failed to normalize reminder config: {inner_e}")
+                            rcfg = None
+                            rstate = None
+                    inst["reminder_config"] = rcfg
+                    inst["reminder_state"] = rstate
+            except Exception as _e:
+                # Non-fatal: reminders are an enhancement, do not block the send.
+                logger.warning(f"[generate_document] Reminder config processing failed: {_e}")
 
         # Prevent overlapping field assignments
         assigned_field_registry = {}
@@ -1055,12 +1052,8 @@ class EnhancedDocumentService:
                 if parent_pkg and parent_pkg.get("delivery_mode") == "public_recipients":
                     is_public_recipients = True
 
-            if is_public_recipients:
-                new_status = "signed"
-                completed_at = signed_at_iso
-            else:
-                new_status = "completed" if all_required_done else "partially_signed"
-                completed_at = signed_at_iso if all_required_done else None
+            new_status = "completed" if all_required_done else "partially_signed"
+            completed_at = signed_at_iso if all_required_done else None
 
             # Phase 81.7 — Merge field "convert to text fallback" persistence.
             # When the sender configured a merge field with `fallbackToInput=true`
@@ -1175,22 +1168,23 @@ class EnhancedDocumentService:
                         },
                     }
                 )
-                # Send completion email to ALL recipients
-                try:
-                    all_recipients = document.get("recipients", [])
-                    doc_name = document.get("template_name", "Document")
-                    frontend_url = os.environ.get("FRONTEND_URL", "")
-                    for r in all_recipients:
-                        if r.get("email"):
-                            view_url = f"{frontend_url}/docflow/view/{r.get('public_token')}" if r.get("public_token") else ""
-                            await self.email_service.send_workflow_notification_email(
-                                to_email=r["email"], to_name=r.get("name", ""),
-                                document_name=doc_name, notification_type="completed",
-                                extra={"view_url": view_url},
-                            )
-                    logger.info(f"Sent completion emails to all recipients for document {document_id}")
-                except Exception as ce:
-                    logger.warning(f"Failed to send completion emails: {ce}")
+                # Send completion email to ALL recipients (skip for public_recipients — fully API/link-driven)
+                if not is_public_recipients:
+                    try:
+                        all_recipients = document.get("recipients", [])
+                        doc_name = document.get("template_name", "Document")
+                        frontend_url = os.environ.get("FRONTEND_URL", "")
+                        for r in all_recipients:
+                            if r.get("email"):
+                                view_url = f"{frontend_url}/docflow/view/{r.get('public_token')}" if r.get("public_token") else ""
+                                await self.email_service.send_workflow_notification_email(
+                                    to_email=r["email"], to_name=r.get("name", ""),
+                                    document_name=doc_name, notification_type="completed",
+                                    extra={"view_url": view_url},
+                                )
+                        logger.info(f"Sent completion emails to all recipients for document {document_id}")
+                    except Exception as ce:
+                        logger.warning(f"Failed to send completion emails: {ce}")
 
             # For public_recipients mode, sync the signing status back to the
             # package/run level so the admin UI reflects the correct state.
@@ -1203,7 +1197,7 @@ class EnhancedDocumentService:
                     logger.warning(f"Failed to sync public_recipients status to package: {e}")
 
             # Sequential: activate and notify the next recipient after this signer completes.
-            if routing_mode == "sequential" and not all_required_done and not is_public_recipients:
+            if routing_mode == "sequential" and not all_required_done:
                 # Recompute active "next" recipient in order.
                 recipients_after = (await self.collection.find_one({"id": document_id, "tenant_id": tenant_id})).get("recipients", [])
                 required_after_sorted = sorted(
@@ -1233,8 +1227,8 @@ class EnhancedDocumentService:
                         extra_data={"recipient_email": next_recipient.get("email"), "recipient_name": next_recipient.get("name")}
                     )
 
-                    # Send email for next recipient if requested
-                    if "email" in (document.get("delivery_channels") or []) and next_recipient.get("email"):
+                    # Send email for next recipient if requested (not for public_recipients mode)
+                    if "email" in (document.get("delivery_channels") or []) and next_recipient.get("email") and not is_public_recipients:
                         recipient_url = f"{os.environ.get('FRONTEND_URL', '')}/docflow/view/{next_recipient.get('public_token')}"
 
                         # Resolve custom email template for next recipient
