@@ -1246,12 +1246,14 @@ const PackagePublicView = () => {
   if (recipientCompleted) {
     const isRejected = action === 'rejected';
 
-    // For public_recipients mode: determine if all recipients have completed.
-    // completedAllDone comes from the sign-with-fields response (fresh sign).
-    // allSigningComplete comes from the package fetch (page reload case).
-    const packageFullyComplete = isPublicRecipientsMode
-      ? (completedAllDone !== null ? completedAllDone : allSigningComplete)
-      : true;
+    // For ALL modes: only show the final "Signing Complete" + download
+    // screen when the package itself is fully complete. Until then we
+    // keep the signer on the "waiting for remaining recipients" view.
+    //   • completedAllDone — fresh hint from the sign-with-fields response
+    //   • allSigningComplete — package-level flag returned on reload
+    const packageFullyComplete = (completedAllDone !== null)
+      ? completedAllDone
+      : allSigningComplete;
 
     // Show "waiting for others" screen when this signer is done but the package isn't
     if (isSigner && !isRejected && !packageFullyComplete) {

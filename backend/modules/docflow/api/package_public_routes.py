@@ -1652,7 +1652,7 @@ async def sign_with_fields(
     # Check if this is public_recipients mode — independent signing, no routing
     delivery_mode = package.get("delivery_mode", "email")
     actor = signer_email or signer_name or "anonymous"
-    all_done = True  # default: routing engine handles progression for non-public_recipients
+    all_done = False  # computed below for ALL modes
 
     if delivery_mode == "public_recipients":
         # ── Independent signing: skip routing engine wave logic ──
@@ -1678,23 +1678,26 @@ async def sign_with_fields(
             }}
         )
 
-        # 2. Mark all documents as "signed" (not partially_signed)
-        for pkg_doc in package.get("documents", []):
-            did = pkg_doc.get("document_id")
-            if did:
-                await db.docflow_documents.update_one(
-                    {"id": did},
-                    {"$set": {"status": "signed", "updated_at": now_iso}}
-                )
-
-        # 3. Check if ALL recipients have completed → mark package as completed
+        # 2. Compute completion AFTER updating this recipient.
         updated_pkg = await db.docflow_packages.find_one({"id": package["id"]}, {"_id": 0})
         all_done = all(
             r.get("status") in ("completed", "signed")
             for r in (updated_pkg or {}).get("recipients", [])
             if r.get("role_type") != "RECEIVE_COPY"
         )
+
+        # 3. Only mark documents as fully `signed` and the package
+        # as `completed` when EVERY signing recipient has finished.
+        # Until then, leave per-document status as `partially_signed`
+        # so dashboards and downloads correctly reflect "in progress".
         if all_done:
+            for pkg_doc in package.get("documents", []):
+                did = pkg_doc.get("document_id")
+                if did:
+                    await db.docflow_documents.update_one(
+                        {"id": did},
+                        {"$set": {"status": "signed", "updated_at": now_iso}}
+                    )
             await db.docflow_packages.update_one(
                 {"id": package["id"]},
                 {"$set": {"status": "completed", "completed_at": now_iso, "updated_at": now_iso}}
@@ -1703,6 +1706,17 @@ async def sign_with_fields(
                 {"id": package["id"]},
                 {"$set": {"status": "completed", "completed_at": now_iso, "updated_at": now_iso}}
             )
+        else:
+            # Reflect that the package is still mid-signing on every doc
+            # that hasn't been finalised yet. Don't override a doc that's
+            # already `signed` from a prior fully-complete run.
+            for pkg_doc in package.get("documents", []):
+                did = pkg_doc.get("document_id")
+                if did:
+                    await db.docflow_documents.update_one(
+                        {"id": did, "status": {"$nin": ["signed", "voided"]}},
+                        {"$set": {"status": "partially_signed", "updated_at": now_iso}}
+                    )
 
         # 4. Log audit event
         await audit_service.log_event(
@@ -1757,40 +1771,87 @@ async def sign_with_fields(
             },
         )
 
+        # Compute completion for email / public_link mode AFTER the
+        # routing engine has updated this recipient + (possibly)
+        # advanced the wave. Frontend uses this flag to choose between
+        # "waiting for others" and "package fully complete" screens —
+        # previously this defaulted to True, which incorrectly showed
+        # the final completion UI after the first recipient signed.
+        try:
+            refreshed = await db.docflow_packages.find_one({"id": package["id"]}, {"_id": 0})
+            if refreshed:
+                if refreshed.get("status") == "completed":
+                    all_done = True
+                else:
+                    all_done = all(
+                        r.get("status") in ("completed", "signed")
+                        for r in refreshed.get("recipients", [])
+                        if r.get("role_type") != "RECEIVE_COPY"
+                    )
+        except Exception as _e:
+            logger.warning(f"sign-with-fields: failed to compute all_done for pkg {package['id']}: {_e}")
+            all_done = False
+
     if not success:
         raise HTTPException(status_code=400, detail="Failed to update recipient status")
 
-    # Send signed document confirmation email to signer (skipped for public_recipients — no email workflow)
-    if delivery_mode != "public_recipients" and signer_email and signed_doc_urls:
+    # Send post-sign email to the signer. Until ALL recipients have
+    # completed, this is a "your part is done" acknowledgement and
+    # does NOT include signed-document download links. Final
+    # "Signing Complete" emails with download links are sent by the
+    # routing engine's `_complete_package` flow once everyone signs.
+    if delivery_mode != "public_recipients" and signer_email:
         try:
             from ..services.system_email_service import SystemEmailService
             email_svc = SystemEmailService()
-            doc_links_html = "".join(
-                f'<li><a href="{d["signed_document_url"]}">{d["template_name"] or "Document"}</a></li>'
-                for d in signed_doc_urls
-            )
-            await email_svc.send_generic_email(
-                to_email=signer_email,
-                subject=f"Signing Complete — {package.get('name', 'Package')}",
-                html_content=f"""
-                <p>Hi {signer_name or 'there'},</p>
-                <p>You have successfully signed the following documents in <strong>{package.get('name', 'Package')}</strong>:</p>
-                <ul>{doc_links_html}</ul>
-                <p>You can download the signed copies from the links above.</p>
-                <p>Thank you,<br/>DocFlow</p>
-                """,
-            )
+            if all_done and signed_doc_urls:
+                doc_links_html = "".join(
+                    f'<li><a href="{d["signed_document_url"]}">{d["template_name"] or "Document"}</a></li>'
+                    for d in signed_doc_urls
+                )
+                await email_svc.send_generic_email(
+                    to_email=signer_email,
+                    subject=f"Signing Complete — {package.get('name', 'Package')}",
+                    html_content=f"""
+                    <p>Hi {signer_name or 'there'},</p>
+                    <p>You have successfully signed the following documents in <strong>{package.get('name', 'Package')}</strong>:</p>
+                    <ul>{doc_links_html}</ul>
+                    <p>You can download the signed copies from the links above.</p>
+                    <p>Thank you,<br/>DocFlow</p>
+                    """,
+                )
+            else:
+                await email_svc.send_generic_email(
+                    to_email=signer_email,
+                    subject=f"Thank you for signing — {package.get('name', 'Package')}",
+                    html_content=f"""
+                    <p>Hi {signer_name or 'there'},</p>
+                    <p>Your signature has been recorded for <strong>{package.get('name', 'Package')}</strong>.</p>
+                    <p>We're now waiting for the remaining recipients to complete their signing.
+                    You'll receive a final email with the fully-signed documents once everyone has signed.</p>
+                    <p>Thank you,<br/>DocFlow</p>
+                    """,
+                )
         except Exception as e:
-            logger.warning(f"Failed to send signed doc email to {signer_email}: {e}")
+            logger.warning(f"Failed to send post-sign email to {signer_email}: {e}")
 
     return {
         "success": True,
-        "message": f"Package signed successfully ({signed_doc_count} documents)",
+        "message": (
+            f"Package signed successfully ({signed_doc_count} documents)" if all_done
+            else f"Your signing has been recorded ({signed_doc_count} documents). Waiting for remaining recipients."
+        ),
         "recipient_id": recipient_id,
         "action": "signed",
-        "status": "signed" if delivery_mode == "public_recipients" else "processing",
+        # Until ALL recipients sign, the package is still in progress —
+        # the frontend keys off this to show "waiting for others"
+        # instead of the final "Signing Complete" + downloads screen.
+        "status": "completed" if all_done else "in_progress",
         "documents_signed": signed_doc_count,
-        "signed_documents": signed_doc_urls,
+        # Only expose signed-document URLs once the package is fully
+        # complete. Per-recipient interim URLs would leak partial
+        # progress to other signers via the response payload.
+        "signed_documents": signed_doc_urls if all_done else [],
         "all_recipients_completed": all_done,
     }
 @router.post("/{token}/mark-reviewed")
