@@ -873,13 +873,27 @@ async def send_package(
     # Build recipient links for email mode
     recipient_links = []
     for r in run.get("recipients", []):
-        if r.get("role_type") == "RECEIVE_COPY":
+        role_type = r.get("role_type", "SIGN")
+        token_val = r.get("public_token")
+        link = f"{frontend_url}/docflow/package/{run['id']}/view/{token_val}" if token_val else None
+
+        if role_type == "RECEIVE_COPY":
+            # Receive-copy recipients get a read-only viewer link (no signing access)
+            recipient_links.append({
+                "name": r.get("name"),
+                "email": r.get("email"),
+                "role": "receive_copy",
+                "recipient_id": r.get("id"),
+                "viewer_link": link,
+                "access_link": link,
+                "status": "waiting_for_completion",
+            })
             continue
-        link = f"{frontend_url}/docflow/package/{run['id']}/view/{r['public_token']}" if r.get("public_token") else None
+
         entry = {
             "name": r.get("name"),
             "email": r.get("email"),
-            "role": r.get("role_type"),
+            "role": role_type,
             "routing_order": r.get("routing_order"),
             "status": r.get("status", "pending"),
             "access_link": link,

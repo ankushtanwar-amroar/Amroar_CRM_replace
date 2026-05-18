@@ -26,6 +26,7 @@ const ROLE_META = {
   VIEW_ONLY: { label: 'Reviewer', icon: Eye, color: 'bg-blue-100 text-blue-700' },
   REVIEWER: { label: 'Reviewer', icon: Eye, color: 'bg-blue-100 text-blue-700' },
   APPROVE_REJECT: { label: 'Approver', icon: ShieldCheck, color: 'bg-amber-100 text-amber-700' },
+  RECEIVE_COPY: { label: 'Receive Copy', icon: Download, color: 'bg-emerald-100 text-emerald-700' },
 };
 
 const SESSION_KEY_PREFIX = 'docflow_session_';
@@ -1219,12 +1220,112 @@ const PackagePublicView = () => {
   const isViewOnly = roleType === 'VIEW_ONLY' || roleType === 'REVIEWER';
   const isApprover = roleType === 'APPROVE_REJECT';
   const isSigner = roleType === 'SIGN';
+  const isReceiveCopy = roleType === 'RECEIVE_COPY';
   const recipientCompleted = completed || active_recipient?.status === 'completed';
   const action = completedAction || active_recipient?.action_taken;
   const canVoidPublic = pkg.package_status === 'in_progress';
   const allSigningComplete = pkg.all_signing_complete || false;
   const deliveryMode = pkg.delivery_mode || 'email';
   const isPublicRecipientsMode = deliveryMode === 'public_recipients';
+  const packageIsCompleted = pkg.package_status === 'completed';
+
+  // ── Receive Copy: waiting screen (package not yet complete) ──
+  if (isReceiveCopy && !packageIsCompleted) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4" data-testid="receive-copy-waiting">
+        <div className="bg-white rounded-2xl shadow-lg max-w-md w-full p-8 text-center space-y-4">
+          <div className="w-16 h-16 rounded-full bg-amber-100 flex items-center justify-center mx-auto">
+            <Clock className="h-8 w-8 text-amber-600" />
+          </div>
+          <h2 className="text-xl font-bold text-gray-900">Waiting for Completion</h2>
+          <p className="text-gray-600">
+            &ldquo;{package_name}&rdquo; is waiting for all recipients to complete signing.
+          </p>
+          <p className="text-sm text-gray-400">
+            You will receive an email notification with your copy once all parties have signed.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Receive Copy: completed viewer ──
+  if (isReceiveCopy && packageIsCompleted) {
+    return (
+      <div className="min-h-screen bg-gray-50" data-testid="receive-copy-viewer">
+        {/* Top bar */}
+        <div className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between sticky top-0 z-10 shadow-sm">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center shrink-0">
+              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-gray-900 truncate">{package_name}</p>
+              <p className="text-xs text-emerald-600 font-medium">Package Completed</p>
+            </div>
+          </div>
+          <span className="text-xs text-gray-400 shrink-0 ml-3">Receive Copy</span>
+        </div>
+
+        <div className="max-w-4xl mx-auto px-4 py-6 space-y-6">
+          {/* Status banner */}
+          <div className="bg-emerald-50 border border-emerald-200 rounded-xl px-5 py-4 flex items-start gap-3">
+            <CheckCircle2 className="h-5 w-5 text-emerald-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-semibold text-emerald-800">All recipients have completed signing</p>
+              <p className="text-xs text-emerald-600 mt-0.5">
+                You are receiving a copy of this package. No action is required from you.
+              </p>
+            </div>
+          </div>
+
+          {/* Document list with previews */}
+          {documents.map((doc, i) => {
+            const signedUrl = doc.signed_file_url
+              ? doc.signed_file_url
+              : `${API_URL}/api/docflow/documents/${doc.document_id}/view/signed`;
+            const downloadUrl = `${API_URL}/api/docflow/documents/${doc.document_id}/view/signed`;
+            return (
+              <div key={doc.document_id || i} className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+                {/* Document header */}
+                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <FileText className="h-4 w-4 text-gray-400 shrink-0" />
+                    <span className="text-sm font-medium text-gray-800 truncate">
+                      {doc.document_name || `Document ${i + 1}`}
+                    </span>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 text-xs font-medium shrink-0">
+                      <CheckCircle2 className="h-3 w-3" /> Signed
+                    </span>
+                  </div>
+                  <a
+                    href={downloadUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-xs font-medium hover:bg-indigo-100 transition-colors shrink-0 ml-3"
+                    data-testid={`receive-copy-download-${doc.document_id}`}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Download
+                  </a>
+                </div>
+
+                {/* PDF preview iframe */}
+                <div className="bg-gray-100" style={{ height: '70vh', minHeight: '500px' }}>
+                  <iframe
+                    src={signedUrl}
+                    className="w-full h-full border-0"
+                    title={doc.document_name || `Document ${i + 1}`}
+                    data-testid={`receive-copy-preview-${doc.document_id}`}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
 
   // ── Voided state ──
   if (voided) {
