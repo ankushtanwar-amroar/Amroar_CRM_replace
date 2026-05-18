@@ -184,25 +184,32 @@ def _build_public_field(fp: dict, *, include_extras: bool = False) -> dict:
 
 async def _auto_assign_package_recipients(
     recipients: List[Dict[str, Any]],
-    template_ids: List[str],
+    documents: List[Dict[str, Any]],
     tenant_id: str,
 ) -> None:
     """Auto-assign unclaimed signable fields to public API package recipients.
 
     Mirrors the internal DocFlow package send behavior so public API runs
-    have identical recipient/field ownership rules.
+    have identical recipient/field ownership rules. Respects package-level
+    field overrides from the Virtual Builder if present.
     """
     NON_ASSIGNABLE_TYPES = {"merge", "label"}
 
-    for template_id in template_ids:
+    for doc in documents:
+        template_id = doc.get("template_id")
         if not template_id:
             continue
 
-        template = await db.docflow_templates.find_one(
-            {"id": template_id, "tenant_id": tenant_id},
-            {"_id": 0, "field_placements": 1},
-        )
-        field_placements = (template or {}).get("field_placements") or []
+        # Prioritize package-level field overrides from the Virtual Builder
+        field_placements = doc.get("field_placements")
+        if field_placements is None:
+            # Fallback to template defaults
+            template = await db.docflow_templates.find_one(
+                {"id": template_id, "tenant_id": tenant_id},
+                {"_id": 0, "field_placements": 1},
+            )
+            field_placements = (template or {}).get("field_placements") or []
+
         assignable_ids = [
             fp.get("id") for fp in field_placements
             if fp.get("id") and (fp.get("type") or "").lower() not in NON_ASSIGNABLE_TYPES
@@ -417,9 +424,18 @@ async def list_packages(
                     sort=[("version", -1)],
                 )
 
+            # Prioritize package-level field overrides from the Virtual Builder
+            # so the Public API returns the effective package layout.
+            package_fields = doc.get("field_placements")
+            raw_fields = []
+            if package_fields is not None:
+                raw_fields = package_fields
+            elif template:
+                raw_fields = template.get("field_placements", [])
+
             fields = []
-            if template:
-                grouped = _group_radio_placements(template.get("field_placements", []))
+            if raw_fields:
+                grouped = _group_radio_placements(raw_fields)
                 for fp in grouped:
                     fields.append(_build_public_field(fp))
 
@@ -786,8 +802,11 @@ async def send_package(
         })
 
     if pkg_recipients:
-        template_ids = [d.get("template_id") for d in package.get("documents", []) if d.get("template_id")]
-        await _auto_assign_package_recipients(pkg_recipients, template_ids, tenant_id)
+        await _auto_assign_package_recipients(
+            pkg_recipients,
+            package.get("documents", []),
+            tenant_id
+        )
 
     routing_config = {
         "mode": req.routing_mode if req.routing_mode != "mixed" else "sequential",
@@ -935,9 +954,17 @@ async def get_package(
                 sort=[("version", -1)],
             )
 
+        # Prioritize package-level field overrides from the Virtual Builder.
+        package_fields = doc.get("field_placements")
+        raw_fields = []
+        if package_fields is not None:
+            raw_fields = package_fields
+        elif template:
+            raw_fields = template.get("field_placements", [])
+
         fields = []
-        if template:
-            grouped = _group_radio_placements(template.get("field_placements", []))
+        if raw_fields:
+            grouped = _group_radio_placements(raw_fields)
             for fp in grouped:
                 fields.append(_build_public_field(fp, include_extras=True))
 
@@ -1109,8 +1136,11 @@ async def create_package(
         })
 
     if pkg_recipients:
-        template_ids = [vt["template_id"] for vt in validated_templates if vt.get("template_id")]
-        await _auto_assign_package_recipients(pkg_recipients, template_ids, tenant_id)
+        await _auto_assign_package_recipients(
+            pkg_recipients,
+            pkg_documents,
+            tenant_id
+        )
 
     # Routing config
     routing_config = {

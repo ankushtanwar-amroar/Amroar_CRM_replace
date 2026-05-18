@@ -26,7 +26,7 @@ const GRID_SIZE = 10;
 
 const snapToGrid = (value) => Math.round(value / GRID_SIZE) * GRID_SIZE;
 
-const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, crmConnection, templateRecipients = [], contentBlocks = [], onContentBlocksChange, onTextSelect, highlightBlockId = null, onConvertToEditable, currentTemplateId = null, serverFieldsVersion = 0, packageDocuments = null }) => {
+const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, crmConnection, templateRecipients = [], contentBlocks = [], onContentBlocksChange, onTextSelect, highlightBlockId = null, onConvertToEditable, currentTemplateId = null, serverFieldsVersion = 0, packageDocuments = null, packageId = null }) => {
   // Color palette for recipient assignment badges
   const RECIPIENT_COLORS = useMemo(() => [
     { bg: 'bg-blue-100', border: 'border-blue-400', text: 'text-blue-700', dot: 'bg-blue-500' },
@@ -128,8 +128,18 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   const loadInterlinkTargetFields = useCallback(async (tplId) => {
     if (!tplId || interlinkTargetFields[tplId]) return;
     try {
-      const tpl = await docflowService.getTemplate(tplId);
-      const allFields = tpl?.field_placements || [];
+      let allFields;
+      if (packageId) {
+        // Package Virtual Builder: read package-level override fields, NOT the
+        // original template DB fields. This ensures newly added/removed package
+        // fields appear in the interlink dropdown immediately after a save.
+        const res = await docflowService.getPackageBuilderFields(packageId, tplId);
+        const data = res?.data || res;
+        allFields = data?.field_placements || [];
+      } else {
+        const tpl = await docflowService.getTemplate(tplId);
+        allFields = tpl?.field_placements || [];
+      }
       // Phase 2 — Interlinked Fields supports: text, date, checkbox, radio.
       const supportedTypes = ['text', 'date', 'checkbox', 'radio'];
       const filtered = allFields
@@ -165,7 +175,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     } catch (e) {
       console.error('Failed to load target fields', e);
     }
-  }, [interlinkTargetFields]);
+  }, [interlinkTargetFields, packageId]);
 
   // Phase 81.54 — Load incoming interlinks for a given local field id. Returns
   // every other template whose field_placements declare a linked_to pointing

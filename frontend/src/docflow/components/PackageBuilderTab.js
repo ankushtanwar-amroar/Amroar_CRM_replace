@@ -261,6 +261,7 @@ const PackageBuilderTab = ({ packageId, documents = [], isVoided = false }) => {
                 currentTemplateId={selectedTemplateId}
                 serverFieldsVersion={0}
                 packageDocuments={documents}
+                packageId={packageId}
               />
             </div>
           ) : null}

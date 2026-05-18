@@ -53,9 +53,9 @@ class WebhookService:
         if not webhook_url:
             return {"success": False, "error": "No webhook URL configured"}
 
-        # Check if event type is enabled
+        # Check if event type is enabled (empty list = all events enabled)
         enabled_events = webhook_config.get("events", [])
-        if event_type not in enabled_events:
+        if enabled_events and event_type not in enabled_events:
             return {"success": False, "error": f"Event '{event_type}' not enabled"}
 
         # Build webhook payload
@@ -468,8 +468,8 @@ class WebhookService:
             _EVENT_MAP = {
                 "document_signed": "signed",
                 "signed": "signed",
-                "package_completed": "signed_copy",
-                "completed": "signed_copy",
+                "package_completed": "completed",
+                "completed": "completed",
                 "document_opened": "opened",
                 "opened": "opened",
                 "recipient_notified": "sent",
@@ -615,6 +615,21 @@ class WebhookService:
                     )
                 except Exception as fd_err:
                     logger.warning(f"Package signed_copy field_data enrichment failed: {fd_err}")
+
+            elif mapped_event == "completed":
+                payload["status"] = "completed"
+                payload["completed_at"] = extra.get("completed_at", now_iso)
+                signed_docs = extra.get("signed_documents")
+                if not signed_docs:
+                    signed_docs = await self._get_signed_documents(package)
+                payload["signed_documents"] = signed_docs or []
+                payload["combined_signed_document_url"] = extra.get("combined_signed_document_url", "")
+                try:
+                    payload["field_data"] = await self._build_package_field_data(
+                        package, primary_document_id=first_doc_id, tenant_id=tenant_id,
+                    )
+                except Exception as fd_err:
+                    logger.warning(f"Package completed field_data enrichment failed: {fd_err}")
 
             # ── Log to activity ──
             await self.db.docflow_activity_logs.insert_one({

@@ -1432,7 +1432,9 @@ class EnhancedDocumentService:
 
             if result.matched_count > 0:
                 await self.add_audit_event(document_id, "signed", signature_data.get("signer_email"))
-                await self.webhook_service.fire_document_event(document_id, "signed", document.get("tenant_id"))
+                tenant_id = document.get("tenant_id")
+                await self.webhook_service.fire_document_event(document_id, "signed", tenant_id)
+                await self.webhook_service.fire_document_event(document_id, "completed", tenant_id)
                 return True
 
             return False

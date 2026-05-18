@@ -46,6 +46,7 @@ const WEBHOOK_EVENTS = [
   { id: 'sent', label: 'Sent', description: 'When document is sent to recipient' },
   { id: 'approve_reject', label: 'Approve / Reject', description: 'When approver approves or rejects the package' },
   { id: 'signed_copy', label: 'Signed Copy', description: 'When signed copy is generated' },
+  { id: 'completed', label: 'Completed', description: 'When all recipients complete signing the package' },
 ];
 
 const SortableDocRow = ({ doc, idx, onRemove, canEdit }) => {
@@ -123,7 +124,8 @@ const PackageDetailPage = () => {
       setDocsList((pkgData.documents || []).map(d => ({ ...d })));
       const wc = pkgData?.webhook_config || {};
       setWebhookUrl(wc.url || '');
-      setWebhookEvents(wc.events || []);
+      const savedEvents = wc.events || ['signed', 'opened'];
+      setWebhookEvents(savedEvents.includes('completed') ? savedEvents : [...savedEvents, 'completed']);
       setWebhookSecret(wc.secret || '');
     } catch (e) {
       setLoadError(e?.message || 'Failed to load package');
@@ -272,6 +274,32 @@ const PackageDetailPage = () => {
         'object_type': 'Contact'
       },
       generated_at: new Date().toISOString()
+    },
+    completed: {
+      event: 'completed',
+      timestamp: new Date().toISOString(),
+      package_id: pkg?.id || 'pkg_abc123',
+      package_name: pkg?.name || 'Package',
+      tenant_id: 'tenant_abc123',
+      status: 'completed',
+      completed_at: new Date().toISOString(),
+      signed_documents: [
+        {
+          document_id: 'doc_abc123',
+          template_name: 'NDA Agreement',
+          signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+          signed_at: new Date().toISOString()
+        }
+      ],
+      combined_signed_document_url: 'https://storage.example.com/combined/pkg_abc123.pdf',
+      field_data: {
+        'text_field_001': 'John Doe',
+        'date_field_002': '2026-03-30',
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO',
+        'record_id': 'sf_contact_123',
+        'object_type': 'Contact'
+      }
     }
   };
 

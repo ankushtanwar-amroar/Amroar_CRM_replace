@@ -139,9 +139,13 @@ def build_request_metadata(request: Request) -> Dict[str, Any]:
         "ip_address": "1.2.3.4",
         "user_agent": "Mozilla/5.0 ...",
         "browser":    {"name": "Chrome", "version": "148.0.0.0"},
-        "os":         {"name": "Windows", "version": "10"},
+        "os":         {"name": "Windows", "version": "11"},
         "device":     {"type": "desktop"},
       }
+
+    Windows 10 vs 11: both report "Windows NT 10.0" in the UA string.
+    When available, Sec-CH-UA-Platform-Version (Chrome/Edge 90+) is used
+    to distinguish them — major version >= 13 maps to Windows 11.
     """
     ua_string = (request.headers.get("user-agent", "") if request else "") or ""
     meta: Dict[str, Any] = {
@@ -150,4 +154,19 @@ def build_request_metadata(request: Request) -> Dict[str, Any]:
     }
     if ua_string:
         meta.update(parse_user_agent(ua_string))
+
+    # Refine Windows 10 vs 11 via UA Client Hints (Chromium/Edge 90+).
+    # Both OSes report "Windows NT 10.0" in the UA string; only the
+    # platform-version hint distinguishes them (major >= 13 → Windows 11).
+    if request and meta.get("os", {}).get("name") == "Windows":
+        platform_version = (
+            request.headers.get("sec-ch-ua-platform-version", "").strip().strip('"')
+        )
+        if platform_version:
+            try:
+                major = int(platform_version.split(".")[0])
+                meta["os"]["version"] = "11" if major >= 13 else "10"
+            except (ValueError, IndexError):
+                pass
+
     return meta

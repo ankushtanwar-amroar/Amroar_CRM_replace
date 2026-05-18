@@ -1753,6 +1753,18 @@ async def sign_with_fields(
             except Exception as e:
                 logger.warning(f"Webhook failed: {e}")
 
+            # Fire completed webhook when every recipient has finished
+            if all_done:
+                try:
+                    await webhook_service.fire_package_event(
+                        package_id=package["id"],
+                        event_type="package_completed",
+                        tenant_id=package.get("tenant_id", ""),
+                        extra_data={"completed_at": now_iso},
+                    )
+                except Exception as e:
+                    logger.warning(f"Completed webhook failed: {e}")
+
         success = True
     else:
         # ── Standard routing engine flow for email/public_link/both ──

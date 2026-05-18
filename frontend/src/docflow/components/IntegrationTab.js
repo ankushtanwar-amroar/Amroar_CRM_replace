@@ -10,7 +10,8 @@ const WEBHOOK_EVENTS = [
   { id: 'approve', label: 'Approved', description: 'When approver approves the document' },
   { id: 'reject', label: 'Rejected', description: 'When approver rejects the document' },
   { id: 'review', label: 'Reviewed', description: 'When reviewer completes review' },
-  { id: 'signed_copy', label: 'Signed Copy', description: 'When signed copy is generated' }
+  { id: 'signed_copy', label: 'Signed Copy', description: 'When signed copy is generated' },
+  { id: 'completed', label: 'Completed', description: 'When document is fully completed by all recipients' }
 ];
 
 const SAMPLE_PAYLOADS = {
@@ -162,12 +163,46 @@ const SAMPLE_PAYLOADS = {
       }],
       generated_at: '2026-03-30T15:05:00Z'
     }
+  },
+  completed: {
+    event: 'completed',
+    timestamp: '2026-03-30T15:10:00Z',
+    template_id: 'tpl_abc123',
+    template_name: 'NDA Agreement',
+    tenant_id: 'tenant_abc123',
+    data: {
+      document_id: 'doc_abc123',
+      document_status: 'signed',
+      template_name: 'NDA Agreement',
+      status: 'completed',
+      completed_at: '2026-03-30T15:10:00Z',
+      final_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+      field_data: {
+        'text_field_001': 'John Doe',
+        'date_field_002': '2026-03-30',
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO'
+      },
+      merge_fields: {
+        'account.name': 'Acme Corp',
+        'contact.title': 'CEO'
+      },
+      signed_documents: [{
+        document_id: 'doc_abc123',
+        template_name: 'NDA Agreement',
+        signed_document_url: 'https://storage.example.com/signed/doc_abc123.pdf',
+        signed_at: '2026-03-30T15:10:00Z'
+      }]
+    }
   }
 };
 
 const IntegrationTab = ({ templateData, onUpdate }) => {
   const [webhookUrl, setWebhookUrl] = useState(templateData?.webhook_config?.url || '');
-  const [webhookEvents, setWebhookEvents] = useState(templateData?.webhook_config?.events || ['signed', 'opened']);
+  const [webhookEvents, setWebhookEvents] = useState(() => {
+    const saved = templateData?.webhook_config?.events || ['signed', 'opened'];
+    return saved.includes('completed') ? saved : [...saved, 'completed'];
+  });
   const [webhookHeaders, setWebhookHeaders] = useState(templateData?.webhook_config?.headers || {});
   const [webhookSecret, setWebhookSecret] = useState(templateData?.webhook_config?.secret || '');
   const [retryEnabled, setRetryEnabled] = useState(templateData?.webhook_config?.retry_enabled !== false);
