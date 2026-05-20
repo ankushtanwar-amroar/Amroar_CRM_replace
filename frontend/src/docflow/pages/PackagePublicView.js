@@ -305,7 +305,7 @@ const PackagePublicView = () => {
       const terminalRecipient = ['signed', 'completed', 'approved', 'rejected', 'declined', 'voided', 'expired', 'skipped'].includes(recStatus);
       const terminalPkg = ['completed', 'signed', 'voided', 'expired', 'declined', 'cancelled'].includes(pkgStatus);
       const isActionableRole = recRole === 'SIGN' || recRole === 'APPROVE_REJECT' || recRole === 'SIGNER' || recRole === 'APPROVER';
-      const recipientIsActionable = isActionableRole && !terminalRecipient && !terminalPkg && !data?.all_signing_complete && !ar.voided;
+      const recipientIsActionable = isActionableRole && !terminalRecipient && !terminalPkg && !ar.voided;
 
       // sms_mode controls SMS sending; sms_required (driven by sms_consent) controls popup.
       setSmsModeEnabled(!!data?.sms_mode);

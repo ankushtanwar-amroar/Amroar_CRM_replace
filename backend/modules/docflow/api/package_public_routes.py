@@ -584,10 +584,24 @@ async def get_package_public(
     except Exception as e:
         logger.warning(f"Sender resolution failed for package {package.get('id')}: {e}")
 
-    # Determine if all SIGN recipients in earlier waves have completed
+    # Determine if all SIGN recipients that must complete before the active
+    # recipient have done so.  For an approver this means only the signers at
+    # lower routing-order positions — NOT any future signers that come after
+    # them.  For all other roles (signers, viewers, etc.) fall back to checking
+    # every signer in the package so the existing semantics are unchanged.
     recipients = package.get("recipients", [])
-    sign_recipients = [r for r in recipients if r.get("role_type") == "SIGN"]
-    all_signing_complete = all(r.get("status") == "completed" for r in sign_recipients) if sign_recipients else False
+    _active_role = str(active_recipient.get("role_type") or "SIGN").upper()
+    if _active_role == "APPROVE_REJECT":
+        _approver_order = active_recipient.get("routing_order", 1)
+        sign_recipients = [
+            r for r in recipients
+            if r.get("role_type") == "SIGN" and r.get("routing_order", 1) < _approver_order
+        ]
+        # If there are no prior signers the approver has nothing to wait for.
+        all_signing_complete = all(r.get("status") == "completed" for r in sign_recipients) if sign_recipients else True
+    else:
+        sign_recipients = [r for r in recipients if r.get("role_type") == "SIGN"]
+        all_signing_complete = all(r.get("status") == "completed" for r in sign_recipients) if sign_recipients else False
 
     # Phase 81 — surface SMS state to the package signing UI.
     # sms_required is driven by sms_consent (popup visibility), not sms_mode.
@@ -611,7 +625,6 @@ async def get_package_public(
                 actionable_role
                 and not terminal_recipient
                 and not terminal_pkg
-                and not all_signing_complete
                 and not active_recipient.get("voided")
             )
             if should_show:
