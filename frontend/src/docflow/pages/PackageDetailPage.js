@@ -505,7 +505,7 @@ const PackageDetailPage = () => {
               { id: 'overview', label: 'Overview', icon: Eye },
               { id: 'runs', label: 'Activity / Runs', icon: Play },
               { id: 'documents', label: 'Documents', icon: FileText },
-              { id: 'builder', label: 'Virtual Builder', icon: Wrench },
+              { id: 'builder', label: 'Visual Builder', icon: Wrench },
               { id: 'webhooks', label: 'Webhooks', icon: Webhook },
               { id: 'logs', label: 'Logs', icon: ScrollText },
             ].map(t => (

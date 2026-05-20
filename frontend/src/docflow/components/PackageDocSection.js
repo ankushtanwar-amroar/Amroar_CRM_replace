@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
-  ChevronRight, ChevronLeft, Play, CheckCircle2, CheckCircle, Clock, Eye,
+  ChevronRight, ChevronLeft, Play, CheckCircle2, CheckCircle, Clock, Eye, Loader2,
 } from 'lucide-react';
 import InteractiveDocumentViewer from './InteractiveDocumentViewer';
 import useGuidedFillIn from '../hooks/useGuidedFillIn';
@@ -41,6 +41,7 @@ export default function PackageDocSection({
   signatureModalOpen = false,  // Phase 82.2 — track if modal is open to prevent re-opening on close
 }) {
   const [hiddenFieldIds, setHiddenFieldIds] = useState(new Set());
+  const [docPdfReady, setDocPdfReady] = useState(false);
 
   // Phase 81.57 — Bubble the dynamic hidden-field set to the package parent
   // so the package-level "Finish" gate and per-doc stats can correctly
@@ -232,11 +233,19 @@ export default function PackageDocSection({
               {showStart && (
                 <button
                   onClick={handleStart}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 rounded-md hover:bg-emerald-700 transition-colors shadow-sm"
+                  disabled={!docPdfReady}
+                  className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white rounded-md transition-colors shadow-sm ${
+                    docPdfReady
+                      ? 'bg-emerald-600 hover:bg-emerald-700'
+                      : 'bg-emerald-300 cursor-not-allowed'
+                  }`}
                   data-testid={`pkg-doc-${index}-guided-start-btn`}
                 >
-                  <Play className="h-3.5 w-3.5" />
-                  Start
+                  {docPdfReady ? (
+                    <><Play className="h-3.5 w-3.5" />Start</>
+                  ) : (
+                    <><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading…</>
+                  )}
                 </button>
               )}
               {showNext && (
@@ -301,10 +310,18 @@ export default function PackageDocSection({
           {showStart && (
             <button
               onClick={handleStart}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white bg-emerald-600 rounded-md hover:bg-emerald-700"
+              disabled={!docPdfReady}
+              className={`inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-white rounded-md transition-colors ${
+                docPdfReady
+                  ? 'bg-emerald-600 hover:bg-emerald-700'
+                  : 'bg-emerald-300 cursor-not-allowed'
+              }`}
             >
-              <Play className="h-3.5 w-3.5" />
-              Start
+              {docPdfReady ? (
+                <><Play className="h-3.5 w-3.5" />Start</>
+              ) : (
+                <><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading…</>
+              )}
             </button>
           )}
           {showNext && (
@@ -381,6 +398,7 @@ export default function PackageDocSection({
                   onEnterNext={handleEnterNext}
                   scrollToken={scrollToken}
                   signatureModalOpen={signatureModalOpen}
+                  onDocumentReady={() => setDocPdfReady(true)}
                 />
               </div>
             ) : (

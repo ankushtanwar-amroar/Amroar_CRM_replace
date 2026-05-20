@@ -112,7 +112,7 @@ const PackageBuilderTab = ({ packageId, documents = [], isVoided = false }) => {
         {/* Document breadcrumb */}
         <div className="flex items-center gap-1.5 flex-1 min-w-0">
           <Wrench className="h-3.5 w-3.5 text-indigo-500 shrink-0" />
-          <span className="text-xs text-gray-400 shrink-0">Virtual Builder</span>
+          <span className="text-xs text-gray-400 shrink-0">Visual Builder</span>
           {selectedDoc && (
             <>
               <span className="text-gray-300 shrink-0">/</span>

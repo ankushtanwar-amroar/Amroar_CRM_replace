@@ -171,6 +171,7 @@ const InteractiveDocumentViewer = ({
   onEnterNext,               // Phase 81.78 — Enter key from single-line text advances to next field
   scrollToken = 0,           // Phase 81.79 — bump this from parent to trigger scroll-to-active-field on explicit Start/Next/Enter actions only
   signatureModalOpen = false, // Phase 82.2 — track if modal is currently open to prevent re-opening on close
+  onDocumentReady,           // () => void — called once the PDF is parsed and pages begin rendering
 }) => {
   // Normalize incoming fields so EVERY field has a fieldKey. Backward-compat:
   // legacy templates without fieldKey get a UNIQUE auto-generated key per field,
@@ -376,6 +377,7 @@ const InteractiveDocumentViewer = ({
 
   const onDocumentLoadSuccess = ({ numPages }) => {
     setNumPages(numPages);
+    onDocumentReady?.();
   };
 
   const onPageLoadSuccess = (page) => {

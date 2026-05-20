@@ -64,6 +64,7 @@ const PublicDocumentViewEnhanced = () => {
   // the Finish flow now uses `showFinishConfirm` + ConfirmSubmitDialog instead.
   const [signerConfirmed, setSignerConfirmed] = useState(false);
   const [showFinishConfirm, setShowFinishConfirm] = useState(false);
+  const [docPdfReady, setDocPdfReady] = useState(false);
 
   // User identity + verification
   const [formData, setFormData] = useState({ signer_name: '', signer_email: '' });
@@ -1348,11 +1349,19 @@ const PublicDocumentViewEnhanced = () => {
                   {showStart && (
                     <button
                       onClick={handleStartGuided}
-                      className="inline-flex items-center gap-1 sm:gap-1.5 px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors shadow-sm min-h-[40px]"
+                      disabled={!docPdfReady}
+                      className={`inline-flex items-center gap-1 sm:gap-1.5 px-3 sm:px-4 py-2 text-xs sm:text-sm font-semibold text-white rounded-lg transition-colors shadow-sm min-h-[40px] ${
+                        docPdfReady
+                          ? 'bg-emerald-600 hover:bg-emerald-700'
+                          : 'bg-emerald-300 cursor-not-allowed'
+                      }`}
                       data-testid="guided-start-btn"
                     >
-                      <Play className="h-4 w-4" />
-                      <span>Start</span>
+                      {docPdfReady ? (
+                        <><Play className="h-4 w-4" /><span>Start</span></>
+                      ) : (
+                        <><Loader2 className="h-4 w-4 animate-spin" /><span>Loading…</span></>
+                      )}
                     </button>
                   )}
                   {showNext && (
@@ -1757,6 +1766,7 @@ const PublicDocumentViewEnhanced = () => {
                     onEnterNext={handleNextGuided}
                     signatureModalOpen={signatureModalOpen || reusePrompt.open}
                     scrollToken={scrollToken}
+                    onDocumentReady={() => setDocPdfReady(true)}
                   />
                 );
               })()}

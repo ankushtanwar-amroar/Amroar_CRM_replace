@@ -26,6 +26,15 @@ const GRID_SIZE = 10;
 
 const snapToGrid = (value) => Math.round(value / GRID_SIZE) * GRID_SIZE;
 
+// Properties copied from a source field when "Sync All Field Properties" is enabled.
+// Position (x, y, width, height) and link config are intentionally excluded.
+const SYNCABLE_FIELD_PROPS = [
+  'label', 'placeholder', 'style', 'required', 'readOnly',
+  'showLabelInPreview', 'fieldSubType', 'defaultValue',
+  'validation', 'characterLimit', 'helpText', 'conditionalRules',
+  'hideLabelOnFinal', 'dateFormat', 'dateMode',
+];
+
 const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, crmConnection, templateRecipients = [], contentBlocks = [], onContentBlocksChange, onTextSelect, highlightBlockId = null, onConvertToEditable, currentTemplateId = null, serverFieldsVersion = 0, packageDocuments = null, packageId = null }) => {
   // Color palette for recipient assignment badges
   const RECIPIENT_COLORS = useMemo(() => [
@@ -91,6 +100,9 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
   // the canvas/preview to render colored link badges without per-field
   // requests. { [fieldId]: [ { source_template_id, ..., direction }, ... ] }
   const [incomingLinksMap, setIncomingLinksMap] = useState({});
+  // Full raw field objects per linked template, keyed by template_id then field_id.
+  // Used by the "Sync All Field Properties" feature to copy source field properties.
+  const [interlinkTargetFieldsFull, setInterlinkTargetFieldsFull] = useState({});
 
   // When inside a Package Virtual Builder (packageDocuments provided), restrict
   // the interlink template list to only the documents in this package.
@@ -171,6 +183,12 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
           result.push(f);
         }
       }
+      // Build full field map for property sync (sync_all_properties feature)
+      const fullMap = {};
+      for (const f of allFields) {
+        if (f.id) fullMap[f.id] = f;
+      }
+      setInterlinkTargetFieldsFull(prev => ({ ...prev, [tplId]: fullMap }));
       setInterlinkTargetFields(prev => ({ ...prev, [tplId]: result }));
     } catch (e) {
       console.error('Failed to load target fields', e);
@@ -590,6 +608,8 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
   // Get selected field
   const selectedField = droppedFields.find(f => f.id === selectedFieldId);
+  // True when the selected field's properties are inherited from a linked source field.
+  const propLocked = Boolean(selectedField?.linked_to?.sync_all_properties);
 
   // Phase 81.52 — Hydrate interlink dropdowns on field reselect / template
   // reopen. The Linked Template + Linked Field options are loaded lazily
@@ -616,6 +636,35 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
     if (!['text', 'date', 'checkbox', 'radio'].includes(selectedField.type)) return;
     loadIncomingLinks(selectedField.id);
   }, [selectedField?.id, selectedField?.type, loadIncomingLinks]);
+
+  // Auto-apply synced field properties when full source data becomes available.
+  // Uses droppedFieldsRef to avoid adding droppedFields as a dependency (which
+  // would cause an update → effect → update loop).
+  useEffect(() => {
+    const current = droppedFieldsRef.current;
+    const hasSynced = current.some(f =>
+      f.linked_to?.sync_all_properties &&
+      f.linked_to?.template_id &&
+      f.linked_to?.field_id &&
+      interlinkTargetFieldsFull[f.linked_to.template_id]?.[f.linked_to.field_id]
+    );
+    if (!hasSynced) return;
+    let changed = false;
+    const next = current.map(f => {
+      if (!f.linked_to?.sync_all_properties || !f.linked_to?.template_id || !f.linked_to?.field_id) return f;
+      const src = interlinkTargetFieldsFull[f.linked_to.template_id]?.[f.linked_to.field_id];
+      if (!src) return f;
+      const patch = {};
+      SYNCABLE_FIELD_PROPS.forEach(key => { if (src[key] !== undefined) patch[key] = src[key]; });
+      changed = true;
+      return { ...f, ...patch };
+    });
+    if (changed) {
+      setDroppedFields(next);
+      syncToParent(next);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interlinkTargetFieldsFull, syncToParent]);
 
   // Get field type config
   const getFieldTypeConfig = (type) => FIELD_TYPES.find(ft => ft.id === type) || FIELD_TYPES[0];
@@ -1857,6 +1906,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {/* Sync lock banner */}
+              {propLocked && (
+                <div className="flex items-start gap-2 px-3 py-2 bg-indigo-50 border border-indigo-200 rounded-md">
+                  <Lock className="h-3.5 w-3.5 text-indigo-600 flex-shrink-0 mt-0.5" />
+                  <p className="text-[10px] text-indigo-700 font-medium leading-tight">
+                    Properties synced from linked field. Uncheck "Sync All Field Properties" to edit independently.
+                  </p>
+                </div>
+              )}
+              {/* Common property group — pointer-events blocked when sync lock is active */}
+              <div className={propLocked ? 'space-y-4 pointer-events-none select-none opacity-60' : 'space-y-4'}>
               {/* Label */}
               <div>
                 <label className="block text-xs font-medium text-gray-700 mb-1">Label</label>
@@ -2136,6 +2196,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   </select>
                 </div>
               )}
+              </div>{/* end common property group */}
 
               {/* Phase 81.49 / Phase 2 — Interlinked Fields (Package flow).
                   Supported field types: text, date, checkbox, radio. */}
@@ -2301,6 +2362,46 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           )}
                         </span>
                       </label>
+
+                      {/* Sync All Field Properties */}
+                      <label
+                        className={`flex items-start gap-1.5 ${
+                          !selectedField.linked_to?.field_id ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                        }`}
+                        title={!selectedField.linked_to?.field_id ? 'Select a linked field first' : ''}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={Boolean(selectedField.linked_to?.sync_all_properties)}
+                          disabled={!selectedField.linked_to?.field_id}
+                          onChange={(e) => {
+                            const enabled = e.target.checked;
+                            const newLinkedTo = { ...(selectedField.linked_to || {}), sync_all_properties: enabled };
+                            if (enabled) {
+                              const tplId = selectedField.linked_to?.template_id;
+                              const fldId = selectedField.linked_to?.field_id;
+                              const src = interlinkTargetFieldsFull[tplId]?.[fldId];
+                              if (src) {
+                                const patch = { linked_to: newLinkedTo };
+                                SYNCABLE_FIELD_PROPS.forEach(key => { if (src[key] !== undefined) patch[key] = src[key]; });
+                                updateFieldProperties(selectedField.id, patch);
+                                return;
+                              }
+                            }
+                            updateFieldProperty(selectedField.id, 'linked_to', newLinkedTo);
+                          }}
+                          className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 mt-0.5 flex-shrink-0"
+                          data-testid="field-interlink-sync-properties"
+                        />
+                        <span className="text-[10px] font-medium text-gray-600 leading-tight">
+                          Sync All Field Properties
+                          {Boolean(selectedField.linked_to?.sync_all_properties) && (
+                            <span className="ml-1 inline-flex items-center gap-0.5 text-indigo-600">
+                              <Lock className="h-2.5 w-2.5" />locked
+                            </span>
+                          )}
+                        </span>
+                      </label>
                     </div>
                   )}
                 </div>
@@ -2432,6 +2533,8 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                 );
               })()}
 
+              {/* Type-specific & advanced sections — locked when syncing from linked template */}
+              <div className={propLocked ? 'space-y-4 pointer-events-none select-none opacity-60' : 'space-y-4'}>
               {/* Signature Size */}
               {selectedField.type === 'signature' && (
                 <div>
@@ -3136,6 +3239,8 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   </button>
                 </div>
               )}
+
+              </div>{/* end type-specific group */}
 
               {/* Position & Size */}
               <div className="pt-2 border-t border-gray-100">
