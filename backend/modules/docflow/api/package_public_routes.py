@@ -38,6 +38,37 @@ session_service = SessionService(db)
 logger = logging.getLogger(__name__)
 
 
+def _resolve_pdf_font_size(field: dict, h_pdf: float, w_pdf: float, scale: float,
+                            default_pt: float = 10.0) -> float:
+    """Compute font size in PDF points matching the frontend resolveResponsiveFontSize.
+
+    Parses "12pt" / "12px" / bare-number fontSize, converts to CSS-px, applies
+    height/width caps in CSS-px space (same as the browser), then converts back
+    to PDF points.  This prevents the scale factor from shrinking text and keeps
+    the final PDF consistent with the public-signing-page preview.
+    """
+    style = field.get("style") or {}
+    raw_fs = str(style.get("fontSize") or f"{default_pt}pt").strip()
+    is_pt = raw_fs.endswith("pt")
+    try:
+        fs_num = float(raw_fs.rstrip("pt").rstrip("px").strip())
+    except (ValueError, TypeError):
+        fs_num = default_pt
+        is_pt = True
+
+    _CSS_PT_TO_PX = 4.0 / 3.0
+    base_fs_px = fs_num * _CSS_PT_TO_PX if is_pt else fs_num
+
+    _safe_scale = scale if scale > 0 else 1.0
+    h_px = h_pdf / _safe_scale
+    w_px = (w_pdf / _safe_scale) if w_pdf > 0 else 0.0
+    h_cap_px = max(6.0, (h_px - 2.0) * 0.85)
+    w_cap_px = max(6.0, w_px / 2.5) if w_px > 0 else 1e9
+
+    capped_px = max(6.0, min(base_fs_px, h_cap_px, w_cap_px))
+    return max(6.0, min(capped_px * (3.0 / 4.0), 72.0))
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Phase 81 — SMS verification endpoints for PACKAGE recipients (public, token-scoped)
 # Mirrors the template-flow endpoints but operates on docflow_packages /
@@ -1064,16 +1095,9 @@ async def sign_with_fields(
                             except Exception:
                                 img_w = img_h = 0
                             align = (field.get("style") or {}).get("textAlign") or "center"
-                            # Resolve configured fontSize → PDF height.
-                            try:
-                                _raw_fs = (field.get("style") or {}).get("fontSize")
-                                if _raw_fs:
-                                    _fs_css = float(str(_raw_fs).replace("px", ""))
-                                else:
-                                    _fs_css = 18.0
-                            except Exception:
-                                _fs_css = 18.0
-                            target_h = max(6.0, _fs_css * scale)
+                            # Resolve configured fontSize → target height in PDF pt.
+                            # Use same helper as text fields so "12pt" = 12 PDF pt.
+                            target_h = _resolve_pdf_font_size(field, h, 0.0, scale, default_pt=18.0)
                             # Cap at field box so we never overflow.
                             target_h = min(target_h, h)
                             if img_w > 0 and img_h > 0:
@@ -1112,14 +1136,6 @@ async def sign_with_fields(
                             field_value = reformat_date_value(
                                 field_value, field.get("dateFormat")
                             )
-                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
-                        # Phase 81.70 — mirror frontend signing-UI font math:
-                        #   baseFs = css_px * scale
-                        #   hCap   = max(6, (h - 4) * 0.70)
-                        #   wCap   = max(6, w / 3)   (single-line only)
-                        #   final  = max(6, min(base, hCap, wCap, 24))
-                        font_size = base_fs * scale
-                        height_cap = max(6, (h - 4) * 0.70)
                         is_multiline_text = (
                             field_type == "text"
                             and (
@@ -1128,11 +1144,9 @@ async def sign_with_fields(
                                 or field.get("multiline") is True
                             )
                         )
-                        if is_multiline_text:
-                            font_size = max(6, min(font_size, height_cap, 24))
-                        else:
-                            width_cap = max(6, w / 3)
-                            font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        font_size = _resolve_pdf_font_size(
+                            field, h, w if not is_multiline_text else 0.0, scale
+                        )
                         text_str = str(field_value)
                         align_str = (field.get("style") or {}).get("textAlign") or "left"
                         align_map = {"left": 0, "center": 1, "right": 2}
@@ -1235,12 +1249,7 @@ async def sign_with_fields(
 
                 elif field_type == "merge" and field_value:
                     try:
-                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
-                        # Phase 81.70 — same font-size clamp as text/date.
-                        font_size = base_fs * scale
-                        height_cap = max(6, (h - 4) * 0.70)
-                        width_cap  = max(6, w / 3)
-                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        font_size = _resolve_pdf_font_size(field, h, w, scale)
                         text_str = str(field_value)
                         align = (field.get("style") or {}).get("textAlign") or "left"
                         try:
@@ -1318,13 +1327,8 @@ async def sign_with_fields(
 
                 elif field_type == "dropdown" and field_value:
                     # Phase 81.16 — render dropdown selection as text in PDF.
-                    # Phase 81.70 — centered baseline to match frontend preview.
                     try:
-                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
-                        font_size = base_fs * scale
-                        height_cap = max(6, (h - 4) * 0.70)
-                        width_cap  = max(6, w / 3)
-                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        font_size = _resolve_pdf_font_size(field, h, w, scale)
                         text_str = str(field_value)
                         align_str = (field.get("style") or {}).get("textAlign") or "left"
                         try:

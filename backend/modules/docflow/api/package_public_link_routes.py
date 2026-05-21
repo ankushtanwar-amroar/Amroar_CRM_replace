@@ -34,6 +34,36 @@ audit_service = DocFlowAuditService(db)
 webhook_service = WebhookService(db)
 
 
+def _resolve_pdf_font_size(field: dict, h_pdf: float, w_pdf: float, scale: float,
+                            default_pt: float = 10.0) -> float:
+    """Compute font size in PDF points matching the frontend resolveResponsiveFontSize.
+
+    Parses "12pt" / "12px" / bare-number fontSize, converts to CSS-px, applies
+    height/width caps in CSS-px space (same as the browser), then converts back
+    to PDF points.  Prevents the builder→PDF scale factor from shrinking text.
+    """
+    style = field.get("style") or {}
+    raw_fs = str(style.get("fontSize") or f"{default_pt}pt").strip()
+    is_pt = raw_fs.endswith("pt")
+    try:
+        fs_num = float(raw_fs.rstrip("pt").rstrip("px").strip())
+    except (ValueError, TypeError):
+        fs_num = default_pt
+        is_pt = True
+
+    _CSS_PT_TO_PX = 4.0 / 3.0
+    base_fs_px = fs_num * _CSS_PT_TO_PX if is_pt else fs_num
+
+    _safe_scale = scale if scale > 0 else 1.0
+    h_px = h_pdf / _safe_scale
+    w_px = (w_pdf / _safe_scale) if w_pdf > 0 else 0.0
+    h_cap_px = max(6.0, (h_px - 2.0) * 0.85)
+    w_cap_px = max(6.0, w_px / 2.5) if w_px > 0 else 1e9
+
+    capped_px = max(6.0, min(base_fs_px, h_cap_px, w_cap_px))
+    return max(6.0, min(capped_px * (3.0 / 4.0), 72.0))
+
+
 async def _find_package_by_public_link_token(token: str):
     """Find package by its public_link_token."""
     package = await db.docflow_packages.find_one(
@@ -459,12 +489,7 @@ async def submit_public_link(
                             except Exception:
                                 img_w = img_h = 0
                             align = (field.get("style") or {}).get("textAlign") or "center"
-                            try:
-                                _raw_fs = (field.get("style") or {}).get("fontSize")
-                                _fs_css = float(str(_raw_fs).replace("px", "")) if _raw_fs else 18.0
-                            except Exception:
-                                _fs_css = 18.0
-                            target_h = min(max(6.0, _fs_css * scale), h)
+                            target_h = min(_resolve_pdf_font_size(field, h, 0.0, scale, default_pt=18.0), h)
                             if img_w > 0 and img_h > 0:
                                 aspect = img_w / img_h
                                 fit_h = target_h
@@ -500,9 +525,6 @@ async def submit_public_link(
                         # `y + h/2 + fs*0.35`; multi-line uses a centered band
                         # rect to keep `insert_textbox` word-wrap while still
                         # vertically centering the content.
-                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
-                        font_size = base_fs * scale
-                        height_cap = max(6, (h - 4) * 0.70)
                         is_multiline_text = (
                             field_type == "text"
                             and (
@@ -511,11 +533,9 @@ async def submit_public_link(
                                 or field.get("multiline") is True
                             )
                         )
-                        if is_multiline_text:
-                            font_size = max(6, min(font_size, height_cap, 24))
-                        else:
-                            width_cap = max(6, w / 3)
-                            font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        font_size = _resolve_pdf_font_size(
+                            field, h, w if not is_multiline_text else 0.0, scale
+                        )
                         text_str = str(field_value)
                         align_str = (field.get("style") or {}).get("textAlign") or "left"
                         align_map = {"left": 0, "center": 1, "right": 2}
@@ -631,11 +651,7 @@ async def submit_public_link(
                 elif field_type == "merge" and field_value:
                     # Phase 81.70 — centered baseline to match signing UI.
                     try:
-                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
-                        font_size = base_fs * scale
-                        height_cap = max(6, (h - 4) * 0.70)
-                        width_cap  = max(6, w / 3)
-                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        font_size = _resolve_pdf_font_size(field, h, w, scale)
                         text_str = str(field_value)
                         align_str = (field.get("style") or {}).get("textAlign") or "left"
                         try:
@@ -663,11 +679,7 @@ async def submit_public_link(
                 elif field_type == "dropdown" and field_value:
                     # Phase 81.70 — centered baseline to match signing UI.
                     try:
-                        base_fs = float(field.get("style", {}).get("fontSize", 10) or 10)
-                        font_size = base_fs * scale
-                        height_cap = max(6, (h - 4) * 0.70)
-                        width_cap  = max(6, w / 3)
-                        font_size = max(6, min(font_size, height_cap, width_cap, 24))
+                        font_size = _resolve_pdf_font_size(field, h, w, scale)
                         text_str = str(field_value)
                         align_str = (field.get("style") or {}).get("textAlign") or "left"
                         try:

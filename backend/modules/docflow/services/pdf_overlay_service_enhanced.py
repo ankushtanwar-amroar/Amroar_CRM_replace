@@ -278,13 +278,16 @@ class PDFOverlayService:
     def _apply_field_style(self, c: canvas.Canvas, field: Dict[str, Any], height: float, default_size: float = 10, scale: float = 1.0, width: float = 0):
         """Apply field styling (font, color, weight, italic) from the style dict.
 
-        Phase 81.69 — matches the frontend signing-UI font math exactly so the
-        final PDF has the same glyph size as the signing preview:
-
-        * base_font_size = (css px) * scale
-        * h_cap          = max(6, (height - 4) * 0.70)
-        * w_cap          = max(6, width / 3)   (only when width is known)
-        * final          = max(6, min(base, h_cap, w_cap, 24))
+        Font-size pipeline (matches frontend resolveResponsiveFontSize exactly):
+          1. Parse stored value ("12pt", "12px", or bare "12").
+          2. Convert to CSS-px equivalent: pt × (4/3), px as-is.
+          3. Invert the builder→PDF scale to get CSS-px field dimensions.
+          4. Apply caps in CSS-px space: h_cap = (h_px-2)*0.85, w_cap = w_px/2.5
+          5. Convert capped CSS-px back to PDF pt: px × (3/4).
+        This ensures that a field author setting "12pt" in the Visual Builder
+        gets exactly 12pt (16 CSS px) in both the signing view and the final PDF,
+        regardless of how the builder-to-PDF scale factor stretches or shrinks
+        field dimensions.
         """
         style = field.get('style') or {}
         font_family = style.get('fontFamily', 'Arial')
@@ -293,9 +296,6 @@ class PDFOverlayService:
         font_style_css = style.get('fontStyle', 'normal')
         text_color = style.get('color', '#000000')
 
-        # Resolve font size — pt values skip the px→pt scale multiplication.
-        # Stored as "12pt" → use directly as PDF points.
-        # Stored as "12", "12px" (legacy) → multiply by scale (px → pt).
         _fs_str = str(font_size_raw).strip()
         _is_pt = _fs_str.endswith('pt')
         try:
@@ -304,16 +304,26 @@ class PDFOverlayService:
             _fs_num = default_size
             _is_pt = False
 
+        # Step 1 — express font size in CSS-px (96 DPI, matching the browser):
+        #   "12pt" → 12 × 4/3 = 16 CSS px
+        #   "12px" or bare "12" → 12 CSS px (already px)
+        _CSS_PT_TO_PX = 4.0 / 3.0   # 1 CSS pt = 4/3 CSS px at 96 DPI
         if _is_pt:
-            base_fs = max(6.0, _fs_num)   # already in PDF points — no scale
+            base_fs_px = max(6.0, _fs_num * _CSS_PT_TO_PX)
         else:
-            base_fs = max(6.0, _fs_num * scale)  # px / bare → convert to pt
-        h_cap = max(6.0, (height - 4.0) * 0.85)
-        if width and width > 0:
-            w_cap = max(6.0, width / 2.5)
-        else:
-            w_cap = 1e9
-        font_size = max(6.0, min(base_fs, h_cap, w_cap, 72.0))
+            base_fs_px = max(6.0, _fs_num)
+
+        # Step 2 — invert the builder→PDF scale to get CSS-px field dimensions,
+        # then cap in the same px space the frontend uses.
+        _safe_scale = scale if scale > 0 else 1.0
+        h_px = height / _safe_scale
+        w_px = (width / _safe_scale) if width > 0 else 0.0
+        h_cap_px = max(6.0, (h_px - 2.0) * 0.85)
+        w_cap_px = max(6.0, w_px / 2.5) if w_px > 0 else 1e9
+
+        # Step 3 — apply cap, then convert back to PDF pt: CSS px × (3/4).
+        capped_px = max(6.0, min(base_fs_px, h_cap_px, w_cap_px))
+        font_size = max(6.0, min(capped_px * (3.0 / 4.0), 72.0))
 
         # Map CSS font to ReportLab font
         base_font = self.FONT_MAP.get(font_family, 'Helvetica')
@@ -548,8 +558,15 @@ class PDFOverlayService:
             if fld.get('style'):
                 self._draw_text_with_style(c, x, y, width, height, value, fld, scale=scale)
             else:
-                # Phase 81.69 — mirror frontend baseline math.
-                fs = max(6.0, min(10 * scale, (height - 4) * 0.85, width / 2.5, 72.0))
+                # Legacy path (no style dict) — use same px-space cap as _apply_field_style.
+                # 10pt default = 10 × 4/3 = 13.3 CSS px
+                _safe_scale = scale if scale > 0 else 1.0
+                h_px = height / _safe_scale
+                w_px = (width / _safe_scale) if width > 0 else 0.0
+                h_cap_px = max(6.0, (h_px - 2.0) * 0.85)
+                w_cap_px = max(6.0, w_px / 2.5) if w_px > 0 else 1e9
+                capped_px = max(6.0, min(10.0 * (4.0 / 3.0), h_cap_px, w_cap_px))
+                fs = max(6.0, min(capped_px * (3.0 / 4.0), 72.0))
                 c.setFont("Helvetica", fs)
                 c.setFillColorRGB(0, 0, 0)
                 c.drawString(x + 5 * scale, y + (height / 2) - (fs * 0.35), value)
@@ -820,8 +837,15 @@ class PDFOverlayService:
             if field.get('style'):
                 self._draw_text_with_style(c, x, y, width, height, str(value)[:100], field, scale=scale)
             else:
-                # Phase 81.69 — mirror frontend: baseFs*scale, padding = 2*scale.
-                fs = max(6.0, min(10 * scale, (height - 4) * 0.85, width / 2.5, 72.0))
+                # Legacy path (no style dict) — compute caps in CSS-px space,
+                # then convert final result to PDF pt (×3/4). Default 10pt.
+                _safe_scale = scale if scale > 0 else 1.0
+                h_px = height / _safe_scale
+                w_px = (width / _safe_scale) if width > 0 else 0.0
+                h_cap_px = max(6.0, (h_px - 2.0) * 0.85)
+                w_cap_px = max(6.0, w_px / 2.5) if w_px > 0 else 1e9
+                capped_px = max(6.0, min(10.0 * (4.0 / 3.0), h_cap_px, w_cap_px))
+                fs = max(6.0, min(capped_px * (3.0 / 4.0), 72.0))
                 c.setFillColor(colors.HexColor('#1a1a2e'))
                 c.setFont("Helvetica", fs)
                 text_y = y + (height / 2) - (fs * 0.35)
@@ -842,7 +866,14 @@ class PDFOverlayService:
             if field.get('style'):
                 self._draw_text_with_style(c, x, y, width, height, text, field, scale=scale)
             else:
-                fs = max(6.0, min(12 * scale, (height - 4) * 0.85, width / 2.5, 72.0))
+                # Legacy path — caps in CSS-px space, default 12pt.
+                _safe_scale = scale if scale > 0 else 1.0
+                h_px = height / _safe_scale
+                w_px = (width / _safe_scale) if width > 0 else 0.0
+                h_cap_px = max(6.0, (h_px - 2.0) * 0.85)
+                w_cap_px = max(6.0, w_px / 2.5) if w_px > 0 else 1e9
+                capped_px = max(6.0, min(12.0 * (4.0 / 3.0), h_cap_px, w_cap_px))
+                fs = max(6.0, min(capped_px * (3.0 / 4.0), 72.0))
                 c.setFont("Helvetica", fs)
                 c.setFillColorRGB(0, 0, 0)
                 text_y = y + (height / 2) - (fs * 0.35)

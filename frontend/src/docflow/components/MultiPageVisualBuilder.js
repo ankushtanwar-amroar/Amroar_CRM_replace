@@ -1919,9 +1919,13 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
               <div className={propLocked ? 'space-y-4 pointer-events-none select-none opacity-60' : 'space-y-4'}>
               {/* Label */}
               <div>
-                <label className="block text-xs font-medium text-gray-700 mb-1">Label</label>
+                <label className="block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between">
+                  Label
+                  {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                </label>
                 <input
                   type="text"
+                  disabled={propLocked}
                   value={selectedField.type === 'label' ? (selectedField.text || '') : (selectedField.label || '')}
                   onChange={(e) => {
                     if (selectedField.type === 'label') {
@@ -1930,34 +1934,36 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       updateFieldProperty(selectedField.id, 'label', e.target.value);
                     }
                   }}
-                  className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-transparent ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                 />
               </div>
 
               {/* Required + Read Only (side-by-side) */}
               {selectedField.type !== 'label' && selectedField.type !== 'merge' && (
-                <div className="flex items-center gap-5 flex-wrap">
+                <div className={`flex items-center gap-5 flex-wrap ${propLocked ? 'opacity-50' : ''}`}>
                   <div className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       id="field-required"
+                      disabled={propLocked}
                       checked={isFieldRequiredForUI(selectedField)}
                       onChange={(e) => updateFieldPropertyWithRadioGroupSync(selectedField.id, 'required', e.target.checked)}
-                      className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                      className={`w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 ${propLocked ? 'cursor-not-allowed' : ''}`}
                       data-testid="field-required-checkbox"
                     />
-                    <label htmlFor="field-required" className="text-sm font-medium text-gray-700">Required</label>
+                    <label htmlFor="field-required" className={`text-sm font-medium text-gray-700 ${propLocked ? 'cursor-not-allowed' : ''}`}>Required</label>
                   </div>
                   <div className="flex items-center gap-2">
                     <input
                       type="checkbox"
                       id="field-readonly"
+                      disabled={propLocked}
                       checked={selectedField.readOnly || false}
                       onChange={(e) => updateFieldProperty(selectedField.id, 'readOnly', e.target.checked)}
-                      className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                      className={`w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 ${propLocked ? 'cursor-not-allowed' : ''}`}
                       data-testid="field-readonly-checkbox"
                     />
-                    <label htmlFor="field-readonly" className="text-sm font-medium text-gray-700">Read Only</label>
+                    <label htmlFor="field-readonly" className={`text-sm font-medium text-gray-700 ${propLocked ? 'cursor-not-allowed' : ''}`}>Read Only</label>
                   </div>
                 </div>
               )}
@@ -1970,16 +1976,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   Available for every field type except the static "label"
                   field whose label IS its visible content. */}
               {selectedField.type !== 'label' && (
-                <div className="flex items-center gap-2">
+                <div className={`flex items-center gap-2 ${propLocked ? 'opacity-50' : ''}`}>
                   <input
                     type="checkbox"
                     id="field-show-label-preview"
+                    disabled={propLocked}
                     checked={selectedField.showLabelInPreview !== false}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'showLabelInPreview', e.target.checked)}
-                    className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500"
+                    className={`w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 ${propLocked ? 'cursor-not-allowed' : ''}`}
                     data-testid="field-show-label-checkbox"
                   />
-                  <label htmlFor="field-show-label-preview" className="text-sm font-medium text-gray-700">
+                  <label htmlFor="field-show-label-preview" className={`text-sm font-medium text-gray-700 ${propLocked ? 'cursor-not-allowed' : ''}`}>
                     Show Label in Preview / Signing
                   </label>
                 </div>
@@ -1987,15 +1994,16 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
               {/* Assign to Recipient */}
               {selectedField.type !== 'label' && selectedField.type !== 'merge' && templateRecipients.length > 0 && (
-                <div className="border-t border-gray-100 pt-3 mt-1" data-testid="field-assignment-section">
-                  <label className="block text-xs font-semibold text-gray-800 mb-2 flex items-center gap-1.5">
+                <div className={`border-t border-gray-100 pt-3 mt-1 ${propLocked ? 'opacity-50' : ''}`} data-testid="field-assignment-section">
+                  <label className={`block text-xs font-semibold text-gray-800 mb-2 flex items-center gap-1.5 ${propLocked ? 'text-gray-500' : ''}`}>
                     <Users className="h-3.5 w-3.5 text-indigo-500" />
                     Assign to Recipient
                   </label>
                   <select
+                    disabled={propLocked}
                     value={selectedField.assigned_to || ''}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'assigned_to', e.target.value || null)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                     data-testid="field-recipient-select"
                   >
                     <option value="">All recipients (no restriction)</option>
@@ -2025,18 +2033,20 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
               {/* Text Styling Controls — for Label, Text Input, Date, Merge Field, Signature and Initials */}
               {['label', 'text', 'merge', 'date', 'signature', 'initials'].includes(selectedField.type) && (
-                <div className="border-t border-gray-100 pt-3 mt-1 space-y-3" data-testid="text-styling-section">
-                  <label className="block text-xs font-semibold text-gray-800 flex items-center gap-1.5">
+                <div className={`border-t border-gray-100 pt-3 mt-1 space-y-3 ${propLocked ? 'opacity-50' : ''}`} data-testid="text-styling-section">
+                  <label className={`block text-xs font-semibold text-gray-800 flex items-center gap-1.5 ${propLocked ? 'text-gray-500' : ''}`}>
                     <svg className="h-3.5 w-3.5 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7V4h16v3"/><path d="M9 20h6"/><path d="M12 4v16"/></svg>
                     Text Styling
+                    {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
                   </label>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="block text-[10px] font-medium text-gray-500 mb-1">Font Family</label>
                       <select
+                        disabled={propLocked}
                         value={selectedField.style?.fontFamily || 'Arial'}
                         onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), fontFamily: e.target.value })}
-                        className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded-md focus:ring-1 focus:ring-indigo-500"
+                        className={`w-full px-2 py-1.5 text-xs border border-gray-200 rounded-md focus:ring-1 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                         data-testid="field-font-family"
                       >
                         <option value="Arial">Arial</option>
@@ -2051,6 +2061,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                     <div>
                       <label className="block text-[10px] font-medium text-gray-500 mb-1">Font Size</label>
                       <select
+                        disabled={propLocked}
                         value={(() => {
                           const raw = selectedField.style?.fontSize;
                           if (!raw) return '12pt';
@@ -2075,7 +2086,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           if ((selectedField.height || 40) < minH) updates.height = minH;
                           updateFieldProperties(selectedField.id, updates);
                         }}
-                        className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded-md focus:ring-1 focus:ring-indigo-500"
+                        className={`w-full px-2 py-1.5 text-xs border border-gray-200 rounded-md focus:ring-1 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                         data-testid="field-font-size"
                       >
                         {[8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32].map(s => (
@@ -2096,6 +2107,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           <button
                             key={btn.key}
                             title={btn.title}
+                            disabled={propLocked}
                             onClick={() => {
                               const current = selectedField.style?.[btn.key] || (btn.key === 'textDecoration' ? 'none' : 'normal');
                               const newVal = current === btn.val ? (btn.key === 'textDecoration' ? 'none' : 'normal') : btn.val;
@@ -2103,7 +2115,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                             }}
                             className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors ${
                               btn.active ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                            }`}
+                            } ${propLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
                             data-testid={`field-style-${btn.key}`}
                           >
                             <span style={{ fontWeight: btn.key === 'fontWeight' ? 'bold' : undefined, fontStyle: btn.italic ? 'italic' : undefined, textDecoration: btn.underline ? 'underline' : undefined }}>
@@ -2119,12 +2131,13 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         {['left', 'center', 'right'].map(a => (
                           <button
                             key={a}
+                            disabled={propLocked}
                             onClick={() => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), textAlign: a })}
                             className={`flex-1 px-2 py-1 text-xs rounded-md transition-colors ${
                               (selectedField.style?.textAlign || 'center') === a
                                 ? 'bg-indigo-600 text-white'
                                 : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                            }`}
+                            } ${propLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
                             data-testid={`field-align-${a}`}
                           >
                             {a === 'left' ? '⫷' : a === 'center' ? '⫿' : '⫸'}
@@ -2144,12 +2157,13 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         <button
                           key={val}
                           title={title}
+                          disabled={propLocked}
                           onClick={() => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), verticalAlign: val })}
                           className={`flex-1 px-2 py-1 text-xs rounded-md transition-colors ${
                             (selectedField.style?.verticalAlign || 'bottom') === val
                               ? 'bg-indigo-600 text-white'
                               : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                          }`}
+                          } ${propLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
                           data-testid={`field-valign-${val}`}
                         >
                           {lbl}
@@ -2159,19 +2173,21 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   </div>
                   <div>
                     <label className="block text-[10px] font-medium text-gray-500 mb-1">Text Color</label>
-                    <div className="flex items-center gap-2">
+                    <div className={`flex items-center gap-2 ${propLocked ? 'opacity-50' : ''}`}>
                       <input
                         type="color"
+                        disabled={propLocked}
                         value={selectedField.style?.color || '#000000'}
                         onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), color: e.target.value })}
-                        className="w-8 h-8 rounded-md border border-gray-200 cursor-pointer p-0.5"
+                        className={`w-8 h-8 rounded-md border border-gray-200 cursor-pointer p-0.5 ${propLocked ? 'cursor-not-allowed' : ''}`}
                         data-testid="field-text-color"
                       />
                       <input
                         type="text"
+                        disabled={propLocked}
                         value={selectedField.style?.color || '#000000'}
                         onChange={(e) => updateFieldProperty(selectedField.id, 'style', { ...(selectedField.style || {}), color: e.target.value })}
-                        className="flex-1 px-2 py-1 text-xs border border-gray-200 rounded-md font-mono"
+                        className={`flex-1 px-2 py-1 text-xs border border-gray-200 rounded-md font-mono ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                         data-testid="field-text-color-hex"
                       />
                     </div>
@@ -2180,12 +2196,16 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
               )}
               {/* Field Sub-Type (for text) */}
               {selectedField.type === 'text' && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Field Type</label>
+                <div className={propLocked ? 'opacity-50' : ''}>
+                  <label className={`block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between ${propLocked ? 'text-gray-500' : ''}`}>
+                    Field Type
+                    {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                  </label>
                   <select
+                    disabled={propLocked}
                     value={selectedField.fieldSubType || 'single-line'}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'fieldSubType', e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                   >
                     <option value="single-line">Single-Line Text</option>
                     <option value="multi-line">Multi-Line Text</option>
@@ -2695,39 +2715,51 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
               {/* Default Value — only for text (date is auto-filled) */}
               {selectedField.type === 'text' && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Default Value</label>
+                <div className={propLocked ? 'opacity-50' : ''}>
+                  <label className={`block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between ${propLocked ? 'text-gray-500' : ''}`}>
+                    Default Value
+                    {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                  </label>
                   <input
                     type="text"
+                    disabled={propLocked}
                     value={selectedField.defaultValue || ''}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'defaultValue', e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                   />
                 </div>
               )}
 
               {/* Date mode dropdown (alignment + styling now comes from Text Styling section below) */}
               {selectedField.type === 'date' && (
-                <div className="space-y-3">
+                <div className={`space-y-3 ${propLocked ? 'opacity-50' : ''}`}>
                   <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Date Mode</label>
+                    <label className={`block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between ${propLocked ? 'text-gray-500' : ''}`}>
+                      Date Mode
+                      {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                    </label>
                     <select
                       data-testid="date-mode-select"
+                      disabled={propLocked}
                       value={selectedField.dateMode || 'auto'}
                       onChange={(e) => updateFieldProperty(selectedField.id, 'dateMode', e.target.value)}
-                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                      className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                     >
                       <option value="auto">Auto-fill with today's date</option>
                       <option value="manual">Allow manual selection</option>
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-700 mb-1">Date Format</label>
+                    <label className={`block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between ${propLocked ? 'text-gray-500' : ''}`}>
+                      Date Format
+                      {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                    </label>
                     <select
                       data-testid="date-format-select"
+                      disabled={propLocked}
                       value={selectedField.dateFormat || 'MM/DD/YYYY'}
                       onChange={(e) => updateFieldProperty(selectedField.id, 'dateFormat', e.target.value)}
-                      className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                      className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                     >
                       <option value="MM/DD/YYYY">MM/DD/YYYY (e.g. 12/31/2026)</option>
                       <option value="DD/MM/YYYY">DD/MM/YYYY (e.g. 31/12/2026)</option>
@@ -2760,16 +2792,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   templates retain their values and render back-compat). Only
                   the "Default checked" toggle is author-editable now. */}
               {selectedField.type === 'checkbox' && (
-                <div>
+                <div className={propLocked ? 'opacity-50' : ''}>
                   <div className="flex items-center gap-2">
                     <input
                       data-testid="checkbox-default-checked"
                       type="checkbox"
+                      disabled={propLocked}
                       checked={selectedField.checked || false}
                       onChange={(e) => updateFieldProperty(selectedField.id, 'checked', e.target.checked)}
-                      className="w-3.5 h-3.5 text-indigo-600 rounded"
+                      className={`w-3.5 h-3.5 text-indigo-600 rounded ${propLocked ? 'cursor-not-allowed' : ''}`}
                     />
-                    <span className="text-xs text-gray-700">Default checked</span>
+                    <span className={`text-xs text-gray-700 ${propLocked ? 'text-gray-500' : ''}`}>Default checked</span>
                   </div>
                 </div>
               )}
@@ -2778,10 +2811,11 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
               {selectedField.type === 'radio' && (
                 Array.isArray(selectedField.radioOptions) && !selectedField.optionValue && !selectedField.option_value ? (
                   // ═══ Legacy multi-option radio (backward-compat editor) ═══
-                  <div>
+                  <div className={propLocked ? 'opacity-50' : ''}>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="block text-xs font-medium text-gray-700">Radio Options (legacy)</label>
+                      <label className={`block text-xs font-medium text-gray-700 ${propLocked ? 'text-gray-500' : ''}`}>Radio Options (legacy)</label>
                       <button
+                        disabled={propLocked}
                         onClick={() => {
                           // Convert legacy → NEW groupName model. Creates one field per option.
                           const group = `group_${Date.now()}`;
@@ -2792,7 +2826,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           updateFieldProperty(selectedField.id, 'optionLabel', (selectedField.radioOptions || ['Option 1'])[0]);
                           updateFieldProperty(selectedField.id, 'optionValue', (selectedField.radioOptions || ['option_1'])[0].toLowerCase().replace(/\s+/g, '_'));
                         }}
-                        className="text-[10px] text-indigo-600 hover:text-indigo-700 font-medium"
+                        className={`text-[10px] text-indigo-600 hover:text-indigo-700 font-medium ${propLocked ? 'cursor-not-allowed text-gray-400' : ''}`}
                       >
                         Simplify to group model
                       </button>
@@ -2802,20 +2836,22 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         <div key={idx} className="flex items-center gap-1.5">
                           <input
                             type="radio"
+                            disabled={propLocked}
                             name={`radio-preview-${selectedField.id}`}
                             checked={selectedField.selectedOption === opt}
                             onChange={() => updateFieldProperty(selectedField.id, 'selectedOption', opt)}
-                            className="w-3 h-3 text-indigo-600"
+                            className={`w-3 h-3 text-indigo-600 ${propLocked ? 'cursor-not-allowed' : ''}`}
                           />
                           <input
                             type="text"
+                            disabled={propLocked}
                             value={opt}
                             onChange={(e) => {
                               const newOptions = [...(selectedField.radioOptions || [])];
                               newOptions[idx] = e.target.value;
                               updateFieldProperty(selectedField.id, 'radioOptions', newOptions);
                             }}
-                            className="flex-1 px-2 py-1 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-indigo-500"
+                            className={`flex-1 px-2 py-1 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                           />
                           {(selectedField.radioOptions || []).length > 2 && (
                             <button
@@ -2833,26 +2869,28 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                     </div>
                     <button
                       data-testid="add-radio-option-btn"
+                      disabled={propLocked}
                       onClick={() => {
                         const newOptions = [...(selectedField.radioOptions || []), `Option ${(selectedField.radioOptions || []).length + 1}`];
                         updateFieldProperty(selectedField.id, 'radioOptions', newOptions);
                       }}
-                      className="mt-2 text-xs text-indigo-600 hover:text-indigo-700 font-medium"
+                      className={`mt-2 text-xs text-indigo-600 hover:text-indigo-700 font-medium ${propLocked ? 'cursor-not-allowed text-gray-400' : ''}`}
                     >
                       + Add Option
                     </button>
                     <div className="mt-2">
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Layout</label>
+                      <label className={`block text-xs font-medium text-gray-700 mb-1 ${propLocked ? 'text-gray-500' : ''}`}>Layout</label>
                       <div className="flex gap-1">
                         {['vertical', 'horizontal'].map(layout => (
                           <button
                             key={layout}
+                            disabled={propLocked}
                             onClick={() => updateFieldProperty(selectedField.id, 'radioLayout', layout)}
                             className={`flex-1 px-2 py-1 text-xs font-medium rounded-md transition-colors capitalize ${
                               (selectedField.radioLayout || 'vertical') === layout
                                 ? 'bg-indigo-600 text-white'
                                 : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                            }`}
+                            } ${propLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
                           >
                             {layout}
                           </button>
@@ -2867,14 +2905,15 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       <strong>Radio Group</strong> — all radio fields sharing the same <em>Group Name</em> behave as a single-select group. Drop another <em>Radio Group</em> field and set the same Group Name to add another option.
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-gray-700 mb-1">Group Name</label>
+                      <label className={`block text-xs font-medium text-gray-700 mb-1 ${propLocked ? 'text-gray-500' : ''}`}>Group Name</label>
                       <input
                         type="text"
+                        disabled={propLocked}
                         data-testid="radio-group-name-input"
                         value={selectedField.groupName || ''}
                         onChange={(e) => updateFieldProperty(selectedField.id, 'groupName', e.target.value)}
                         placeholder="e.g. preferred_contact"
-                        className="w-full px-2 py-1.5 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-indigo-500"
+                        className={`w-full px-2 py-1.5 text-xs border border-gray-200 rounded focus:ring-1 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                       />
                       <p className="mt-0.5 text-[10px] text-gray-500">All radios with this group name will be single-select.</p>
                     </div>
@@ -2886,9 +2925,10 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         verbatim — no data loss. */}
                     {/* Default selection — enforces single default per group */}
                     <div className="pt-2 border-t border-gray-100 space-y-2">
-                      <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer" data-testid="radio-default-checked-wrap">
+                      <label className={`flex items-center gap-2 text-xs text-gray-700 cursor-pointer ${propLocked ? 'opacity-50 text-gray-500' : ''}`} data-testid="radio-default-checked-wrap">
                         <input
                           type="checkbox"
+                          disabled={propLocked}
                           data-testid="radio-default-checked"
                           checked={!!selectedField.defaultChecked}
                           onChange={(e) => {
@@ -2910,24 +2950,26 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                               return updated;
                             });
                           }}
-                          className="w-3.5 h-3.5 text-indigo-600 rounded"
+                          className={`w-3.5 h-3.5 text-indigo-600 rounded ${propLocked ? 'cursor-not-allowed' : ''}`}
                         />
                         Default-selected option
                         <span className="text-[10px] text-gray-400">(signer can change)</span>
                       </label>
-                      <label className="flex items-center gap-2 text-xs text-gray-700 cursor-pointer" data-testid="radio-hide-label-wrap">
+                      <label className={`flex items-center gap-2 text-xs text-gray-700 cursor-pointer ${propLocked ? 'opacity-50 text-gray-500' : ''}`} data-testid="radio-hide-label-wrap">
                         <input
                           type="checkbox"
+                          disabled={propLocked}
                           data-testid="radio-hide-label"
                           checked={!!selectedField.hideLabelOnFinal}
                           onChange={(e) => updateFieldProperty(selectedField.id, 'hideLabelOnFinal', e.target.checked)}
-                          className="w-3.5 h-3.5 text-indigo-600 rounded"
+                          className={`w-3.5 h-3.5 text-indigo-600 rounded ${propLocked ? 'cursor-not-allowed' : ''}`}
                         />
                         Hide option label on completed document
                       </label>
                     </div>
                     <button
                       data-testid="duplicate-radio-option-btn"
+                      disabled={propLocked}
                       onClick={() => {
                         // Quick action: duplicate this field as a new option in the same group
                         const sourceGroup = selectedField.groupName || `group_${Date.now()}`;
@@ -2955,7 +2997,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                         setSelectedFieldId(newField.id);
                         syncToParent(updated);
                       }}
-                      className="w-full text-xs text-indigo-600 hover:text-indigo-700 font-medium py-1.5 border border-indigo-200 rounded hover:bg-indigo-50"
+                      className={`w-full text-xs text-indigo-600 hover:text-indigo-700 font-medium py-1.5 border border-indigo-200 rounded hover:bg-indigo-50 ${propLocked ? 'opacity-50 cursor-not-allowed text-gray-400' : ''}`}
                     >
                       + Duplicate as another option in this group
                     </button>
@@ -2965,13 +3007,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
               {/* Placeholder */}
               {['text', 'date', 'signature', 'initials'].includes(selectedField.type) && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Placeholder</label>
+                <div className={propLocked ? 'opacity-50' : ''}>
+                  <label className={`block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between ${propLocked ? 'text-gray-500' : ''}`}>
+                    Placeholder
+                    {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                  </label>
                   <input
                     type="text"
+                    disabled={propLocked}
                     value={selectedField.placeholder || ''}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'placeholder', e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                     placeholder="Enter placeholder..."
                   />
                 </div>
@@ -2979,13 +3025,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
               {/* Character Limit */}
               {selectedField.type === 'text' && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Character Limit</label>
+                <div className={propLocked ? 'opacity-50' : ''}>
+                  <label className={`block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between ${propLocked ? 'text-gray-500' : ''}`}>
+                    Character Limit
+                    {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                  </label>
                   <input
                     type="number"
+                    disabled={propLocked}
                     value={selectedField.characterLimit || 100}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'characterLimit', parseInt(e.target.value) || 100)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                     min="1"
                     max="5000"
                   />
@@ -2994,12 +3044,16 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
               {/* Validation */}
               {selectedField.type === 'text' && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Validation</label>
+                <div className={propLocked ? 'opacity-50' : ''}>
+                  <label className={`block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between ${propLocked ? 'text-gray-500' : ''}`}>
+                    Validation
+                    {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                  </label>
                   <select
+                    disabled={propLocked}
                     value={selectedField.validation || 'none'}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'validation', e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                   >
                     <option value="none">None</option>
                     <option value="email">Email</option>
@@ -3013,13 +3067,17 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
               {/* Help Text */}
               {selectedField.type !== 'label' && (
-                <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">Help Text</label>
+                <div className={propLocked ? 'opacity-50' : ''}>
+                  <label className={`block text-xs font-medium text-gray-700 mb-1 flex items-center justify-between ${propLocked ? 'text-gray-500' : ''}`}>
+                    Help Text
+                    {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
+                  </label>
                   <input
                     type="text"
+                    disabled={propLocked}
                     value={selectedField.helpText || ''}
                     onChange={(e) => updateFieldProperty(selectedField.id, 'helpText', e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"
+                    className={`w-full px-2.5 py-1.5 text-sm border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-50' : ''}`}
                     placeholder="Optional help text"
                   />
                 </div>
@@ -3060,15 +3118,16 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
 
               {/* Conditional Logic — for all field types */}
               {['checkbox', 'radio', 'text', 'date', 'signature', 'initials'].includes(selectedField.type) && (
-                <div className="border-t border-gray-100 pt-3 mt-2" data-testid="conditional-logic-section">
-                  <label className="block text-xs font-semibold text-gray-800 mb-2 flex items-center gap-1.5">
+                <div className={`border-t border-gray-100 pt-3 mt-2 ${propLocked ? 'opacity-50' : ''}`} data-testid="conditional-logic-section">
+                  <label className={`block text-xs font-semibold text-gray-800 mb-2 flex items-center gap-1.5 ${propLocked ? 'text-gray-500' : ''}`}>
                     <svg className="h-3.5 w-3.5 text-indigo-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="currentColor"/><circle cx="15" cy="12" r="2" fill="currentColor"/><circle cx="9" cy="18" r="2" fill="currentColor"/></svg>
                     Conditional Logic
+                    {propLocked && <Lock className="h-3 w-3 text-indigo-500" />}
                   </label>
-                  <p className="text-[10px] text-gray-400 mb-2">Show/hide fields based on this field's value</p>
+                  <p className={`text-[10px] mb-2 ${propLocked ? 'text-gray-400' : 'text-gray-400'}`}>Show/hide fields based on this field's value</p>
 
                   {(selectedField.conditionalRules || []).map((rule, rIdx) => (
-                    <div key={rIdx} className="bg-gray-50 rounded-md p-2.5 mb-2 border border-gray-200">
+                    <div key={rIdx} className={`bg-gray-50 rounded-md p-2.5 mb-2 border border-gray-200 ${propLocked ? 'opacity-50' : ''}`}>
                       <div className="flex items-center gap-1.5 mb-1.5">
                         <span className="text-[10px] font-semibold text-gray-500">IF</span>
                         <span className="flex-1 text-[10px] font-medium text-indigo-600">
@@ -3080,24 +3139,26 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                            `= "${rule.triggerValue || ''}"`}
                         </span>
                         <button
+                          disabled={propLocked}
                           onClick={() => {
                             const newRules = (selectedField.conditionalRules || []).filter((_, i) => i !== rIdx);
                             updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                           }}
-                          className="text-gray-400 hover:text-red-500"
+                          className={`text-gray-400 hover:text-red-500 ${propLocked ? 'cursor-not-allowed' : ''}`}
                         >
                           <X className="h-3 w-3" />
                         </button>
                       </div>
                       {selectedField.type === 'checkbox' && (
                         <select
+                          disabled={propLocked}
                           value={rule.triggerValue ? 'true' : 'false'}
                           onChange={(e) => {
                             const newRules = [...(selectedField.conditionalRules || [])];
                             newRules[rIdx] = { ...rule, triggerValue: e.target.value === 'true' };
                             updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                           }}
-                          className="w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5"
+                          className={`w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-100' : ''}`}
                         >
                           <option value="true">When checked</option>
                           <option value="false">When unchecked</option>
@@ -3106,13 +3167,14 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       {selectedField.type === 'radio' && (
                         Array.isArray(selectedField.radioOptions) && !selectedField.optionValue ? (
                           <select
+                            disabled={propLocked}
                             value={rule.triggerValue || ''}
                             onChange={(e) => {
                               const newRules = [...(selectedField.conditionalRules || [])];
                               newRules[rIdx] = { ...rule, triggerValue: e.target.value };
                               updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                             }}
-                            className="w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5"
+                            className={`w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-100' : ''}`}
                           >
                             <option value="">Select option...</option>
                             {(selectedField.radioOptions || []).map((opt, i) => (
@@ -3128,13 +3190,14 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       {selectedField.type === 'text' && (
                         <div className="space-y-1.5 mb-1.5">
                           <select
+                            disabled={propLocked}
                             value={rule.triggerCondition || 'filled'}
                             onChange={(e) => {
                               const newRules = [...(selectedField.conditionalRules || [])];
                               newRules[rIdx] = { ...rule, triggerCondition: e.target.value, triggerValue: ['filled', 'empty'].includes(e.target.value) ? e.target.value : '' };
                               updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                             }}
-                            className="w-full px-2 py-1 text-[10px] border border-gray-200 rounded"
+                            className={`w-full px-2 py-1 text-[10px] border border-gray-200 rounded ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-100' : ''}`}
                           >
                             <option value="filled">Has value</option>
                             <option value="empty">Is empty</option>
@@ -3144,6 +3207,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                           {['equals', 'contains'].includes(rule.triggerCondition) && (
                             <input
                               type="text"
+                              disabled={propLocked}
                               value={rule.triggerValue || ''}
                               onChange={(e) => {
                                 const newRules = [...(selectedField.conditionalRules || [])];
@@ -3151,20 +3215,21 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                                 updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                               }}
                               placeholder="Enter value..."
-                              className="w-full px-2 py-1 text-[10px] border border-gray-200 rounded"
+                              className={`w-full px-2 py-1 text-[10px] border border-gray-200 rounded ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-100' : ''}`}
                             />
                           )}
                         </div>
                       )}
                       {selectedField.type === 'date' && (
                         <select
+                          disabled={propLocked}
                           value={rule.triggerCondition || 'filled'}
                           onChange={(e) => {
                             const newRules = [...(selectedField.conditionalRules || [])];
                             newRules[rIdx] = { ...rule, triggerCondition: e.target.value, triggerValue: e.target.value };
                             updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                           }}
-                          className="w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5"
+                          className={`w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-100' : ''}`}
                         >
                           <option value="filled">Has date</option>
                           <option value="empty">Is empty</option>
@@ -3172,13 +3237,14 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       )}
                       {['signature', 'initials'].includes(selectedField.type) && (
                         <select
+                          disabled={propLocked}
                           value={rule.triggerValue || 'filled'}
                           onChange={(e) => {
                             const newRules = [...(selectedField.conditionalRules || [])];
                             newRules[rIdx] = { ...rule, triggerValue: e.target.value };
                             updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                           }}
-                          className="w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5"
+                          className={`w-full px-2 py-1 text-[10px] border border-gray-200 rounded mb-1.5 ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-100' : ''}`}
                         >
                           <option value="filled">When signed</option>
                           <option value="empty">When empty</option>
@@ -3187,19 +3253,21 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       <div className="flex items-center gap-1.5 mb-1.5">
                         <span className="text-[10px] font-semibold text-gray-500">THEN</span>
                         <select
+                          disabled={propLocked}
                           value={rule.action || 'show'}
                           onChange={(e) => {
                             const newRules = [...(selectedField.conditionalRules || [])];
                             newRules[rIdx] = { ...rule, action: e.target.value };
                             updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                           }}
-                          className="px-1.5 py-0.5 text-[10px] border border-gray-200 rounded"
+                          className={`px-1.5 py-0.5 text-[10px] border border-gray-200 rounded ${propLocked ? 'opacity-50 cursor-not-allowed bg-gray-100' : ''}`}
                         >
                           <option value="show">Show</option>
                           <option value="hide">Hide</option>
                         </select>
                       </div>
                       <SearchableSelect
+                        disabled={propLocked}
                         options={droppedFields.filter(f => f.id !== selectedField.id).map(f => ({
                           label: f.label || f.name || f.id,
                           value: f.id,
@@ -3216,6 +3284,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                   ))}
                   <button
                     data-testid="add-condition-btn"
+                    disabled={propLocked}
                     onClick={() => {
                       const isNewRadio = selectedField.type === 'radio' && (selectedField.groupName || selectedField.optionValue) && !Array.isArray(selectedField.radioOptions);
                       const newRule = {
@@ -3233,7 +3302,7 @@ const MultiPageVisualBuilder = ({ pdfFile, fields, onFieldsChange, crmObjects, c
                       const newRules = [...(selectedField.conditionalRules || []), newRule];
                       updateFieldProperty(selectedField.id, 'conditionalRules', newRules);
                     }}
-                    className="text-xs text-indigo-600 hover:text-indigo-700 font-medium"
+                    className={`text-xs text-indigo-600 hover:text-indigo-700 font-medium ${propLocked ? 'cursor-not-allowed text-gray-400' : ''}`}
                   >
                     + Add Condition
                   </button>
