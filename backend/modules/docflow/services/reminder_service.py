@@ -52,7 +52,11 @@ CHECK_INTERVAL_SECONDS = int(os.environ.get("DOCFLOW_REMINDER_CHECK_INTERVAL_SEC
 MAX_BATCH_PER_TICK = int(os.environ.get("DOCFLOW_REMINDER_BATCH_PER_TICK", "100"))
 
 VALID_UNITS = {"seconds", "minutes", "hours", "days", "weeks", "months", "years"}
-TERMINAL_RECIPIENT_STATUSES = {"completed", "declined", "rejected", "expired"}
+TERMINAL_RECIPIENT_STATUSES = {
+    "completed", "declined", "rejected", "expired",
+    # Template-flow terminal statuses (signed/approved/reviewed recipients must never get reminders)
+    "signed", "approved", "reviewed",
+}
 
 
 def _utcnow() -> datetime:

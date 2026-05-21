@@ -1417,6 +1417,13 @@ async def document_role_action(document_id: str, request: Request):
         {"$set": update_set}
     )
 
+    # Stop pending-signature reminders for this recipient immediately.
+    try:
+        from ..services.reminder_service import cancel_recipient_reminders
+        await cancel_recipient_reminders(db, document_id, matched.get("id"), reason="completed")
+    except Exception as _rem_err:
+        logger.warning(f"[document_role_action] Failed to cancel reminders for recipient {matched.get('id')}: {_rem_err}")
+
     # If rejected, mark document as declined with reason
     if action == "reject":
         await db.docflow_documents.update_one(

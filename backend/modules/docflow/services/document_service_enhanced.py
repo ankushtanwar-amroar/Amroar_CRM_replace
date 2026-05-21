@@ -996,6 +996,13 @@ class EnhancedDocumentService:
                 }
             )
 
+            # Stop pending-signature reminders for this recipient immediately.
+            try:
+                from .reminder_service import cancel_recipient_reminders
+                await cancel_recipient_reminders(self.db, document_id, active_recipient_id, reason="completed")
+            except Exception as _rem_err:
+                logger.warning(f"[add_signature_with_pdf] Failed to cancel reminders for recipient {active_recipient_id}: {_rem_err}")
+
             # Append signature records for signature + initials fields
             existing_signatures = document.get("signatures", []) or []
             signatures_to_add: List[Dict[str, Any]] = []
